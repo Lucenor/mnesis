@@ -15,15 +15,15 @@ LLMs suffer from **context rot**: accuracy degrades 30–40% before hitting nomi
 
 The standard fix — telling the model to "summarize itself" — is unreliable. The model may silently drop constraints, forget file paths, or produce a summary that is itself too large.
 
-**mnesis** solves this by making the *engine* — not the model — responsible for memory.
+**mnesis** solves this by making the *engine* — not the model — responsible for memory. It is a Python implementation of the [LCM: Lossless Context Management](docs/LCM.pdf) architecture.
 
 ---
 
 ## Benchmarks
 
-Evaluated on [OOLONG](https://github.com/Bertram-et-al/OOLONG), a long-context reasoning and aggregation benchmark. Both mnesis and Claude Code are built on Claude Opus 4.6; the gap comes entirely from context architecture.
+Evaluated on [OOLONG](https://github.com/abertsch72/oolong), a long-context reasoning and aggregation benchmark. Both LCM-managed and Claude Code agents are built on Claude Opus 4.6; the gap comes entirely from context architecture.
 
-> The charts below compare mnesis against Claude Code and unmanaged Opus 4.6 across context lengths from 8K to 1M tokens.
+> The charts below compare LCM-managed context against Claude Code and unmanaged Opus 4.6 across context lengths from 8K to 1M tokens.
 
 **Score improvement over raw Opus 4.6 at each context length:**
 
