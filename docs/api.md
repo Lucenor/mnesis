@@ -154,6 +154,96 @@ Send a user message and receive an assistant response.
 
 ---
 
+### `session.record()`
+
+```python
+async def record(
+    self,
+    user_message: str | list[MessagePart],
+    assistant_response: str | list[MessagePart],
+    *,
+    tokens: TokenUsage | None = None,
+    finish_reason: str = "stop",
+) -> RecordResult
+```
+
+Persist a completed user/assistant turn **without making an LLM call**.
+
+Use this when you manage LLM calls yourself (using the Anthropic, OpenAI, Gemini, or any other SDK directly) and only want mnesis to handle memory, context assembly, and compaction.
+
+**Args:**
+- `user_message`: User message text or list of `MessagePart` objects
+- `assistant_response`: Assistant reply text or list of `MessagePart` objects
+- `tokens`: Token usage for the turn. Estimated from text length if omitted
+- `finish_reason`: Finish reason from your LLM response. Defaults to `"stop"`
+
+**Returns:** `RecordResult`
+
+**Example — using the Anthropic SDK directly:**
+
+```python
+import anthropic
+from mnesis import MnesisSession, TokenUsage
+
+client = anthropic.Anthropic()
+session = await MnesisSession.create(model="anthropic/claude-opus-4-6")
+
+user_text = "Explain quantum entanglement."
+response = client.messages.create(
+    model="claude-opus-4-6",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": user_text}],
+)
+
+await session.record(
+    user_message=user_text,
+    assistant_response=response.content[0].text,
+    tokens=TokenUsage(
+        input=response.usage.input_tokens,
+        output=response.usage.output_tokens,
+    ),
+)
+```
+
+**Example — using the OpenAI SDK directly:**
+
+```python
+from openai import AsyncOpenAI
+from mnesis import MnesisSession, TokenUsage
+
+client = AsyncOpenAI()
+session = await MnesisSession.create(model="openai/gpt-4o")
+
+user_text = "What is the capital of France?"
+response = await client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": user_text}],
+)
+
+await session.record(
+    user_message=user_text,
+    assistant_response=response.choices[0].message.content,
+    tokens=TokenUsage(
+        input=response.usage.prompt_tokens,
+        output=response.usage.completion_tokens,
+    ),
+)
+```
+
+Compaction is triggered automatically after `record()` if cumulative token usage exceeds the model's context budget, exactly as with `send()`.
+
+### `RecordResult`
+
+```python
+class RecordResult(BaseModel):
+    user_message_id: str       # Persisted user message ID
+    assistant_message_id: str  # Persisted assistant message ID
+    tokens: TokenUsage         # Token usage for the turn (provided or estimated)
+    compaction_triggered: bool # True if compaction was scheduled after recording
+```
+
+---
+
 ### `session.messages()`
 
 ```python

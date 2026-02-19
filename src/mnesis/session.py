@@ -19,6 +19,7 @@ from mnesis.models.message import (
     Message,
     MessagePart,
     MessageWithParts,
+    RecordResult,
     TextPart,
     TokenUsage,
     TurnResult,
@@ -486,6 +487,155 @@ class MnesisSession:
                 {"session_id": self._session_id, "tool": first[0]},
             )
         return detected
+
+    async def record(
+        self,
+        user_message: str | list[MessagePart],
+        assistant_response: str | list[MessagePart],
+        *,
+        tokens: TokenUsage | None = None,
+        finish_reason: str = "stop",
+    ) -> RecordResult:
+        """
+        Persist a completed user/assistant turn without making an LLM call.
+
+        Use this when you manage LLM calls yourself (e.g. using the Anthropic,
+        OpenAI, or Gemini SDKs directly) and only want mnesis to handle
+        memory, context assembly, and compaction.
+
+        Args:
+            user_message: The user message text or parts to record.
+            assistant_response: The assistant reply text or parts to record.
+            tokens: Token usage for the turn. Estimated from text if omitted.
+            finish_reason: The finish reason from your LLM response (e.g.
+                ``"stop"``, ``"max_tokens"``). Defaults to ``"stop"``.
+
+        Returns:
+            RecordResult with the persisted message IDs and token usage.
+
+        Example::
+
+            import anthropic
+            from mnesis import MnesisSession
+            from mnesis.models.message import TokenUsage
+
+            client = anthropic.Anthropic()
+            session = await MnesisSession.create(model="anthropic/claude-opus-4-6")
+
+            user_text = "Explain quantum entanglement."
+            response = client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": user_text}],
+            )
+            result = await session.record(
+                user_message=user_text,
+                assistant_response=response.content[0].text,
+                tokens=TokenUsage(
+                    input=response.usage.input_tokens,
+                    output=response.usage.output_tokens,
+                ),
+            )
+        """
+        # Normalise inputs to part lists
+        if isinstance(user_message, str):
+            user_parts: list[MessagePart] = [TextPart(text=user_message)]
+        else:
+            user_parts = list(user_message)
+
+        if isinstance(assistant_response, str):
+            assistant_parts: list[MessagePart] = [TextPart(text=assistant_response)]
+        else:
+            assistant_parts = list(assistant_response)
+
+        # Persist user message
+        user_msg_id = make_id("msg")
+        user_msg = Message(
+            id=user_msg_id,
+            session_id=self._session_id,
+            role="user",
+            agent=self._agent,
+            model_id=self._model,
+        )
+        await self._store.append_message(user_msg)
+        for part in user_parts:
+            raw = RawMessagePart(
+                id=make_id("part"),
+                message_id=user_msg_id,
+                session_id=self._session_id,
+                part_type=part.type,
+                content=json.dumps(part.model_dump()),
+            )
+            await self._store.append_part(raw)
+
+        self._event_bus.publish(
+            MnesisEvent.MESSAGE_CREATED, {"message_id": user_msg_id, "role": "user"}
+        )
+
+        # Persist assistant message
+        assistant_msg_id = make_id("msg")
+        assistant_msg = Message(
+            id=assistant_msg_id,
+            session_id=self._session_id,
+            role="assistant",
+            agent=self._agent,
+            model_id=self._model,
+            provider_id=self._model_info.provider_id,
+        )
+        await self._store.append_message(assistant_msg)
+
+        assistant_text = ""
+        for part in assistant_parts:
+            token_estimate = 0
+            if isinstance(part, TextPart):
+                assistant_text += part.text
+                token_estimate = self._estimator.estimate(part.text, self._model_info)
+            raw = RawMessagePart(
+                id=make_id("part"),
+                message_id=assistant_msg_id,
+                session_id=self._session_id,
+                part_type=part.type,
+                content=json.dumps(part.model_dump()),
+                token_estimate=token_estimate,
+            )
+            await self._store.append_part(raw)
+
+        # Resolve token usage — estimate from text if not provided
+        if tokens is None:
+            user_text = " ".join(p.text for p in user_parts if isinstance(p, TextPart))
+            tokens = TokenUsage(
+                input=self._estimator.estimate(user_text, self._model_info),
+                output=self._estimator.estimate(assistant_text, self._model_info),
+            )
+
+        await self._store.update_message_tokens(assistant_msg_id, tokens, 0.0, finish_reason)
+
+        self._cumulative_tokens = self._cumulative_tokens + tokens
+
+        self._event_bus.publish(
+            MnesisEvent.MESSAGE_CREATED,
+            {"message_id": assistant_msg_id, "role": "assistant"},
+        )
+
+        # Check for overflow and trigger compaction
+        compaction_triggered = False
+        if self._compaction_engine.is_overflow(self._cumulative_tokens, self._model_info):
+            compaction_triggered = self._compaction_engine.check_and_trigger(
+                self._session_id, self._cumulative_tokens, self._model_info
+            )
+
+        self._logger.info(
+            "turn_recorded",
+            user_message_id=user_msg_id,
+            assistant_message_id=assistant_msg_id,
+        )
+
+        return RecordResult(
+            user_message_id=user_msg_id,
+            assistant_message_id=assistant_msg_id,
+            tokens=tokens,
+            compaction_triggered=compaction_triggered,
+        )
 
     async def messages(self) -> list[MessageWithParts]:
         """
