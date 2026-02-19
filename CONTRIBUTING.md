@@ -167,5 +167,3 @@ Open a [GitHub issue](https://github.com/Lucenor/mnesis/issues) with:
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache 2.0 License](LICENSE).
-
-Copyright 2026 ByteWorks LLC-FZ. See [NOTICE](NOTICE) for details.
