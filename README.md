@@ -1,12 +1,12 @@
 <p align="center">
-  <h1 align="center">mnesis</h1>
-  <p align="center"><em>Lossless Context Management for long-horizon LLM agents</em></p>
-  <p align="center">
-    <a href="https://pypi.org/project/mnesis/"><img src="https://img.shields.io/pypi/v/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="PyPI"></a>
-    <a href="https://pypi.org/project/mnesis/"><img src="https://img.shields.io/pypi/pyversions/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="Python"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-5c6bc0?labelColor=1a1a2e" alt="License"></a>
-    <a href="https://github.com/Lucenor/mnesis/actions"><img src="https://img.shields.io/github/actions/workflow/status/Lucenor/mnesis/ci.yml?color=5c6bc0&labelColor=1a1a2e" alt="CI"></a>
-  </p>
+  <img src="docs/images/logo_icon.png" alt="mnesis logo" width="120"><br><br>
+  <img src="docs/images/logo_wordmark.png" alt="mnesis" width="320"><br><br>
+  <em>Lossless Context Management for long-horizon LLM agents</em>
+  <br><br>
+  <a href="https://pypi.org/project/mnesis/"><img src="https://img.shields.io/pypi/v/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="PyPI"></a>
+  <a href="https://pypi.org/project/mnesis/"><img src="https://img.shields.io/pypi/pyversions/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-5c6bc0?labelColor=1a1a2e" alt="License"></a>
+  <a href="https://github.com/Lucenor/mnesis/actions"><img src="https://img.shields.io/github/actions/workflow/status/Lucenor/mnesis/ci.yml?color=5c6bc0&labelColor=1a1a2e" alt="CI"></a>
 </p>
 
 ---
