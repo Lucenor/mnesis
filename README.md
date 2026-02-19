@@ -164,5 +164,3 @@ Open an issue before starting large changes — it avoids duplicated effort.
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
-
-Copyright 2026 ByteWorks LLC-FZ.
