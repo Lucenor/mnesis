@@ -176,3 +176,96 @@ class TestMnesisSession:
 
         assert isinstance(result, CompactionResult)
         assert result.session_id != ""
+
+    async def test_record_persists_user_and_assistant_messages(self, tmp_path):
+        """record() stores both messages without making an LLM call."""
+        from mnesis import MnesisSession, RecordResult
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            result = await session.record(
+                user_message="What is the capital of France?",
+                assistant_response="The capital of France is Paris.",
+            )
+            messages = await session.messages()
+
+        assert isinstance(result, RecordResult)
+        assert result.user_message_id.startswith("msg_")
+        assert result.assistant_message_id.startswith("msg_")
+        assert len(messages) == 2
+        assert messages[0].role == "user"
+        assert messages[1].role == "assistant"
+        assert messages[1].text_content() == "The capital of France is Paris."
+
+    async def test_record_accepts_explicit_token_usage(self, tmp_path):
+        """record() uses provided token usage and accumulates it."""
+        from mnesis import MnesisSession, TokenUsage
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            await session.record(
+                user_message="Hello",
+                assistant_response="Hi there!",
+                tokens=TokenUsage(input=10, output=5),
+            )
+            usage = session.token_usage
+
+        assert usage.input == 10
+        assert usage.output == 5
+
+    async def test_record_estimates_tokens_when_not_provided(self, tmp_path):
+        """record() estimates token usage when tokens arg is omitted."""
+        from mnesis import MnesisSession
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            result = await session.record(
+                user_message="Tell me about the moon.",
+                assistant_response="The moon is Earth's only natural satellite.",
+            )
+
+        assert result.tokens.input > 0
+        assert result.tokens.output > 0
+
+    async def test_record_publishes_message_created_events(self, tmp_path):
+        """record() publishes MESSAGE_CREATED for both user and assistant."""
+        from mnesis import MnesisSession
+        from mnesis.events.bus import MnesisEvent
+
+        events = []
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            session.event_bus.subscribe_all(lambda e, p: events.append((e, p)))
+            await session.record(
+                user_message="Ping",
+                assistant_response="Pong",
+            )
+
+        message_events = [e for e, _ in events if e == MnesisEvent.MESSAGE_CREATED]
+        assert len(message_events) == 2
+
+    async def test_record_accepts_message_parts(self, tmp_path):
+        """record() accepts list[MessagePart] for both arguments."""
+        from mnesis import MnesisSession
+        from mnesis.models.message import TextPart
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            result = await session.record(
+                user_message=[TextPart(text="Hello from parts")],
+                assistant_response=[TextPart(text="Reply from parts")],
+            )
+
+        assert result.user_message_id.startswith("msg_")
+        assert result.assistant_message_id.startswith("msg_")

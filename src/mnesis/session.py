@@ -602,17 +602,13 @@ class MnesisSession:
 
         # Resolve token usage — estimate from text if not provided
         if tokens is None:
-            user_text = " ".join(
-                p.text for p in user_parts if isinstance(p, TextPart)
-            )
+            user_text = " ".join(p.text for p in user_parts if isinstance(p, TextPart))
             tokens = TokenUsage(
                 input=self._estimator.estimate(user_text, self._model_info),
                 output=self._estimator.estimate(assistant_text, self._model_info),
             )
 
-        await self._store.update_message_tokens(
-            assistant_msg_id, tokens, 0.0, finish_reason
-        )
+        await self._store.update_message_tokens(assistant_msg_id, tokens, 0.0, finish_reason)
 
         self._cumulative_tokens = self._cumulative_tokens + tokens
 
