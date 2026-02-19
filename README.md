@@ -202,6 +202,7 @@ MNESIS_MOCK_LLM=1 uv run python examples/05_parallel_processing.py
 | `examples/03_tool_use.py` | Tool lifecycle, `ToolPart` streaming states, tombstone inspection |
 | `examples/04_large_files.py` | `LargeFileHandler`, `FileRefPart`, cache hits, exploration summaries |
 | `examples/05_parallel_processing.py` | `LLMMap` with Pydantic schema, `AgenticMap` sub-sessions |
+| `examples/06_byo_llm.py` | `record()` — BYO-LLM, inject turns from your own SDK |
 
 ---
 

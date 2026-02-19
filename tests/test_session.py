@@ -8,14 +8,16 @@ from mnesis.events.bus import MnesisEvent
 from mnesis.models.message import TextPart
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def mock_llm_env(monkeypatch):
-    """Enable mock LLM mode for all session tests."""
+    """Enable mock LLM mode for send()-based session tests."""
     monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
 
 
 class TestMnesisSession:
-    async def test_create_returns_valid_session_id(self, tmp_path):
+    """Tests for send()-based session flows. Require MNESIS_MOCK_LLM."""
+
+    async def test_create_returns_valid_session_id(self, tmp_path, mock_llm_env):
         """Session ID has correct ULID format with prefix."""
         from mnesis import MnesisSession
 
@@ -26,7 +28,7 @@ class TestMnesisSession:
         assert session.id.startswith("sess_")
         await session.close()
 
-    async def test_send_appends_user_and_assistant_messages(self, tmp_path):
+    async def test_send_appends_user_and_assistant_messages(self, tmp_path, mock_llm_env):
         """send() stores both user and assistant messages."""
         from mnesis import MnesisSession
 
@@ -43,7 +45,7 @@ class TestMnesisSession:
         assert "user" in roles
         assert "assistant" in roles
 
-    async def test_send_returns_turn_result(self, tmp_path):
+    async def test_send_returns_turn_result(self, tmp_path, mock_llm_env):
         """send() returns a TurnResult with expected fields."""
         from mnesis import MnesisSession
 
@@ -58,7 +60,7 @@ class TestMnesisSession:
         assert len(result.text) > 0
         assert result.finish_reason in ("stop", "end_turn", "error")
 
-    async def test_send_streaming_calls_on_part(self, tmp_path):
+    async def test_send_streaming_calls_on_part(self, tmp_path, mock_llm_env):
         """on_part callback is called during streaming."""
         from mnesis import MnesisSession
 
@@ -76,7 +78,7 @@ class TestMnesisSession:
         assert len(received_parts) > 0
         assert any(isinstance(p, TextPart) for p in received_parts)
 
-    async def test_load_restores_session(self, tmp_path):
+    async def test_load_restores_session(self, tmp_path, mock_llm_env):
         """load() can resume a session from the database."""
         from mnesis import MnesisSession
 
@@ -94,7 +96,7 @@ class TestMnesisSession:
         assert len(messages) >= 2
         await session2.close()
 
-    async def test_context_manager_closes_on_exception(self, tmp_path):
+    async def test_context_manager_closes_on_exception(self, tmp_path, mock_llm_env):
         """Session is closed even when send() raises."""
         from mnesis import MnesisSession
 
@@ -114,7 +116,7 @@ class TestMnesisSession:
         # Calling close again should not raise
         await session.close()
 
-    async def test_event_bus_session_created(self, tmp_path):
+    async def test_event_bus_session_created(self, tmp_path, mock_llm_env):
         """SESSION_CREATED event is published on create()."""
         from mnesis import MnesisSession
 
@@ -131,7 +133,7 @@ class TestMnesisSession:
         # Events after subscribe should include message events
         assert MnesisEvent.MESSAGE_CREATED in events
 
-    async def test_messages_returns_full_history(self, tmp_path):
+    async def test_messages_returns_full_history(self, tmp_path, mock_llm_env):
         """messages() includes all turns in chronological order."""
         from mnesis import MnesisSession
 
@@ -147,7 +149,7 @@ class TestMnesisSession:
         # 3 user + 3 assistant = 6 messages
         assert len(msgs) >= 6
 
-    async def test_token_usage_accumulates(self, tmp_path):
+    async def test_token_usage_accumulates(self, tmp_path, mock_llm_env):
         """token_usage increases with each send() call."""
         from mnesis import MnesisSession
 
@@ -162,7 +164,7 @@ class TestMnesisSession:
 
         assert usage_after_2 > usage_after_1
 
-    async def test_manual_compact_returns_result(self, tmp_path):
+    async def test_manual_compact_returns_result(self, tmp_path, mock_llm_env):
         """compact() runs synchronously and returns CompactionResult."""
         from mnesis import CompactionResult, MnesisSession
 
@@ -176,6 +178,10 @@ class TestMnesisSession:
 
         assert isinstance(result, CompactionResult)
         assert result.session_id != ""
+
+
+class TestMnesisSessionRecord:
+    """Tests for record() — no LLM calls, no MNESIS_MOCK_LLM required."""
 
     async def test_record_persists_user_and_assistant_messages(self, tmp_path):
         """record() stores both messages without making an LLM call."""
