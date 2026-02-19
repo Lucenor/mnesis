@@ -214,3 +214,4 @@ specs/
 *.sqlite3
 coverage.xml
 .claude/
+site/
