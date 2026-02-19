@@ -134,14 +134,18 @@ Operators (independent of session)
 
 ## Contributing
 
+Contributions are welcome — bug reports, feature requests, and pull requests alike.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. The short version:
+
 ```bash
-# Install with dev dependencies
+# Clone and install with dev dependencies
+git clone https://github.com/Lucenor/mnesis.git
+cd mnesis
 uv sync --dev
 
-# Lint
+# Lint + format
 uv run ruff check src/ tests/
-
-# Format
 uv run ruff format src/ tests/
 
 # Type check
@@ -155,8 +159,10 @@ MNESIS_MOCK_LLM=1 uv run python examples/01_basic_session.py
 MNESIS_MOCK_LLM=1 uv run python examples/05_parallel_processing.py
 ```
 
-Coverage threshold: 80%. All public methods require Google-style docstrings.
+Open an issue before starting large changes — it avoids duplicated effort.
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Copyright 2026 ByteWorks LLC-FZ.
