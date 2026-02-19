@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Lossless Context Management — persistent memory for LLM agent sessions"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Mnesis Authors" }]
 keywords = ["llm", "context", "memory", "agents", "compaction"]
 classifiers = [
