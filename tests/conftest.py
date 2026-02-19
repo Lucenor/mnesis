@@ -109,14 +109,16 @@ def make_raw_part(
         if part_type == "text":
             content = json.dumps({"type": "text", "text": "Hello world"})
         elif part_type == "tool":
-            content = json.dumps({
-                "type": "tool",
-                "tool_name": tool_name or "test_tool",
-                "tool_call_id": tool_call_id or "call_001",
-                "input": {},
-                "output": "tool output here",
-                "status": {"state": tool_state or "completed"},
-            })
+            content = json.dumps(
+                {
+                    "type": "tool",
+                    "tool_name": tool_name or "test_tool",
+                    "tool_call_id": tool_call_id or "call_001",
+                    "input": {},
+                    "output": "tool output here",
+                    "status": {"state": tool_state or "completed"},
+                }
+            )
         else:
             content = json.dumps({"type": part_type})
 

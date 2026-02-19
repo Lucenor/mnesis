@@ -116,9 +116,7 @@ class LLMMap:
         template = Template(prompt_template)
 
         if self._event_bus:
-            self._event_bus.publish(
-                MnesisEvent.MAP_STARTED, {"total": len(inputs), "model": model}
-            )
+            self._event_bus.publish(MnesisEvent.MAP_STARTED, {"total": len(inputs), "model": model})
 
         tasks = [
             asyncio.create_task(
@@ -178,9 +176,8 @@ class LLMMap:
                     response_text = await asyncio.wait_for(
                         self._call_llm(
                             model=model,
-                            prompt=prompt + (
-                                f"\n\nPrevious error: {last_error}" if last_error else ""
-                            ),
+                            prompt=prompt
+                            + (f"\n\nPrevious error: {last_error}" if last_error else ""),
                             system_prompt=system_prompt,
                             temperature=temperature,
                         ),

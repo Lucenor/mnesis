@@ -235,9 +235,7 @@ class CompactionEngine:
                 elapsed_ms=time.time() * 1000 - start_ms,
             )
 
-        tokens_before = sum(
-            self._estimator.estimate_message(m) for m in non_summary
-        )
+        tokens_before = sum(self._estimator.estimate_message(m) for m in non_summary)
 
         # Determine compaction model
         compaction_model = (
@@ -295,11 +293,15 @@ class CompactionEngine:
             (m for m in non_summary if m.id == candidate.span_end_message_id),
             non_summary[-1],
         )
-        tokens_after = tokens_before - sum(
-            self._estimator.estimate_message(m)
-            for m in non_summary[: non_summary.index(span_end_msg) + 1]
-            if m.id != candidate.span_end_message_id
-        ) + candidate.token_count
+        tokens_after = (
+            tokens_before
+            - sum(
+                self._estimator.estimate_message(m)
+                for m in non_summary[: non_summary.index(span_end_msg) + 1]
+                if m.id != candidate.span_end_message_id
+            )
+            + candidate.token_count
+        )
 
         elapsed_ms = time.time() * 1000 - start_ms
         result = CompactionResult(
@@ -329,4 +331,5 @@ class CompactionEngine:
 
 def _default_id_generator(prefix: str) -> str:
     from mnesis.session import make_id
+
     return make_id(prefix)

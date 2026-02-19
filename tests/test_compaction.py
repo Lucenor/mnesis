@@ -53,6 +53,7 @@ class TestCompactionLevels:
 
     async def test_level1_fails_when_llm_errors(self, estimator, budget):
         """Level 1 returns None when the LLM call fails."""
+
         async def failing_llm(**kwargs):
             raise RuntimeError("LLM unavailable")
 
@@ -65,13 +66,17 @@ class TestCompactionLevels:
         messages = _make_messages_with_parts("sess_l1_few", 2)
         # With only 2 messages, _messages_to_summarise returns empty
         result = await level1_summarise(
-            messages, "test-model", budget, estimator,
+            messages,
+            "test-model",
+            budget,
+            estimator,
             lambda **k: (_ for _ in ()).throw(RuntimeError("should not call")),
         )
         assert result is None
 
     async def test_level2_fails_when_llm_errors(self, estimator, budget):
         """Level 2 returns None when the LLM call fails."""
+
         async def failing_llm(**kwargs):
             raise RuntimeError("LLM unavailable")
 
@@ -114,6 +119,7 @@ class TestIsOverflow:
     ):
         """is_overflow returns False when auto compaction is disabled."""
         from mnesis.models.config import CompactionConfig
+
         cfg = config.model_copy(update={"compaction": CompactionConfig(auto=False)})
         engine = CompactionEngine(
             store, dag_store, estimator, event_bus, cfg, id_generator=lambda p: f"{p}_id"
@@ -157,8 +163,12 @@ class TestCompactionEngine:
         """run_compaction catches all errors and returns a CompactionResult."""
         # Use a non-existent model — should fall through to level 3
         engine = CompactionEngine(
-            store, dag_store, estimator, event_bus, config,
-            id_generator=lambda p: f"{p}_never_raises"
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
+            id_generator=lambda p: f"{p}_never_raises",
         )
         # Populate with some messages
         for i in range(4):
@@ -181,8 +191,7 @@ class TestCompactionEngine:
         from mnesis.events.bus import MnesisEvent
 
         engine = CompactionEngine(
-            store, dag_store, estimator, event_bus, config,
-            id_generator=lambda p: f"{p}_event_test"
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_event_test"
         )
         for i in range(4):
             msg = make_message(

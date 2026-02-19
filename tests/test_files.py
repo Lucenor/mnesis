@@ -53,9 +53,7 @@ class TestLargeFileHandler:
     async def test_python_file_has_exploration_summary(self, handler, tmp_path):
         """Python file reference includes exploration summary with class/function info."""
         path = tmp_path / "module.py"
-        path.write_text(
-            "class Foo:\n    def bar(self): pass\n\ndef standalone(): return 1\n" * 10
-        )
+        path.write_text("class Foo:\n    def bar(self): pass\n\ndef standalone(): return 1\n" * 10)
         result = await handler.handle_file(str(path))
         assert not result.is_inline
         summary = result.file_ref.exploration_summary

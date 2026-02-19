@@ -213,9 +213,7 @@ class SummaryDAGStore:
             return None
         messages = await self._store.get_messages(msg.session_id)
         summary_messages = [m for m in messages if m.is_summary]
-        summary_index = next(
-            (i for i, m in enumerate(summary_messages) if m.id == node_id), 0
-        )
+        summary_index = next((i for i, m in enumerate(summary_messages) if m.id == node_id), 0)
         return await self._build_node_from_message(msg, messages, summary_index)
 
     # ── Private Helpers ────────────────────────────────────────────────────────

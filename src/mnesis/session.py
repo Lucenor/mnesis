@@ -151,7 +151,11 @@ class MnesisSession:
         event_bus = EventBus()
         context_builder = ContextBuilder(store, dag_store, estimator)
         compaction_engine = CompactionEngine(
-            store, dag_store, estimator, event_bus, cfg,
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            cfg,
             id_generator=make_id,
         )
 
@@ -215,7 +219,11 @@ class MnesisSession:
         event_bus = EventBus()
         context_builder = ContextBuilder(store, dag_store, estimator)
         compaction_engine = CompactionEngine(
-            store, dag_store, estimator, event_bus, cfg,
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            cfg,
             id_generator=make_id,
         )
 
@@ -321,9 +329,9 @@ class MnesisSession:
         compaction_result_obj: CompactionResult | None = None
 
         try:
-
             # Check for mock mode (for examples without API keys)
             import os
+
             if os.environ.get("MNESIS_MOCK_LLM") == "1":
                 text_accumulator, final_tokens, finish_reason = await self._mock_response(
                     llm_messages, on_part, assistant_msg_id
@@ -350,9 +358,7 @@ class MnesisSession:
         await self._store.append_part(text_raw)
 
         # Update message with token usage
-        await self._store.update_message_tokens(
-            assistant_msg_id, final_tokens, 0.0, finish_reason
-        )
+        await self._store.update_message_tokens(assistant_msg_id, final_tokens, 0.0, finish_reason)
 
         # Accumulate session-level tokens
         self._cumulative_tokens = self._cumulative_tokens + final_tokens
@@ -513,9 +519,7 @@ class MnesisSession:
         connection, and publishes SESSION_CLOSED.
         """
         await self._compaction_engine.wait_for_pending()
-        self._event_bus.publish(
-            MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id}
-        )
+        self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
         await self._store.close()
         self._logger.info("session_closed", session_id=self._session_id)
 

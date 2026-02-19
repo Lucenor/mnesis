@@ -227,9 +227,7 @@ class ImmutableStore:
             )
         else:
             Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-            conn = await aiosqlite.connect(
-                self._db_path, timeout=self._config.connection_timeout
-            )
+            conn = await aiosqlite.connect(self._db_path, timeout=self._config.connection_timeout)
             try:
                 conn.row_factory = aiosqlite.Row
                 if self._config.wal_mode:
@@ -339,9 +337,7 @@ class ImmutableStore:
             SessionNotFoundError: If no session with this ID exists.
         """
         conn = self._conn_or_raise()
-        async with conn.execute(
-            "SELECT * FROM sessions WHERE id = ?", (session_id,)
-        ) as cursor:
+        async with conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)) as cursor:
             row = await cursor.fetchone()
         if row is None:
             raise SessionNotFoundError(session_id)
@@ -635,9 +631,7 @@ class ImmutableStore:
             MessageNotFoundError: If no message with this ID exists.
         """
         conn = self._conn_or_raise()
-        async with conn.execute(
-            "SELECT * FROM messages WHERE id = ?", (message_id,)
-        ) as cursor:
+        async with conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)) as cursor:
             row = await cursor.fetchone()
         if row is None:
             raise MessageNotFoundError(message_id)

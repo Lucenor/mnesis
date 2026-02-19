@@ -83,9 +83,7 @@ class TestMnesisSession:
         db = str(tmp_path / "test.db")
 
         # Create and send a message
-        session1 = await MnesisSession.create(
-            model="anthropic/claude-opus-4-6", db_path=db
-        )
+        session1 = await MnesisSession.create(model="anthropic/claude-opus-4-6", db_path=db)
         session_id = session1.id
         await session1.send("First message.")
         await session1.close()

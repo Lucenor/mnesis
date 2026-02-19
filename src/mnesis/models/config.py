@@ -51,9 +51,7 @@ class CompactionConfig(BaseModel):
     @model_validator(mode="after")
     def validate_prune_thresholds(self) -> CompactionConfig:
         if self.prune_minimum_tokens >= self.prune_protect_tokens:
-            raise ValueError(
-                "prune_minimum_tokens must be strictly less than prune_protect_tokens"
-            )
+            raise ValueError("prune_minimum_tokens must be strictly less than prune_protect_tokens")
         return self
 
 

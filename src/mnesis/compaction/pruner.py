@@ -75,8 +75,8 @@ class ToolOutputPruner:
             return PruneResult(pruned_count=0, pruned_tokens=0, candidates_scanned=0)
 
         candidates: list[str] = []  # part IDs to tombstone
-        total_tool_tokens = 0       # cumulative tokens seen scanning backward
-        pruned_volume = 0           # tokens in candidate parts
+        total_tool_tokens = 0  # cumulative tokens seen scanning backward
+        pruned_volume = 0  # tokens in candidate parts
         candidates_scanned = 0
         user_turn_count = 0
 
@@ -160,9 +160,7 @@ class ToolOutputPruner:
         # Fallback: shouldn't happen, but return a sentinel
         return ""
 
-    def _get_part_id_sync(
-        self, msg: MessageWithParts, part: ToolPart
-    ) -> str:
+    def _get_part_id_sync(self, msg: MessageWithParts, part: ToolPart) -> str:
         """Synchronous version — returns empty string, used as sentinel check."""
         return ""
 

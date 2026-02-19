@@ -153,9 +153,7 @@ class AgenticMap:
             yield result
 
         if self._event_bus:
-            self._event_bus.publish(
-                MnesisEvent.MAP_COMPLETED, {"total": len(inputs)}
-            )
+            self._event_bus.publish(MnesisEvent.MAP_COMPLETED, {"total": len(inputs)})
 
         if owned_pool:
             await effective_pool.close_all()

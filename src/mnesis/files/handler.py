@@ -331,18 +331,15 @@ class LargeFileHandler:
             if isinstance(data, dict):
                 keys = list(data.keys())[:20]
                 arrays = [k for k, v in data.items() if isinstance(v, list)]
-                return (
-                    f"JSON object with {len(data)} keys.\n"
-                    f"Top-level keys: {', '.join(keys)}"
-                    + (f"\nArrays: {', '.join(arrays[:10])}" if arrays else "")
+                return f"JSON object with {len(data)} keys.\nTop-level keys: {', '.join(keys)}" + (
+                    f"\nArrays: {', '.join(arrays[:10])}" if arrays else ""
                 )
             elif isinstance(data, list):
                 sample_keys = (
                     list(data[0].keys())[:10] if data and isinstance(data[0], dict) else []
                 )
-                return (
-                    f"JSON array with {len(data)} items."
-                    + (f"\nItem keys: {', '.join(sample_keys)}" if sample_keys else "")
+                return f"JSON array with {len(data)} items." + (
+                    f"\nItem keys: {', '.join(sample_keys)}" if sample_keys else ""
                 )
             else:
                 return f"JSON scalar: {type(data).__name__}"
@@ -359,8 +356,7 @@ class LargeFileHandler:
             if isinstance(data, dict):
                 keys = list(data.keys())[:20]
                 return (
-                    f"YAML document with {len(data)} keys.\n"
-                    f"Keys: {', '.join(str(k) for k in keys)}"
+                    f"YAML document with {len(data)} keys.\nKeys: {', '.join(str(k) for k in keys)}"
                 )
             elif isinstance(data, list):
                 return f"YAML sequence with {len(data)} items."
@@ -383,9 +379,7 @@ class LargeFileHandler:
             keys = list(data.keys())[:20]
             return f"TOML document with {len(data)} sections.\nSections: {', '.join(keys)}"
         except Exception:
-            sections = [
-                ln.strip("[]").strip() for ln in content.split("\n") if ln.startswith("[")
-            ]
+            sections = [ln.strip("[]").strip() for ln in content.split("\n") if ln.startswith("[")]
             return f"TOML document. Sections: {', '.join(sections[:15])}"
 
     @staticmethod
@@ -430,9 +424,7 @@ class LargeFileHandler:
         functions = re.findall(
             r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", content, re.MULTILINE
         )
-        imports = re.findall(
-            r"^import\s+.*from\s+['\"]([^'\"]+)['\"]", content, re.MULTILINE
-        )
+        imports = re.findall(r"^import\s+.*from\s+['\"]([^'\"]+)['\"]", content, re.MULTILINE)
 
         lines = ["TypeScript/JavaScript module."]
         if classes:

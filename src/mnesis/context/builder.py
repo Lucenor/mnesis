@@ -133,9 +133,7 @@ class ContextBuilder:
 
         # 4a: Prepend summary as assistant turn
         if latest_summary is not None:
-            llm_messages.append(
-                LLMMessage(role="assistant", content=latest_summary.content)
-            )
+            llm_messages.append(LLMMessage(role="assistant", content=latest_summary.content))
 
         # 4b: Convert raw messages
         for msg_with_parts in includable:
@@ -173,9 +171,7 @@ class ContextBuilder:
             elif isinstance(part, ToolPart):
                 if part.compacted_at is not None:
                     # Tombstone replacement
-                    tombstone = (
-                        f"[Tool '{part.tool_name}' output compacted at {part.compacted_at}]"
-                    )
+                    tombstone = f"[Tool '{part.tool_name}' output compacted at {part.compacted_at}]"
                     content_parts.append(tombstone)
                 else:
                     tool_text = self._render_tool_part(part)

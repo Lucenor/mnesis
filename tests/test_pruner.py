@@ -20,16 +20,19 @@ def _make_tool_part(
     compacted_at: int | None = None,
 ) -> tuple:
     """Returns (RawMessagePart, json_content)."""
-    content = json.dumps({
-        "type": "tool",
-        "tool_name": tool_name,
-        "tool_call_id": tool_call_id,
-        "input": {"path": "/test.py"},
-        "output": output,
-        "status": {"state": state, "compacted_at": compacted_at},
-    })
+    content = json.dumps(
+        {
+            "type": "tool",
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+            "input": {"path": "/test.py"},
+            "output": output,
+            "status": {"state": state, "compacted_at": compacted_at},
+        }
+    )
     part = make_raw_part(
-        msg_id, session_id,
+        msg_id,
+        session_id,
         part_type="tool",
         part_id=part_id,
         content=content,
@@ -65,10 +68,11 @@ class TestToolOutputPruner:
             await store.append_message(msg)
             if role == "assistant":
                 part = _make_tool_part(
-                    msg_id, session_id,
+                    msg_id,
+                    session_id,
                     part_id=f"part_prot_{i:03d}",
                     tool_call_id=f"call_{i:03d}",
-                    tool_name="skill",   # Protected
+                    tool_name="skill",  # Protected
                     output="x" * 2000,
                 )
                 await store.append_part(part)
@@ -83,8 +87,8 @@ class TestToolOutputPruner:
         # Use tight protect window so pruning is easily triggered
         cfg = MnesisConfig(
             compaction=CompactionConfig(
-                prune_protect_tokens=100,   # Very small protect window
-                prune_minimum_tokens=50,    # Very small minimum
+                prune_protect_tokens=100,  # Very small protect window
+                prune_minimum_tokens=50,  # Very small minimum
             )
         )
 
@@ -96,7 +100,8 @@ class TestToolOutputPruner:
             await store.append_message(msg)
             if role == "assistant":
                 part = _make_tool_part(
-                    msg_id, session_id,
+                    msg_id,
+                    session_id,
                     part_id=f"part_tomb_{i:03d}",
                     tool_call_id=f"call_{i:03d}",
                     tool_name="read_file",
@@ -122,7 +127,7 @@ class TestToolOutputPruner:
         """Tool outputs in the most recent 2 user turns are never pruned."""
         cfg = MnesisConfig(
             compaction=CompactionConfig(
-                prune_protect_tokens=10,   # Very small — would prune most things
+                prune_protect_tokens=10,  # Very small — would prune most things
                 prune_minimum_tokens=5,
             )
         )
@@ -135,7 +140,8 @@ class TestToolOutputPruner:
             await store.append_message(msg)
             if role == "assistant":
                 part = _make_tool_part(
-                    msg_id, session_id,
+                    msg_id,
+                    session_id,
                     part_id=f"part_recent_{i:03d}",
                     tool_call_id=f"call_r{i:03d}",
                     output="x" * 100,
@@ -164,7 +170,8 @@ class TestToolOutputPruner:
             await store.append_message(msg)
             if role == "assistant":
                 part = _make_tool_part(
-                    msg_id, session_id,
+                    msg_id,
+                    session_id,
                     part_id=f"part_pre_{i:03d}",
                     tool_call_id=f"call_pre_{i:03d}",
                     output="x" * 500,
@@ -173,6 +180,7 @@ class TestToolOutputPruner:
 
         # Insert summary
         import asyncio
+
         await asyncio.sleep(0.01)
         summary_msg = make_message(
             session_id, role="assistant", msg_id="msg_sum_prune_001", is_summary=True

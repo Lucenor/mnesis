@@ -114,9 +114,7 @@ class TokenEstimator:
             elif isinstance(part, ToolPart):
                 if part.compacted_at is not None:
                     # Tombstone is short
-                    total += self.estimate(
-                        f"[Tool output compacted at {part.compacted_at}]", model
-                    )
+                    total += self.estimate(f"[Tool output compacted at {part.compacted_at}]", model)
                 else:
                     total += self.estimate(str(part.input), model)
                     total += self.estimate(part.output or "", model)

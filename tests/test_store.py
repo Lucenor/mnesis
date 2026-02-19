@@ -20,9 +20,7 @@ from tests.conftest import make_message, make_raw_part
 class TestImmutableStore:
     async def test_create_session(self, store):
         """Creating a session returns a Session with correct fields."""
-        session = await store.create_session(
-            "sess_001", model_id="gpt-4o", agent="test"
-        )
+        session = await store.create_session("sess_001", model_id="gpt-4o", agent="test")
         assert session.id == "sess_001"
         assert session.model_id == "gpt-4o"
         assert session.agent == "test"
@@ -111,9 +109,13 @@ class TestImmutableStore:
         msg = make_message(session_id, role="assistant", msg_id="msg_prune_001")
         await store.append_message(msg)
         part = make_raw_part(
-            "msg_prune_001", session_id, part_type="tool",
-            part_id="part_prune_001", tool_call_id="call_001",
-            tool_name="read_file", tool_state="completed"
+            "msg_prune_001",
+            session_id,
+            part_type="tool",
+            part_id="part_prune_001",
+            tool_call_id="call_001",
+            tool_name="read_file",
+            tool_state="completed",
         )
         await store.append_part(part)
 
