@@ -83,6 +83,47 @@ asyncio.run(main())
 
 No API key needed to try it — set `MNESIS_MOCK_LLM=1` and run any of the [examples](#examples).
 
+### Provider support
+
+mnesis works with any LLM provider via [litellm](https://docs.litellm.ai/). Pass the model string and set the corresponding API key:
+
+| Provider | Model string | API key env var |
+|---|---|---|
+| Anthropic | `"anthropic/claude-opus-4-6"` | `ANTHROPIC_API_KEY` |
+| OpenAI | `"openai/gpt-4o"` | `OPENAI_API_KEY` |
+| Google Gemini | `"gemini/gemini-1.5-pro"` | `GEMINI_API_KEY` |
+| OpenRouter | `"openrouter/meta-llama/llama-3.1-70b-instruct"` | `OPENROUTER_API_KEY` |
+
+See [docs/api.md](docs/api.md#configuring-llm-providers) for the full provider configuration guide.
+
+### BYO-LLM — use your own SDK
+
+If you already use the Anthropic, OpenAI, or another SDK directly, use `session.record()` to let mnesis handle memory and compaction without routing calls through litellm:
+
+```python
+import anthropic
+from mnesis import MnesisSession, TokenUsage
+
+client = anthropic.Anthropic()
+session = await MnesisSession.create(model="anthropic/claude-opus-4-6")
+
+user_text = "Explain quantum entanglement."
+response = client.messages.create(
+    model="claude-opus-4-6",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": user_text}],
+)
+
+await session.record(
+    user_message=user_text,
+    assistant_response=response.content[0].text,
+    tokens=TokenUsage(
+        input=response.usage.input_tokens,
+        output=response.usage.output_tokens,
+    ),
+)
+```
+
 ---
 
 ## Core Concepts
@@ -161,6 +202,7 @@ MNESIS_MOCK_LLM=1 uv run python examples/05_parallel_processing.py
 | `examples/03_tool_use.py` | Tool lifecycle, `ToolPart` streaming states, tombstone inspection |
 | `examples/04_large_files.py` | `LargeFileHandler`, `FileRefPart`, cache hits, exploration summaries |
 | `examples/05_parallel_processing.py` | `LLMMap` with Pydantic schema, `AgenticMap` sub-sessions |
+| `examples/06_byo_llm.py` | `record()` — BYO-LLM, inject turns from your own SDK |
 
 ---
 

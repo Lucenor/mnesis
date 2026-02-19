@@ -310,3 +310,17 @@ class PruneResult(BaseModel):
     pruned_count: int
     pruned_tokens: int
     candidates_scanned: int
+
+
+class RecordResult(BaseModel):
+    """
+    The result of a ``MnesisSession.record()`` call.
+
+    Records the IDs of the persisted user and assistant messages so callers
+    can reference them later (e.g. for event subscriptions or debugging).
+    """
+
+    user_message_id: str
+    assistant_message_id: str
+    tokens: TokenUsage
+    compaction_triggered: bool = False
