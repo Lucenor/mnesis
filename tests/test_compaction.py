@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-
 import pytest
 
 from mnesis.compaction.engine import CompactionEngine
@@ -14,9 +11,8 @@ from mnesis.compaction.levels import (
     level2_summarise,
     level3_deterministic,
 )
-from mnesis.models.config import MnesisConfig, ModelInfo
+from mnesis.models.config import ModelInfo
 from mnesis.models.message import ContextBudget, MessageWithParts, TextPart, TokenUsage
-from mnesis.store.summary_dag import SummaryDAGStore
 from tests.conftest import make_message, make_raw_part
 
 
@@ -68,8 +64,10 @@ class TestCompactionLevels:
         """Level 1 returns None when there are fewer than 4 messages (nothing to summarize)."""
         messages = _make_messages_with_parts("sess_l1_few", 2)
         # With only 2 messages, _messages_to_summarise returns empty
-        result = await level1_summarise(messages, "test-model", budget, estimator,
-                                        lambda **k: (_ for _ in ()).throw(RuntimeError("should not call")))
+        result = await level1_summarise(
+            messages, "test-model", budget, estimator,
+            lambda **k: (_ for _ in ()).throw(RuntimeError("should not call")),
+        )
         assert result is None
 
     async def test_level2_fails_when_llm_errors(self, estimator, budget):
@@ -111,25 +109,35 @@ class TestCompactionLevels:
 
 
 class TestIsOverflow:
-    def test_overflow_false_when_auto_disabled(self, estimator, event_bus, store, dag_store, config):
+    def test_overflow_false_when_auto_disabled(
+        self, estimator, event_bus, store, dag_store, config
+    ):
         """is_overflow returns False when auto compaction is disabled."""
         from mnesis.models.config import CompactionConfig
         cfg = config.model_copy(update={"compaction": CompactionConfig(auto=False)})
-        engine = CompactionEngine(store, dag_store, estimator, event_bus, cfg, id_generator=lambda p: f"{p}_id")
+        engine = CompactionEngine(
+            store, dag_store, estimator, event_bus, cfg, id_generator=lambda p: f"{p}_id"
+        )
         model = ModelInfo.from_model_string("anthropic/claude-opus-4-6")
         tokens = TokenUsage(total=190_000)
         assert engine.is_overflow(tokens, model) is False
 
-    def test_overflow_false_for_unlimited_model(self, estimator, event_bus, store, dag_store, config):
+    def test_overflow_false_for_unlimited_model(
+        self, estimator, event_bus, store, dag_store, config
+    ):
         """is_overflow returns False when context_limit is 0 (unlimited)."""
-        engine = CompactionEngine(store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_id")
+        engine = CompactionEngine(
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_id"
+        )
         model = ModelInfo(model_id="local-model", context_limit=0, max_output_tokens=4096)
         tokens = TokenUsage(total=999_999)
         assert engine.is_overflow(tokens, model) is False
 
     def test_overflow_true_at_threshold(self, estimator, event_bus, store, dag_store, config):
         """is_overflow returns True when tokens reach the usable threshold."""
-        engine = CompactionEngine(store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_id")
+        engine = CompactionEngine(
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_id"
+        )
         model = ModelInfo(
             model_id="test-model",
             context_limit=100_000,
@@ -154,7 +162,9 @@ class TestCompactionEngine:
         )
         # Populate with some messages
         for i in range(4):
-            msg = make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_nr_{i:03d}")
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_nr_{i:03d}"
+            )
             await store.append_message(msg)
             part = make_raw_part(msg.id, session_id, part_id=f"part_nr_{i:03d}")
             await store.append_part(part)
@@ -175,7 +185,9 @@ class TestCompactionEngine:
             id_generator=lambda p: f"{p}_event_test"
         )
         for i in range(4):
-            msg = make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_ev_{i:03d}")
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_ev_{i:03d}"
+            )
             await store.append_message(msg)
             part = make_raw_part(msg.id, session_id, part_id=f"part_ev_{i:03d}")
             await store.append_part(part)
@@ -183,5 +195,7 @@ class TestCompactionEngine:
         await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
 
         published_events = [e for e, _ in event_bus.collected]
-        assert MnesisEvent.COMPACTION_COMPLETED in published_events or \
-               MnesisEvent.COMPACTION_FAILED in published_events
+        assert (
+            MnesisEvent.COMPACTION_COMPLETED in published_events
+            or MnesisEvent.COMPACTION_FAILED in published_events
+        )

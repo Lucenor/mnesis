@@ -37,7 +37,7 @@ class SummaryNode(BaseModel):
     model_id: str = ""
     provider_id: str = ""
     compaction_level: int = 1
-    """Which escalation level produced this node: 1 (selective), 2 (aggressive), 3 (deterministic)."""
+    """Escalation level: 1 = selective, 2 = aggressive, 3 = deterministic (fallback)."""
 
 
 class MessageSpan(BaseModel):

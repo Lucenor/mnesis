@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 
 import pytest
 
-from mnesis.models.message import Message, TextPart, TokenUsage
+from mnesis.models.message import TokenUsage
 from mnesis.models.summary import FileReference
 from mnesis.store.immutable import (
     DuplicateIDError,
-    MessageNotFoundError,
     PartNotFoundError,
     SessionNotFoundError,
 )
@@ -134,7 +132,9 @@ class TestImmutableStore:
         """get_messages_with_parts uses batch loading (correctness check)."""
         for i in range(5):
             msg_id = f"msg_batch_{i:03d}"
-            msg = make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id)
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id
+            )
             await store.append_message(msg)
             part = make_raw_part(msg_id, session_id, part_id=f"part_batch_{i:03d}")
             await store.append_part(part)

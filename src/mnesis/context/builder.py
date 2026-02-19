@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -204,7 +204,7 @@ class ContextBuilder:
             lines.append(f"Output: {part.output}")
         if part.error_message:
             lines.append(f"Error: {part.error_message}")
-        lines.append(f"[/Tool]")
+        lines.append("[/Tool]")
         return "\n".join(lines)
 
     @staticmethod

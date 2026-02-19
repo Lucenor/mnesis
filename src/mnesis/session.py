@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import structlog
 from ulid import ULID
 
 from mnesis.compaction.engine import CompactionEngine
-from mnesis.compaction.pruner import ToolOutputPrunerAsync
 from mnesis.context.builder import ContextBuilder
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, ModelInfo, StoreConfig
@@ -22,8 +21,6 @@ from mnesis.models.message import (
     MessageWithParts,
     TextPart,
     TokenUsage,
-    ToolPart,
-    ToolStatus,
     TurnResult,
 )
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
@@ -107,7 +104,7 @@ class MnesisSession:
         system_prompt: str = "You are a helpful assistant.",
         db_path: str | None = None,
         pool: StorePool | None = None,
-    ) -> "MnesisSession":
+    ) -> MnesisSession:
         """
         Create a new Mnesis session.
 
@@ -186,7 +183,7 @@ class MnesisSession:
         config: MnesisConfig | None = None,
         db_path: str | None = None,
         pool: StorePool | None = None,
-    ) -> "MnesisSession":
+    ) -> MnesisSession:
         """
         Load an existing session from the store.
 
@@ -290,7 +287,9 @@ class MnesisSession:
             )
             await self._store.append_part(raw)
 
-        self._event_bus.publish(MnesisEvent.MESSAGE_CREATED, {"message_id": user_msg_id, "role": "user"})
+        self._event_bus.publish(
+            MnesisEvent.MESSAGE_CREATED, {"message_id": user_msg_id, "role": "user"}
+        )
 
         # Build context
         context = await self._context_builder.build(
@@ -322,7 +321,6 @@ class MnesisSession:
         compaction_result_obj: CompactionResult | None = None
 
         try:
-            import litellm
 
             # Check for mock mode (for examples without API keys)
             import os
@@ -397,7 +395,7 @@ class MnesisSession:
 
         call_kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": [{"role": "system", "content": system_prompt}] + llm_messages,
+            "messages": [{"role": "system", "content": system_prompt}, *llm_messages],
             "stream": True,
             "max_tokens": self._model_info.max_output_tokens,
         }
@@ -521,7 +519,7 @@ class MnesisSession:
         await self._store.close()
         self._logger.info("session_closed", session_id=self._session_id)
 
-    async def __aenter__(self) -> "MnesisSession":
+    async def __aenter__(self) -> MnesisSession:
         return self
 
     async def __aexit__(self, *args: Any) -> None:

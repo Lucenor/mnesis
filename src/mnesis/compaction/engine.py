@@ -27,7 +27,7 @@ from mnesis.tokens.estimator import TokenEstimator
 def _make_llm_call(model: str) -> Any:
     """Return an async function that calls an LLM for compaction."""
 
-    async def _call(*, model: str = model, messages: list[dict], max_tokens: int) -> str:
+    async def _call(*, model: str = model, messages: list[dict[str, str]], max_tokens: int) -> str:
         import litellm
 
         response = await litellm.acompletion(
@@ -36,7 +36,7 @@ def _make_llm_call(model: str) -> Any:
             max_tokens=max_tokens,
             temperature=0.2,
         )
-        return response.choices[0].message.content or ""  # type: ignore[union-attr]
+        return response.choices[0].message.content or ""
 
     return _call
 
@@ -76,6 +76,7 @@ class CompactionEngine:
         self._pruner = ToolOutputPrunerAsync(store, token_estimator, config)
         self._id_gen = id_generator or _default_id_generator
         self._logger = structlog.get_logger("mnesis.compaction")
+        self._pending_task: asyncio.Task[CompactionResult] | None = None
 
     def is_overflow(self, tokens: TokenUsage, model: ModelInfo) -> bool:
         """
@@ -140,7 +141,7 @@ class CompactionEngine:
 
     async def wait_for_pending(self) -> None:
         """Await any in-flight background compaction task, then clear it."""
-        task = getattr(self, "_pending_task", None)
+        task = self._pending_task
         if task is not None and not task.done():
             task.cancel()
             try:
@@ -259,13 +260,17 @@ class CompactionEngine:
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
 
-        candidate = await level1_summarise(non_summary, compaction_model, budget, self._estimator, llm_call)
+        candidate = await level1_summarise(
+            non_summary, compaction_model, budget, self._estimator, llm_call
+        )
 
         # Step 3: Level 2 (if Level 1 failed and level2 is enabled)
         if candidate is None and self._config.compaction.level2_enabled:
             if abort and abort.is_set():
                 raise asyncio.CancelledError("Compaction aborted")
-            candidate = await level2_summarise(non_summary, compaction_model, budget, self._estimator, llm_call)
+            candidate = await level2_summarise(
+                non_summary, compaction_model, budget, self._estimator, llm_call
+            )
 
         # Step 4: Level 3 (deterministic fallback — always succeeds)
         if candidate is None:
@@ -286,11 +291,13 @@ class CompactionEngine:
         )
         await self._dag_store.insert_node(summary_node, id_generator=lambda: self._id_gen("part"))
 
+        span_end_msg = next(
+            (m for m in non_summary if m.id == candidate.span_end_message_id),
+            non_summary[-1],
+        )
         tokens_after = tokens_before - sum(
             self._estimator.estimate_message(m)
-            for m in non_summary[: non_summary.index(
-                next((m for m in non_summary if m.id == candidate.span_end_message_id), non_summary[-1])
-            ) + 1]
+            for m in non_summary[: non_summary.index(span_end_msg) + 1]
             if m.id != candidate.span_end_message_id
         ) + candidate.token_count
 

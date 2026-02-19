@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -11,7 +10,7 @@ import pytest_asyncio
 
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, StoreConfig
-from mnesis.models.message import Message, TextPart, ToolPart, ToolStatus, TokenUsage
+from mnesis.models.message import Message
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
 from mnesis.store.pool import StorePool
 from mnesis.store.summary_dag import SummaryDAGStore

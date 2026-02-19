@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -131,7 +130,10 @@ async def level1_summarise(
 
     transcript = _build_messages_text(to_summarise)
     prompt_messages = [
-        {"role": "user", "content": f"{LEVEL1_PROMPT}\n\n<conversation>\n{transcript}\n</conversation>"}
+        {
+            "role": "user",
+            "content": f"{LEVEL1_PROMPT}\n\n<conversation>\n{transcript}\n</conversation>",
+        }
     ]
 
     try:

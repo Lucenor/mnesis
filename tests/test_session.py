@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
-
 import pytest
 
 from mnesis.events.bus import MnesisEvent
@@ -37,7 +34,7 @@ class TestMnesisSession:
             model="anthropic/claude-opus-4-6",
             db_path=str(tmp_path / "test.db"),
         ) as session:
-            result = await session.send("Hello!")
+            await session.send("Hello!")
             messages = await session.messages()
 
         # Should have at least user + assistant
@@ -101,7 +98,7 @@ class TestMnesisSession:
 
     async def test_context_manager_closes_on_exception(self, tmp_path):
         """Session is closed even when send() raises."""
-        from mnesis import MnesisSession, MnesisConfig, StoreConfig
+        from mnesis import MnesisSession
 
         closed = []
 
@@ -160,16 +157,16 @@ class TestMnesisSession:
             model="anthropic/claude-opus-4-6",
             db_path=str(tmp_path / "test.db"),
         ) as session:
-            result1 = await session.send("Hello")
+            await session.send("Hello")
             usage_after_1 = session.token_usage.effective_total()
-            result2 = await session.send("World")
+            await session.send("World")
             usage_after_2 = session.token_usage.effective_total()
 
         assert usage_after_2 > usage_after_1
 
     async def test_manual_compact_returns_result(self, tmp_path):
         """compact() runs synchronously and returns CompactionResult."""
-        from mnesis import MnesisSession, CompactionResult
+        from mnesis import CompactionResult, MnesisSession
 
         async with await MnesisSession.create(
             model="anthropic/claude-opus-4-6",

@@ -23,7 +23,6 @@ from mnesis.models.message import (
 )
 from mnesis.models.summary import FileReference
 
-
 # ── Exceptions ─────────────────────────────────────────────────────────────────
 
 
@@ -74,16 +73,16 @@ class Session:
     """Thin data class for session rows (not Pydantic — avoids heavy validation on reads)."""
 
     __slots__ = (
-        "id",
-        "parent_id",
-        "created_at",
-        "updated_at",
-        "model_id",
-        "provider_id",
         "agent",
-        "title",
+        "created_at",
+        "id",
         "is_active",
         "metadata",
+        "model_id",
+        "parent_id",
+        "provider_id",
+        "title",
+        "updated_at",
     )
 
     def __init__(
@@ -115,19 +114,19 @@ class RawMessagePart:
     """Internal storage model for a message part row."""
 
     __slots__ = (
+        "compacted_at",
+        "completed_at",
+        "content",
         "id",
         "message_id",
-        "session_id",
-        "part_type",
         "part_index",
-        "content",
-        "tool_name",
-        "tool_call_id",
-        "tool_state",
-        "compacted_at",
+        "part_type",
+        "session_id",
         "started_at",
-        "completed_at",
         "token_estimate",
+        "tool_call_id",
+        "tool_name",
+        "tool_state",
     )
 
     def __init__(
@@ -201,7 +200,7 @@ class ImmutableStore:
         await pool.close_all()       # actually closes the connection
     """
 
-    def __init__(self, config: StoreConfig, pool: "StorePool | None" = None) -> None:
+    def __init__(self, config: StoreConfig, pool: StorePool | None = None) -> None:
         self._config = config
         self._db_path = str(Path(config.db_path).expanduser())
         self._pool = pool
@@ -309,7 +308,8 @@ class ImmutableStore:
             await conn.execute(
                 """
                 INSERT INTO sessions
-                    (id, parent_id, created_at, updated_at, model_id, provider_id, agent, title, is_active, metadata)
+                    (id, parent_id, created_at, updated_at,
+                     model_id, provider_id, agent, title, is_active, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (id, parent_id, now, now, model_id, provider_id, agent, title, meta_json),
@@ -669,7 +669,8 @@ class ImmutableStore:
                 row = await cursor.fetchone()
             since_ts = row[0] if row else 0
             async with conn.execute(
-                "SELECT * FROM messages WHERE session_id=? AND created_at>? ORDER BY created_at ASC",
+                "SELECT * FROM messages"
+                " WHERE session_id=? AND created_at>? ORDER BY created_at ASC",
                 (session_id, since_ts),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -722,7 +723,8 @@ class ImmutableStore:
         message_ids = [m.id for m in messages]
         placeholders = ",".join("?" * len(message_ids))
         async with conn.execute(
-            f"SELECT * FROM message_parts WHERE message_id IN ({placeholders}) ORDER BY message_id, part_index ASC",
+            f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
+            " ORDER BY message_id, part_index ASC",
             message_ids,
         ) as cursor:
             part_rows = await cursor.fetchall()
@@ -898,7 +900,7 @@ class ImmutableStore:
 
             from mnesis.models.message import MessagePart as MPType
 
-            adapter: TypeAdapter[MPType] = TypeAdapter(MPType)  # type: ignore[type-arg]
+            adapter: TypeAdapter[MPType] = TypeAdapter(MPType)
             return adapter.validate_python(data)
         except Exception as exc:
             self._logger.warning(

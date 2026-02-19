@@ -6,11 +6,10 @@ import time
 
 import structlog
 
-from mnesis.models.message import MessageWithParts, PruneResult, ToolPart
 from mnesis.models.config import MnesisConfig
+from mnesis.models.message import MessageWithParts, PruneResult, ToolPart
 from mnesis.store.immutable import ImmutableStore
 from mnesis.tokens.estimator import TokenEstimator
-
 
 # Tools that should never be pruned
 _PROTECTED_TOOLS: frozenset[str] = frozenset({"skill"})
@@ -117,7 +116,7 @@ class ToolOutputPruner:
 
                 # Only add to candidates if outside the protect window
                 if total_tool_tokens > protect_tokens:
-                    candidates.append(self._get_part_id(msg, part))
+                    candidates.append(await self._get_part_id(msg, part))
                     pruned_volume += output_tokens
 
         if pruned_volume <= minimum_tokens:
@@ -161,7 +160,7 @@ class ToolOutputPruner:
         # Fallback: shouldn't happen, but return a sentinel
         return ""
 
-    def _get_part_id(  # type: ignore[override]
+    def _get_part_id_sync(
         self, msg: MessageWithParts, part: ToolPart
     ) -> str:
         """Synchronous version — returns empty string, used as sentinel check."""

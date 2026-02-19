@@ -5,10 +5,7 @@ from __future__ import annotations
 import structlog
 
 from mnesis.models.message import (
-    CompactionMarkerPart,
     Message,
-    MessageWithParts,
-    TextPart,
 )
 from mnesis.models.summary import MessageSpan, SummaryNode
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
@@ -127,7 +124,7 @@ class SummaryDAGStore:
         self,
         node: SummaryNode,
         *,
-        id_generator: "Callable[[], str]",
+        id_generator: Callable[[], str],
     ) -> SummaryNode:
         """
         Persist a new summary node.
@@ -143,9 +140,10 @@ class SummaryDAGStore:
         Returns:
             The persisted node (unmodified).
         """
-        from mnesis.models.message import Message as Msg
         import json
         import time as time_mod
+
+        from mnesis.models.message import Message as Msg
 
         summary_message = Msg(
             id=node.id,
@@ -292,4 +290,4 @@ class SummaryDAGStore:
 
 
 # Import needed for type hint in insert_node
-from typing import Callable  # noqa: E402
+from collections.abc import Callable  # noqa: E402

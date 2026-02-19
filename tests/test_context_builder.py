@@ -9,7 +9,6 @@ import pytest
 from mnesis.context.builder import ContextBuilder
 from mnesis.models.config import MnesisConfig, ModelInfo
 from mnesis.models.message import ContextBudget
-from mnesis.store.summary_dag import SummaryDAGStore
 from tests.conftest import make_message, make_raw_part
 
 
@@ -43,11 +42,15 @@ class TestContextBuilder:
         assert ctx.has_summary is False
         assert ctx.token_estimate > 0  # system prompt counted
 
-    async def test_build_without_summary_includes_all(self, session_id, store, builder, model_info, small_config):
+    async def test_build_without_summary_includes_all(
+        self, session_id, store, builder, model_info, small_config
+    ):
         """Without compaction, all messages are included."""
         for i in range(3):
             msg_id = f"msg_cb_{i:03d}"
-            msg = make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id)
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id
+            )
             await store.append_message(msg)
             part = make_raw_part(msg_id, session_id, part_id=f"part_cb_{i:03d}")
             await store.append_part(part)
@@ -68,7 +71,6 @@ class TestContextBuilder:
 
         # Insert a summary via dag_store
         from mnesis.models.summary import SummaryNode
-        from mnesis.session import make_id
 
         summary_node = SummaryNode(
             id="msg_sum_001",
