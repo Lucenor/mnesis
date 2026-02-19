@@ -2,4 +2,4 @@
 
 from mnesis.files.handler import FileHandleResult, FileType, LargeFileHandler
 
-__all__ = ["LargeFileHandler", "FileHandleResult", "FileType"]
+__all__ = ["FileHandleResult", "FileType", "LargeFileHandler"]

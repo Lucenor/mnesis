@@ -33,7 +33,7 @@ class TokenEstimator:
         self._force_heuristic: bool = False
         """Set to True in tests to skip tiktoken import."""
 
-    def estimate(self, text: str, model: "ModelInfo | None" = None) -> int:
+    def estimate(self, text: str, model: ModelInfo | None = None) -> int:
         """
         Estimate the token count for a string.
 
@@ -64,7 +64,7 @@ class TokenEstimator:
         self,
         text: str,
         cache_key: str,
-        model: "ModelInfo | None" = None,
+        model: ModelInfo | None = None,
     ) -> int:
         """
         Estimate with caching, keyed by ``cache_key``.
@@ -88,8 +88,8 @@ class TokenEstimator:
 
     def estimate_message(
         self,
-        msg: "MessageWithParts",
-        model: "ModelInfo | None" = None,
+        msg: MessageWithParts,
+        model: ModelInfo | None = None,
     ) -> int:
         """
         Estimate total tokens for a message including all non-pruned parts.
@@ -114,9 +114,7 @@ class TokenEstimator:
             elif isinstance(part, ToolPart):
                 if part.compacted_at is not None:
                     # Tombstone is short
-                    total += self.estimate(
-                        f"[Tool output compacted at {part.compacted_at}]", model
-                    )
+                    total += self.estimate(f"[Tool output compacted at {part.compacted_at}]", model)
                 else:
                     total += self.estimate(str(part.input), model)
                     total += self.estimate(part.output or "", model)

@@ -11,8 +11,8 @@ from mnesis.compaction.pruner import ToolOutputPrunerAsync as ToolOutputPruner
 
 __all__ = [
     "CompactionEngine",
-    "ToolOutputPruner",
     "SummaryCandidate",
+    "ToolOutputPruner",
     "level1_summarise",
     "level2_summarise",
     "level3_deterministic",

@@ -1,0 +1,15 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto      # use previous run as baseline
+        threshold: 1%     # block if overall coverage drops > 1%
+    patch:
+      default:
+        target: auto
+        threshold: 1%     # block if new code coverage drops > 1%
+
+comment:
+  layout: "reach,diff,flags,files"
+  require_changes: true   # only comment when coverage actually changes
+  behavior: default

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import structlog
 from jinja2 import Template
@@ -152,9 +153,7 @@ class AgenticMap:
             yield result
 
         if self._event_bus:
-            self._event_bus.publish(
-                MnesisEvent.MAP_COMPLETED, {"total": len(inputs)}
-            )
+            self._event_bus.publish(MnesisEvent.MAP_COMPLETED, {"total": len(inputs)})
 
         if owned_pool:
             await effective_pool.close_all()

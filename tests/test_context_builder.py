@@ -9,7 +9,6 @@ import pytest
 from mnesis.context.builder import ContextBuilder
 from mnesis.models.config import MnesisConfig, ModelInfo
 from mnesis.models.message import ContextBudget
-from mnesis.store.summary_dag import SummaryDAGStore
 from tests.conftest import make_message, make_raw_part
 
 
@@ -43,11 +42,15 @@ class TestContextBuilder:
         assert ctx.has_summary is False
         assert ctx.token_estimate > 0  # system prompt counted
 
-    async def test_build_without_summary_includes_all(self, session_id, store, builder, model_info, small_config):
+    async def test_build_without_summary_includes_all(
+        self, session_id, store, builder, model_info, small_config
+    ):
         """Without compaction, all messages are included."""
         for i in range(3):
             msg_id = f"msg_cb_{i:03d}"
-            msg = make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id)
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id
+            )
             await store.append_message(msg)
             part = make_raw_part(msg_id, session_id, part_id=f"part_cb_{i:03d}")
             await store.append_part(part)
@@ -68,7 +71,6 @@ class TestContextBuilder:
 
         # Insert a summary via dag_store
         from mnesis.models.summary import SummaryNode
-        from mnesis.session import make_id
 
         summary_node = SummaryNode(
             id="msg_sum_001",
@@ -81,13 +83,16 @@ class TestContextBuilder:
             compaction_level=1,
         )
         counter = [0]
+
         def gen():
             counter[0] += 1
             return f"part_sum_{counter[0]:03d}"
+
         await dag_store.insert_node(summary_node, id_generator=gen)
 
         # 2 new messages after the summary
         import asyncio
+
         await asyncio.sleep(0.01)
         for i in range(2):
             msg_id = f"msg_new_{i:03d}"
@@ -112,23 +117,31 @@ class TestContextBuilder:
         msg = make_message(session_id, role="assistant", msg_id=msg_id)
         await store.append_message(msg)
 
-        tool_content = json.dumps({
-            "type": "tool",
-            "tool_name": "read_file",
-            "tool_call_id": "call_001",
-            "input": {"path": "/tmp/test.py"},
-            "output": "def hello(): pass",
-            "status": {"state": "completed"},
-        })
+        tool_content = json.dumps(
+            {
+                "type": "tool",
+                "tool_name": "read_file",
+                "tool_call_id": "call_001",
+                "input": {"path": "/tmp/test.py"},
+                "output": "def hello(): pass",
+                "status": {"state": "completed"},
+            }
+        )
         part = make_raw_part(
-            msg_id, session_id, part_type="tool",
-            part_id="part_tool_001", content=tool_content,
-            tool_call_id="call_001", tool_name="read_file", tool_state="completed"
+            msg_id,
+            session_id,
+            part_type="tool",
+            part_id="part_tool_001",
+            content=tool_content,
+            tool_call_id="call_001",
+            tool_name="read_file",
+            tool_state="completed",
         )
         await store.append_part(part)
 
         # Apply tombstone
         import time
+
         await store.update_part_status("part_tool_001", compacted_at=int(time.time() * 1000))
 
         ctx = await builder.build(session_id, model_info, "System.", small_config)
@@ -145,17 +158,18 @@ class TestContextBuilder:
         msg = make_message(session_id, role="user", msg_id=msg_id)
         await store.append_message(msg)
 
-        file_content = json.dumps({
-            "type": "file_ref",
-            "content_id": "abc123def",
-            "path": "/src/main.py",
-            "file_type": "python",
-            "token_count": 15000,
-            "exploration_summary": "Module with 5 classes.",
-        })
+        file_content = json.dumps(
+            {
+                "type": "file_ref",
+                "content_id": "abc123def",
+                "path": "/src/main.py",
+                "file_type": "python",
+                "token_count": 15000,
+                "exploration_summary": "Module with 5 classes.",
+            }
+        )
         part = make_raw_part(
-            msg_id, session_id, part_type="file_ref",
-            part_id="part_file_001", content=file_content
+            msg_id, session_id, part_type="file_ref", part_id="part_file_001", content=file_content
         )
         await store.append_part(part)
 

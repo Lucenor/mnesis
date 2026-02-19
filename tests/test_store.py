@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 
 import pytest
 
-from mnesis.models.message import Message, TextPart, TokenUsage
+from mnesis.models.message import TokenUsage
 from mnesis.models.summary import FileReference
 from mnesis.store.immutable import (
     DuplicateIDError,
-    MessageNotFoundError,
     PartNotFoundError,
     SessionNotFoundError,
 )
@@ -22,9 +20,7 @@ from tests.conftest import make_message, make_raw_part
 class TestImmutableStore:
     async def test_create_session(self, store):
         """Creating a session returns a Session with correct fields."""
-        session = await store.create_session(
-            "sess_001", model_id="gpt-4o", agent="test"
-        )
+        session = await store.create_session("sess_001", model_id="gpt-4o", agent="test")
         assert session.id == "sess_001"
         assert session.model_id == "gpt-4o"
         assert session.agent == "test"
@@ -113,9 +109,13 @@ class TestImmutableStore:
         msg = make_message(session_id, role="assistant", msg_id="msg_prune_001")
         await store.append_message(msg)
         part = make_raw_part(
-            "msg_prune_001", session_id, part_type="tool",
-            part_id="part_prune_001", tool_call_id="call_001",
-            tool_name="read_file", tool_state="completed"
+            "msg_prune_001",
+            session_id,
+            part_type="tool",
+            part_id="part_prune_001",
+            tool_call_id="call_001",
+            tool_name="read_file",
+            tool_state="completed",
         )
         await store.append_part(part)
 
@@ -134,7 +134,9 @@ class TestImmutableStore:
         """get_messages_with_parts uses batch loading (correctness check)."""
         for i in range(5):
             msg_id = f"msg_batch_{i:03d}"
-            msg = make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id)
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=msg_id
+            )
             await store.append_message(msg)
             part = make_raw_part(msg_id, session_id, part_id=f"part_batch_{i:03d}")
             await store.append_part(part)

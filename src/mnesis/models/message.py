@@ -7,7 +7,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 # ── Part Models ────────────────────────────────────────────────────────────────
 
 
@@ -155,7 +154,7 @@ class TokenUsage(BaseModel):
             return self.total
         return self.input + self.output + self.cache_read + self.cache_write
 
-    def __add__(self, other: "TokenUsage") -> "TokenUsage":
+    def __add__(self, other: TokenUsage) -> TokenUsage:
         return TokenUsage(
             input=self.input + other.input,
             output=self.output + other.output,

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
 from pydantic import BaseModel
 
-from mnesis.operators.llm_map import LLMMap, MapResult
 from mnesis.models.config import OperatorConfig
+from mnesis.operators.llm_map import LLMMap
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +46,7 @@ class TestLLMMap:
     async def test_invalid_template_raises(self, op_config):
         """Missing {{ item }} in template raises ValueError."""
         llm_map = LLMMap(op_config)
-        with pytest.raises(ValueError, match="{{ item }}"):
+        with pytest.raises(ValueError, match=r"\{\{ item \}\}"):
             async for _ in llm_map.run(
                 inputs=["test"],
                 prompt_template="No item placeholder here",
@@ -75,8 +74,6 @@ class TestLLMMap:
         """At most N concurrent calls are made at once."""
         active: list[int] = []
         max_concurrent: list[int] = [0]
-
-        original_call = LLMMap._call_llm
 
         async def tracked_call(self, **kwargs):
             active.append(1)
@@ -130,7 +127,7 @@ class TestAgenticMap:
         from mnesis.operators.agentic_map import AgenticMap
 
         agentic_map = AgenticMap(op_config)
-        with pytest.raises(ValueError, match="{{ item }}"):
+        with pytest.raises(ValueError, match=r"\{\{ item \}\}"):
             async for _ in agentic_map.run(
                 inputs=["test"],
                 agent_prompt_template="No item placeholder",
