@@ -208,13 +208,13 @@ MNESIS_MOCK_LLM=1 uv run python examples/05_parallel_processing.py
 
 ## Documentation
 
-Full documentation is available at **[lucenor.github.io/mnesis](https://lucenor.github.io/mnesis)**, including:
+Full documentation is available at **[mnesis.lucenor.tech](https://mnesis.lucenor.tech)**, including:
 
-- [Getting Started](https://lucenor.github.io/mnesis/getting-started/)
-- [Provider Configuration](https://lucenor.github.io/mnesis/providers/)
-- [BYO-LLM](https://lucenor.github.io/mnesis/byo-llm/)
-- [Concepts](https://lucenor.github.io/mnesis/concepts/)
-- [API Reference](https://lucenor.github.io/mnesis/api/)
+- [Getting Started](https://mnesis.lucenor.tech/getting-started/)
+- [Provider Configuration](https://mnesis.lucenor.tech/providers/)
+- [BYO-LLM](https://mnesis.lucenor.tech/byo-llm/)
+- [Concepts](https://mnesis.lucenor.tech/concepts/)
+- [API Reference](https://mnesis.lucenor.tech/api/)
 
 ---
 

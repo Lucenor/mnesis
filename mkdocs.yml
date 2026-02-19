@@ -1,6 +1,6 @@
 site_name: mnesis
 site_description: Lossless Context Management for long-horizon LLM agents
-site_url: https://lucenor.github.io/mnesis
+site_url: https://mnesis.lucenor.tech
 repo_url: https://github.com/Lucenor/mnesis
 repo_name: Lucenor/mnesis
 edit_uri: edit/main/docs/
