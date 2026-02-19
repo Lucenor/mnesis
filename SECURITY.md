@@ -13,7 +13,7 @@ Only the latest release on PyPI is actively supported with security fixes.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Please report security issues by emailing **security@lucenor.tech** (or open a [GitHub Security Advisory](https://github.com/Lucenor/mnesis/security/advisories/new) if you prefer). Include:
+Please open a [GitHub Security Advisory](https://github.com/Lucenor/mnesis/security/advisories/new) to report a vulnerability privately. Include:
 
 - A clear description of the vulnerability
 - Steps to reproduce or a proof-of-concept
