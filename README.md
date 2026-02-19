@@ -206,9 +206,15 @@ MNESIS_MOCK_LLM=1 uv run python examples/05_parallel_processing.py
 
 ---
 
-## API Reference
+## Documentation
 
-See [docs/api.md](docs/api.md) for the full API reference.
+Full documentation is available at **[mnesis.lucenor.tech](https://mnesis.lucenor.tech)**, including:
+
+- [Getting Started](https://mnesis.lucenor.tech/getting-started/)
+- [Provider Configuration](https://mnesis.lucenor.tech/providers/)
+- [BYO-LLM](https://mnesis.lucenor.tech/byo-llm/)
+- [Concepts](https://mnesis.lucenor.tech/concepts/)
+- [API Reference](https://mnesis.lucenor.tech/api/)
 
 ---
 
@@ -243,7 +249,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. The short version:
 # Clone and install with dev dependencies
 git clone https://github.com/Lucenor/mnesis.git
 cd mnesis
-uv sync --dev
+uv sync --group dev
 
 # Lint + format
 uv run ruff check src/ tests/
@@ -258,6 +264,10 @@ uv run pytest
 # Run examples without API keys
 MNESIS_MOCK_LLM=1 uv run python examples/01_basic_session.py
 MNESIS_MOCK_LLM=1 uv run python examples/05_parallel_processing.py
+
+# Build docs locally
+uv sync --group docs
+uv run mkdocs serve
 ```
 
 Open an issue before starting large changes — it avoids duplicated effort.
