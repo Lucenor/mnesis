@@ -32,7 +32,7 @@ dependencies = [
     "jsonschema>=4.22.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",

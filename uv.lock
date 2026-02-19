@@ -947,7 +947,7 @@ dependencies = [
     { name = "tiktoken" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "freezegun" },
     { name = "hypothesis" },
@@ -967,27 +967,30 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "anthropic", specifier = ">=0.30.0" },
     { name = "anyio", specifier = ">=4.4.0" },
-    { name = "freezegun", marker = "extra == 'dev'", specifier = ">=1.5.0" },
-    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100.0" },
     { name = "jinja2", specifier = ">=3.1.4" },
     { name = "jsonschema", specifier = ">=4.22.0" },
     { name = "litellm", specifier = ">=1.40.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
     { name = "python-magic", specifier = ">=0.4.27" },
     { name = "python-ulid", specifier = ">=3.0.0" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "structlog", specifier = ">=24.2.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
-    { name = "types-jsonschema", marker = "extra == 'dev'", specifier = ">=4.23.0" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.0" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "freezegun", specifier = ">=1.5.0" },
+    { name = "hypothesis", specifier = ">=6.100.0" },
+    { name = "mypy", specifier = ">=1.10.0" },
+    { name = "pytest", specifier = ">=8.2.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-cov", specifier = ">=5.0.0" },
+    { name = "pytest-mock", specifier = ">=3.14.0" },
+    { name = "respx", specifier = ">=0.21.0" },
+    { name = "ruff", specifier = ">=0.4.0" },
+    { name = "types-jsonschema", specifier = ">=4.23.0" },
+    { name = "types-pyyaml", specifier = ">=6.0.0" },
+]
 
 [[package]]
 name = "multidict"

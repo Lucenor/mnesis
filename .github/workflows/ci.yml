@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --extra dev --frozen
+        run: uv sync --dev --frozen
 
       - name: Ruff lint
         run: uv run ruff check src/ tests/
@@ -41,7 +41,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --extra dev --frozen
+        run: uv sync --dev --frozen
 
       - name: mypy
         run: uv run mypy src/mnesis
@@ -63,7 +63,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev --frozen
+        run: uv sync --dev --frozen
 
       - name: Run tests
         env:
@@ -76,3 +76,4 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
