@@ -1,4 +1,6 @@
 name: CI
+permissions:
+  contents: read
 
 on:
   push:
@@ -50,6 +52,7 @@ jobs:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
     strategy:
       fail-fast: false
