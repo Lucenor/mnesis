@@ -3,8 +3,16 @@ name: Docs
 on:
   push:
     branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/**"
   pull_request:
     branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/**"
   workflow_dispatch:
 
 permissions:
