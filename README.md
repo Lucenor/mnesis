@@ -23,6 +23,8 @@ The standard fix — telling the model to "summarize itself" — is unreliable. 
 
 Evaluated on [OOLONG](https://github.com/Bertram-et-al/OOLONG), a long-context reasoning and aggregation benchmark. Both mnesis and Claude Code are built on Claude Opus 4.6; the gap comes entirely from context architecture.
 
+> The charts below compare mnesis against Claude Code and unmanaged Opus 4.6 across context lengths from 8K to 1M tokens.
+
 **Score improvement over raw Opus 4.6 at each context length:**
 
 ![OOLONG benchmark — score improvement over raw Opus 4.6](docs/images/benchmark_improvement.png)
@@ -31,7 +33,7 @@ Evaluated on [OOLONG](https://github.com/Bertram-et-al/OOLONG), a long-context r
 
 ![OOLONG benchmark — absolute scores](docs/images/benchmark_scores.png)
 
-> Volt is the reference TypeScript implementation of the LCM architecture. mnesis is the Python port. Raw Opus 4.6 uses no context management — scores collapse past 32K tokens.
+Raw Opus 4.6 uses no context management — scores collapse past 32K tokens.
 
 ---
 
