@@ -83,7 +83,7 @@ class StorePool:
         Returns:
             The shared ``aiosqlite.Connection`` for this path.
         """
-        resolved = str(Path(db_path).expanduser().resolve())
+        resolved = str(Path(db_path).expanduser().resolve())  # noqa: ASYNC240
 
         # Fast path — connection already open
         if resolved in self._connections:
@@ -128,7 +128,7 @@ class StorePool:
 
     async def close_path(self, db_path: str) -> None:
         """Close and remove the connection for a single path."""
-        resolved = str(Path(db_path).expanduser().resolve())
+        resolved = str(Path(db_path).expanduser().resolve())  # noqa: ASYNC240
         conn = self._connections.pop(resolved, None)
         self._write_locks.pop(resolved, None)
         self._open_locks.pop(resolved, None)
@@ -145,7 +145,7 @@ class StorePool:
     # ── Convenience: process-level default pool ─────────────────────────────────
 
     @staticmethod
-    def default() -> "StorePool":
+    def default() -> StorePool:
         """
         Return the process-level default pool.
 

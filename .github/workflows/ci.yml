@@ -17,12 +17,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.12
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --frozen
 
       - name: Ruff lint
         run: uv run ruff check src/ tests/
@@ -40,12 +38,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.12
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --frozen
 
       - name: mypy
         run: uv run mypy src/mnesis
@@ -53,6 +49,8 @@ jobs:
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -64,12 +62,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --frozen
 
       - name: Run tests
         env:
@@ -78,7 +74,8 @@ jobs:
 
       - name: Upload coverage report
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
           fail_ci_if_error: false
+          use_oidc: true

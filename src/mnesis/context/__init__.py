@@ -2,4 +2,4 @@
 
 from mnesis.context.builder import BuiltContext, ContextBuilder, LLMMessage
 
-__all__ = ["ContextBuilder", "BuiltContext", "LLMMessage"]
+__all__ = ["BuiltContext", "ContextBuilder", "LLMMessage"]

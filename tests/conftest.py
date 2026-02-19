@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -11,7 +10,7 @@ import pytest_asyncio
 
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, StoreConfig
-from mnesis.models.message import Message, TextPart, ToolPart, ToolStatus, TokenUsage
+from mnesis.models.message import Message
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
 from mnesis.store.pool import StorePool
 from mnesis.store.summary_dag import SummaryDAGStore
@@ -110,14 +109,16 @@ def make_raw_part(
         if part_type == "text":
             content = json.dumps({"type": "text", "text": "Hello world"})
         elif part_type == "tool":
-            content = json.dumps({
-                "type": "tool",
-                "tool_name": tool_name or "test_tool",
-                "tool_call_id": tool_call_id or "call_001",
-                "input": {},
-                "output": "tool output here",
-                "status": {"state": tool_state or "completed"},
-            })
+            content = json.dumps(
+                {
+                    "type": "tool",
+                    "tool_name": tool_name or "test_tool",
+                    "tool_call_id": tool_call_id or "call_001",
+                    "input": {},
+                    "output": "tool output here",
+                    "status": {"state": tool_state or "completed"},
+                }
+            )
         else:
             content = json.dumps({"type": part_type})
 

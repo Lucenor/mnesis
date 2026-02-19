@@ -127,13 +127,13 @@ class LargeFileHandler:
         # Read content if not provided
         if content is None:
             file_path = Path(path)
-            if not file_path.exists():
+            if not file_path.exists():  # noqa: ASYNC240
                 return FileHandleResult(
                     path=path,
                     inline_content=f"[File not found: {path}]",
                 )
             try:
-                content = file_path.read_text(encoding="utf-8", errors="replace")
+                content = file_path.read_text(encoding="utf-8", errors="replace")  # noqa: ASYNC240
             except Exception as exc:
                 return FileHandleResult(
                     path=path,
@@ -308,7 +308,9 @@ class LargeFileHandler:
                         for alias in node.names:
                             imports.append(alias.name)
 
-            lines.append(f"Python module with {len(classes)} class(es), {len(functions)} function(s).")
+            lines.append(
+                f"Python module with {len(classes)} class(es), {len(functions)} function(s)."
+            )
             if classes:
                 lines.append(f"Classes: {', '.join(classes[:10])}")
             if functions:
@@ -329,16 +331,15 @@ class LargeFileHandler:
             if isinstance(data, dict):
                 keys = list(data.keys())[:20]
                 arrays = [k for k, v in data.items() if isinstance(v, list)]
-                return (
-                    f"JSON object with {len(data)} keys.\n"
-                    f"Top-level keys: {', '.join(keys)}"
-                    + (f"\nArrays: {', '.join(arrays[:10])}" if arrays else "")
+                return f"JSON object with {len(data)} keys.\nTop-level keys: {', '.join(keys)}" + (
+                    f"\nArrays: {', '.join(arrays[:10])}" if arrays else ""
                 )
             elif isinstance(data, list):
-                sample_keys = list(data[0].keys())[:10] if data and isinstance(data[0], dict) else []
-                return (
-                    f"JSON array with {len(data)} items."
-                    + (f"\nItem keys: {', '.join(sample_keys)}" if sample_keys else "")
+                sample_keys = (
+                    list(data[0].keys())[:10] if data and isinstance(data[0], dict) else []
+                )
+                return f"JSON array with {len(data)} items." + (
+                    f"\nItem keys: {', '.join(sample_keys)}" if sample_keys else ""
                 )
             else:
                 return f"JSON scalar: {type(data).__name__}"
@@ -354,14 +355,18 @@ class LargeFileHandler:
             data = yaml.safe_load(content)
             if isinstance(data, dict):
                 keys = list(data.keys())[:20]
-                return f"YAML document with {len(data)} keys.\nKeys: {', '.join(str(k) for k in keys)}"
+                return (
+                    f"YAML document with {len(data)} keys.\nKeys: {', '.join(str(k) for k in keys)}"
+                )
             elif isinstance(data, list):
                 return f"YAML sequence with {len(data)} items."
             else:
                 return f"YAML scalar: {type(data).__name__}"
         except Exception:
             # Fallback: count keys heuristically
-            key_lines = [l for l in content.split("\n") if l and not l.startswith(" ") and ":" in l]
+            key_lines = [
+                ln for ln in content.split("\n") if ln and not ln.startswith(" ") and ":" in ln
+            ]
             return f"YAML document. Top-level keys: {len(key_lines)}"
 
     @staticmethod
@@ -374,7 +379,7 @@ class LargeFileHandler:
             keys = list(data.keys())[:20]
             return f"TOML document with {len(data)} sections.\nSections: {', '.join(keys)}"
         except Exception:
-            sections = [l.strip("[]").strip() for l in content.split("\n") if l.startswith("[")]
+            sections = [ln.strip("[]").strip() for ln in content.split("\n") if ln.startswith("[")]
             return f"TOML document. Sections: {', '.join(sections[:15])}"
 
     @staticmethod
@@ -389,7 +394,7 @@ class LargeFileHandler:
         word_count = len(content.split())
         summary = f"Markdown document (~{word_count} words)."
         if headings:
-            summary += f"\nSections:\n" + "\n".join(headings[:20])
+            summary += "\nSections:\n" + "\n".join(headings[:20])
         return summary
 
     @staticmethod
@@ -400,19 +405,28 @@ class LargeFileHandler:
             return "Empty CSV file."
         header = lines[0].split(sep)
         row_count = len(lines) - 1
-        return f"Table with {row_count} rows, {len(header)} columns.\nColumns: {', '.join(h.strip() for h in header[:20])}"
+        return (
+            f"Table with {row_count} rows, {len(header)} columns.\n"
+            f"Columns: {', '.join(h.strip() for h in header[:20])}"
+        )
 
     @staticmethod
     def _summarise_ts_js(content: str) -> str:
         """Summarise TypeScript/JavaScript via regex heuristics."""
         import re
 
-        exports = re.findall(r"^export\s+(?:default\s+)?(?:class|function|const|let|var)\s+(\w+)", content, re.MULTILINE)
+        exports = re.findall(
+            r"^export\s+(?:default\s+)?(?:class|function|const|let|var)\s+(\w+)",
+            content,
+            re.MULTILINE,
+        )
         classes = re.findall(r"^(?:export\s+)?class\s+(\w+)", content, re.MULTILINE)
-        functions = re.findall(r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", content, re.MULTILINE)
+        functions = re.findall(
+            r"^(?:export\s+)?(?:async\s+)?function\s+(\w+)", content, re.MULTILINE
+        )
         imports = re.findall(r"^import\s+.*from\s+['\"]([^'\"]+)['\"]", content, re.MULTILINE)
 
-        lines = [f"TypeScript/JavaScript module."]
+        lines = ["TypeScript/JavaScript module."]
         if classes:
             lines.append(f"Classes: {', '.join(classes[:10])}")
         if functions:

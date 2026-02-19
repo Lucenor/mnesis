@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from enum import StrEnum
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import structlog
 
@@ -124,7 +125,7 @@ class EventBus:
                 if asyncio.iscoroutine(result):
                     try:
                         loop = asyncio.get_running_loop()
-                        loop.create_task(result)
+                        _task = loop.create_task(result)  # noqa: RUF006
                     except RuntimeError:
                         # No running event loop — skip async handler
                         pass

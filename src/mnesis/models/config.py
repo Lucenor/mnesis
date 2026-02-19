@@ -49,11 +49,9 @@ class CompactionConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_prune_thresholds(self) -> "CompactionConfig":
+    def validate_prune_thresholds(self) -> CompactionConfig:
         if self.prune_minimum_tokens >= self.prune_protect_tokens:
-            raise ValueError(
-                "prune_minimum_tokens must be strictly less than prune_protect_tokens"
-            )
+            raise ValueError("prune_minimum_tokens must be strictly less than prune_protect_tokens")
         return self
 
 
@@ -149,7 +147,7 @@ class MnesisConfig(BaseModel):
     )
 
     @classmethod
-    def default(cls) -> "MnesisConfig":
+    def default(cls) -> MnesisConfig:
         """Return a config instance with all defaults."""
         return cls()
 
@@ -170,7 +168,7 @@ class ModelInfo(BaseModel):
     encoding: Literal["cl100k_base", "o200k_base", "claude_heuristic", "unknown"] = "cl100k_base"
 
     @classmethod
-    def from_model_string(cls, model: str) -> "ModelInfo":
+    def from_model_string(cls, model: str) -> ModelInfo:
         """
         Create a ModelInfo by heuristically parsing a model string.
 

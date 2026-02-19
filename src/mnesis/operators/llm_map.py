@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import structlog
 from jinja2 import Template
@@ -73,7 +74,7 @@ class LLMMap:
         max_retries: int | None = None,
         system_prompt: str | None = None,
         temperature: float = 0.0,
-        timeout: float = 60.0,
+        timeout_secs: float = 60.0,
     ) -> AsyncIterator[MapResult]:
         """
         Process inputs in parallel with the given prompt template.
@@ -88,7 +89,7 @@ class LLMMap:
             max_retries: Override config max retries per item.
             system_prompt: Optional system prompt for all calls.
             temperature: Sampling temperature. Use 0 for deterministic extraction.
-            timeout: Per-item timeout in seconds.
+            timeout_secs: Per-item timeout in seconds.
 
         Yields:
             MapResult objects as they complete (not in input order).
@@ -115,9 +116,7 @@ class LLMMap:
         template = Template(prompt_template)
 
         if self._event_bus:
-            self._event_bus.publish(
-                MnesisEvent.MAP_STARTED, {"total": len(inputs), "model": model}
-            )
+            self._event_bus.publish(MnesisEvent.MAP_STARTED, {"total": len(inputs), "model": model})
 
         tasks = [
             asyncio.create_task(
@@ -131,7 +130,7 @@ class LLMMap:
                     max_retries=retries,
                     system_prompt=system_prompt,
                     temperature=temperature,
-                    timeout=timeout,
+                    timeout=timeout_secs,
                 )
             )
             for item in inputs
@@ -165,7 +164,7 @@ class LLMMap:
         max_retries: int,
         system_prompt: str | None,
         temperature: float,
-        timeout: float,
+        timeout: float,  # noqa: ASYNC109
     ) -> MapResult:
         """Process a single item with retry logic."""
         prompt = template.render(item=item)
@@ -177,7 +176,8 @@ class LLMMap:
                     response_text = await asyncio.wait_for(
                         self._call_llm(
                             model=model,
-                            prompt=prompt + (f"\n\nPrevious error: {last_error}" if last_error else ""),
+                            prompt=prompt
+                            + (f"\n\nPrevious error: {last_error}" if last_error else ""),
                             system_prompt=system_prompt,
                             temperature=temperature,
                         ),
@@ -193,12 +193,14 @@ class LLMMap:
                         attempts=attempt,
                     )
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     last_error = f"Timeout after {timeout}s"
                     self._logger.warning("llm_map_timeout", attempt=attempt)
                 except (json.JSONDecodeError, ValueError) as exc:
                     last_error = str(exc)
-                    self._logger.warning("llm_map_validation_failed", attempt=attempt, error=last_error)
+                    self._logger.warning(
+                        "llm_map_validation_failed", attempt=attempt, error=last_error
+                    )
                 except Exception as exc:
                     last_error = str(exc)
                     self._logger.warning("llm_map_error", attempt=attempt, error=last_error)
@@ -240,7 +242,7 @@ class LLMMap:
             messages=messages,
             temperature=temperature,
         )
-        return response.choices[0].message.content or ""  # type: ignore[union-attr]
+        return response.choices[0].message.content or ""
 
     @staticmethod
     def _parse_response(
