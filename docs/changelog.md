@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 — 2026-02-20
+
+- fix: make all examples functional in MNESIS_MOCK_LLM=1 mode (#26)
+- Fix missing comma in SECURITY.md disclosure policy (#24)
+- fix: accept {{ item['key'] }} and {{ item.attr }} in operator templates (#25)
+- chore: add project URLs for PyPI sidebar (#23)
+- chore: upgrade codeql-action to v4 (#21)
+
 ## 0.1.0 — 2026-02-20
 
 - chore: pre-release fixes for 0.1.0 (#20)
