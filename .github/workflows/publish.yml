@@ -29,7 +29,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check version format and uniqueness
+      - name: Check version format, ordering, and uniqueness
         id: check
         run: |
           VERSION="${{ inputs.version }}"
@@ -52,6 +52,25 @@ jobs:
           if grep -q "^## ${VERSION}" docs/changelog.md; then
             echo "::error::docs/changelog.md already has an entry for ${VERSION}"
             exit 1
+          fi
+
+          # Version must be strictly greater than the latest release tag
+          LAST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -n "$LAST_TAG" ]; then
+            LAST_VERSION="${LAST_TAG#v}"
+            python3 - <<PYEOF
+          import sys
+
+          def parse(v):
+              return tuple(int(x) for x in v.split('.'))
+
+          new  = parse("${VERSION}")
+          last = parse("${LAST_VERSION}")
+          if new <= last:
+              print(f"::error::Version ${VERSION} is not greater than last release ${LAST_VERSION}")
+              sys.exit(1)
+          print(f"Version ${VERSION} > ${LAST_VERSION} ✓")
+          PYEOF
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -134,10 +153,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     steps:
-      # Generate a short-lived token from the org-level GitHub App.
-      # This is preferred over a personal PAT: it belongs to the org,
-      # survives personnel changes, and tokens auto-expire after 1 hour.
-      # The app needs: Repository permissions → Contents: Read and write.
       - name: Generate release token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -148,8 +163,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # App token so the release commit triggers downstream workflows
-          # (pushes from the default GITHUB_TOKEN are excluded by GitHub).
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Install uv
@@ -171,8 +184,7 @@ jobs:
           NOTES="${{ inputs.notes }}"
 
           if [ -z "$NOTES" ]; then
-            # Auto-generate from commits since the last tag (or all commits)
-            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            LAST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
             if [ -n "$LAST_TAG" ]; then
               NOTES=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" --no-merges)
             else
@@ -180,7 +192,6 @@ jobs:
             fi
           fi
 
-          # Write to file for safe multiline handling in later steps
           printf '%s' "$NOTES" > /tmp/release_notes.md
 
           echo "notes<<EOF" >> "$GITHUB_OUTPUT"
@@ -210,7 +221,6 @@ jobs:
           date    = datetime.date.today().strftime("%Y-%m-%d")
           notes   = os.environ["NOTES"].strip()
 
-          # Insert after the H1 header and its trailing blank line
           insert = 1
           for i, line in enumerate(lines):
               if i == 0:
@@ -225,7 +235,12 @@ jobs:
           print(f"Prepended changelog entry for {version}")
           PYEOF
 
-      # ── 3d. Commit, tag, push ────────────────────────────────────────────
+      # ── 3d. Build distribution ───────────────────────────────────────────
+      # Build before pushing so a build failure leaves the repo untouched.
+      - name: Build package
+        run: uv build
+
+      # ── 3e. Commit, tag, push ────────────────────────────────────────────
       - name: Commit and tag release
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
@@ -236,17 +251,12 @@ jobs:
           git tag -a "$TAG" -m "Release ${VERSION}"
           git push origin main --follow-tags
 
-      # ── 3e. Build distribution ───────────────────────────────────────────
-      - name: Build package
-        run: uv build
-
       # ── 3f. Create GitHub Release ────────────────────────────────────────
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           TAG="${{ needs.validate.outputs.tag }}"
-          VERSION="${{ needs.validate.outputs.version }}"
           gh release create "$TAG" dist/* \
             --title "mnesis ${TAG}" \
             --notes-file /tmp/release_notes.md
@@ -256,3 +266,63 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  # ── 4. Rollback (runs only if release job fails) ──────────────────────────
+  rollback:
+    name: Rollback failed release
+    needs: release
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate release token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "Mnesis Release Bot"
+          git config user.email "mnesis-release-bot[bot]@users.noreply.github.com"
+
+      - name: Delete GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+            echo "Deleted GitHub Release $TAG"
+          else
+            echo "No GitHub Release found for $TAG, skipping"
+          fi
+
+      - name: Delete remote tag
+        run: |
+          TAG="v${{ inputs.version }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
+            git push origin ":refs/tags/${TAG}"
+            echo "Deleted remote tag $TAG"
+          else
+            echo "No remote tag $TAG found, skipping"
+          fi
+
+      - name: Revert release commit
+        run: |
+          VERSION="${{ inputs.version }}"
+          git fetch origin main
+          COMMIT=$(git log origin/main --oneline | awk "/chore: release ${VERSION}$/ {print \$1; exit}")
+          if [ -n "$COMMIT" ]; then
+            git revert --no-edit "$COMMIT"
+            git push origin main
+            echo "Reverted release commit $COMMIT"
+          else
+            echo "No release commit found on main for ${VERSION}, skipping"
+          fi
