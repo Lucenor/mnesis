@@ -48,6 +48,12 @@ jobs:
             exit 1
           fi
 
+          # Changelog must not already have an entry for this version
+          if grep -q "^## ${VERSION}" docs/changelog.md; then
+            echo "::error::docs/changelog.md already has an entry for ${VERSION}"
+            exit 1
+          fi
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}"         >> "$GITHUB_OUTPUT"
 
