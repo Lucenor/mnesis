@@ -1,62 +1,280 @@
-name: Publish to PyPI
+name: Publish
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish (e.g. 0.2.0) — must match pyproject.toml"
+        description: "Version to release (e.g. 0.2.0)"
         required: true
         type: string
+      notes:
+        description: "Release notes (markdown bullet points). Leave blank to auto-generate from git log."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write  # PyPI OIDC
 
 jobs:
-  build:
-    name: Build distribution
+  # ── 1. Validate inputs ────────────────────────────────────────────────────
+  validate:
+    name: Validate version
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          enable-cache: true
+          fetch-depth: 0
 
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Verify version matches pyproject.toml
+      - name: Check version format, ordering, and uniqueness
+        id: check
         run: |
-          TOML_VERSION=$(uv run python -c "import tomllib; f=open('pyproject.toml','rb'); d=tomllib.load(f); print(d['project']['version'])")
-          INPUT_VERSION="${{ inputs.version }}"
-          if [ "$TOML_VERSION" != "$INPUT_VERSION" ]; then
-            echo "Version mismatch: pyproject.toml has '$TOML_VERSION', input was '$INPUT_VERSION'"
+          VERSION="${{ inputs.version }}"
+
+          # Must be X.Y.Z (no leading v)
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Version '$VERSION' is not valid semver (expected X.Y.Z)"
             exit 1
           fi
-          echo "Version $TOML_VERSION confirmed."
 
+          TAG="v${VERSION}"
+
+          # Tag must not already exist
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag '$TAG' already exists"
+            exit 1
+          fi
+
+          # Changelog must not already have an entry for this version
+          if grep -q "^## ${VERSION}" docs/changelog.md; then
+            echo "::error::docs/changelog.md already has an entry for ${VERSION}"
+            exit 1
+          fi
+
+          # Version must be strictly greater than the latest release tag
+          LAST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -n "$LAST_TAG" ]; then
+            LAST_VERSION="${LAST_TAG#v}"
+            python3 - <<PYEOF
+          import sys
+
+          def parse(v):
+              return tuple(int(x) for x in v.split('.'))
+
+          new  = parse("${VERSION}")
+          last = parse("${LAST_VERSION}")
+          if new <= last:
+              print(f"::error::Version ${VERSION} is not greater than last release ${LAST_VERSION}")
+              sys.exit(1)
+          print(f"Version ${VERSION} > ${LAST_VERSION} ✓")
+          PYEOF
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"         >> "$GITHUB_OUTPUT"
+
+  # ── 2. Full CI gate ───────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Ruff lint
+        run: uv run ruff check src/ tests/
+
+      - name: Ruff format check
+        run: uv run ruff format --check src/ tests/
+
+  typecheck:
+    name: Type Check
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: mypy
+        run: uv run mypy src/mnesis
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run tests
+        env:
+          MNESIS_MOCK_LLM: "1"
+        run: uv run pytest
+
+  # ── 3. Release ────────────────────────────────────────────────────────────
+  release:
+    name: Release v${{ needs.validate.outputs.version }}
+    needs: [validate, lint, typecheck, test]
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Generate release token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+          python-version: "3.12"
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "Mnesis Release Bot"
+          git config user.email "mnesis-release-bot[bot]@users.noreply.github.com"
+
+      # ── 3a. Resolve release notes ────────────────────────────────────────
+      - name: Resolve release notes
+        id: notes
+        run: |
+          NOTES="${{ inputs.notes }}"
+
+          if [ -z "$NOTES" ]; then
+            LAST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            if [ -n "$LAST_TAG" ]; then
+              NOTES=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" --no-merges)
+            else
+              NOTES=$(git log HEAD --pretty=format:"- %s" --no-merges)
+            fi
+          fi
+
+          printf '%s' "$NOTES" > /tmp/release_notes.md
+
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      # ── 3b. Bump version in pyproject.toml ──────────────────────────────
+      - name: Bump version in pyproject.toml
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
+          grep '^version = ' pyproject.toml
+
+      # ── 3c. Prepend changelog entry ──────────────────────────────────────
+      - name: Update docs/changelog.md
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          NOTES: ${{ steps.notes.outputs.notes }}
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib, os, datetime
+
+          path    = pathlib.Path("docs/changelog.md")
+          text    = path.read_text()
+          lines   = text.splitlines(keepends=True)
+          version = os.environ["VERSION"]
+          date    = datetime.date.today().strftime("%Y-%m-%d")
+          notes   = os.environ["NOTES"].strip()
+
+          insert = 1
+          for i, line in enumerate(lines):
+              if i == 0:
+                  continue
+              if line.strip() == "" and i == 1:
+                  insert = 2
+                  break
+
+          new_section = f"## {version} — {date}\n\n{notes}\n\n"
+          lines.insert(insert, new_section)
+          path.write_text("".join(lines))
+          print(f"Prepended changelog entry for {version}")
+          PYEOF
+
+      # ── 3d. Build distribution ───────────────────────────────────────────
+      # Build before pushing so a build failure leaves the repo untouched.
       - name: Build package
         run: uv build
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
+      # ── 3e. Commit, tag, push ────────────────────────────────────────────
+      - name: Commit and tag release
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          TAG="${{ needs.validate.outputs.tag }}"
 
-  publish:
-    name: Publish to PyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
+          git add pyproject.toml docs/changelog.md
+          git commit -m "chore: release ${VERSION}"
+          git tag -a "$TAG" -m "Release ${VERSION}"
+          git push origin main
+          git push origin "$TAG"
 
+      # ── 3f. Create GitHub Release (draft) ───────────────────────────────
+      # Created as a draft so it is not subject to release immutability rules.
+      # Promoted to published only after PyPI succeeds.
+      - name: Create GitHub Release (draft)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="${{ needs.validate.outputs.tag }}"
+          gh release create "$TAG" dist/* \
+            --title "mnesis ${TAG}" \
+            --notes-file /tmp/release_notes.md \
+            --draft
+
+      # ── 3g. Publish to PyPI ──────────────────────────────────────────────
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        with:
+          packages-dir: dist/
+
+      # ── 3h. Publish GitHub Release ───────────────────────────────────────
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="${{ needs.validate.outputs.tag }}"
+          gh release edit "$TAG" --draft=false
