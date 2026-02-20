@@ -10,7 +10,7 @@
   <a href="https://codecov.io/github/Lucenor/mnesis"><img src="https://img.shields.io/codecov/c/github/Lucenor/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="Coverage"></a>
   <a href="https://mnesis.lucenor.tech"><img src="https://img.shields.io/badge/docs-mnesis.lucenor.tech-5c6bc0?labelColor=1a1a2e" alt="Docs"></a>
   <a href="https://github.com/Lucenor/mnesis/attestations"><img src="https://img.shields.io/badge/provenance-attested-5c6bc0?labelColor=1a1a2e&logo=githubactions&logoColor=white" alt="Attestation"></a>
-  <a href="https://securityscorecards.dev/#/github.com/Lucenor/mnesis"><img src="https://api.securityscorecards.dev/projects/github.com/Lucenor/mnesis/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/Lucenor/mnesis"><img src="https://api.scorecard.dev/projects/github.com/Lucenor/mnesis/badge" alt="OpenSSF Scorecard"></a>
 </p>
 
 ---
