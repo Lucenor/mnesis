@@ -36,21 +36,25 @@ To use with the real Anthropic SDK, replace call_my_llm() with:
 """
 
 import asyncio
-import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # ---------------------------------------------------------------------------
 # Stub: replace this with your real SDK call
 # ---------------------------------------------------------------------------
 
 _CANNED_RESPONSES = [
-    "Photosynthesis is the process by which plants convert sunlight, water, and CO₂ into glucose and oxygen.",
+    "Photosynthesis is the process by which plants convert sunlight, water, "
+    "and CO2 into glucose and oxygen.",
     "The light-dependent reactions occur in the thylakoid membranes and produce ATP and NADPH.",
-    "The Calvin cycle (light-independent reactions) takes place in the stroma and fixes CO₂ into sugar.",
-    "Chlorophyll a and b are the primary pigments; they absorb red and blue light most efficiently.",
-    "Without photosynthesis, virtually all life on Earth would cease — it is the base of most food chains.",
+    "The Calvin cycle (light-independent reactions) takes place in the stroma "
+    "and fixes CO2 into sugar.",
+    "Chlorophyll a and b are the primary pigments; "
+    "they absorb red and blue light most efficiently.",
+    "Without photosynthesis, virtually all life on Earth would cease - "
+    "it is the base of most food chains.",
 ]
 
 
@@ -106,16 +110,11 @@ async def main() -> None:
             # 1. Build the message list from mnesis context
             #    (normally you'd pass this to your SDK so the model sees history)
             context = await session.messages()
-            llm_messages = [
-                {"role": m.role, "content": m.text_content()}
-                for m in context
-            ]
+            llm_messages = [{"role": m.role, "content": m.text_content()} for m in context]
             llm_messages.append({"role": "user", "content": question})
 
             # 2. Call your own LLM
-            response_text, input_tok, output_tok = call_my_llm(
-                llm_messages, system_prompt, i
-            )
+            response_text, input_tok, output_tok = call_my_llm(llm_messages, system_prompt, i)
 
             # 3. Record the turn — mnesis persists both sides and handles compaction
             result = await session.record(
