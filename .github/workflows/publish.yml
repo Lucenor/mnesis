@@ -14,7 +14,8 @@ on:
 
 permissions:
   contents: read
-  id-token: write  # PyPI OIDC
+  id-token: write      # PyPI OIDC + Sigstore signing
+  attestations: write  # build provenance attestations
 
 jobs:
   # ── 1. Validate inputs ────────────────────────────────────────────────────
@@ -240,7 +241,17 @@ jobs:
       - name: Build package
         run: uv build
 
-      # ── 3e. Commit, tag, push ────────────────────────────────────────────
+      # ── 3e. Attest build provenance ──────────────────────────────────────
+      # Generates a Sigstore-signed SLSA provenance attestation for the
+      # built artifacts. Attestations are stored in GitHub's attestation
+      # store and uploaded to PyPI alongside the package. Users can verify
+      # with: gh attestation verify <wheel> --repo Lucenor/mnesis
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*
+
+      # ── 3f. Commit, tag, push ────────────────────────────────────────────
       - name: Commit and tag release
         run: |
           VERSION="${{ needs.validate.outputs.version }}"

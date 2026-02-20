@@ -6,7 +6,10 @@
   <a href="https://pypi.org/project/mnesis/"><img src="https://img.shields.io/pypi/v/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="PyPI"></a>
   <a href="https://pypi.org/project/mnesis/"><img src="https://img.shields.io/pypi/pyversions/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-5c6bc0?labelColor=1a1a2e" alt="License"></a>
-  <a href="https://github.com/Lucenor/mnesis/actions"><img src="https://img.shields.io/github/actions/workflow/status/Lucenor/mnesis/ci.yml?color=5c6bc0&labelColor=1a1a2e" alt="CI"></a>
+  <a href="https://github.com/Lucenor/mnesis/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Lucenor/mnesis/ci.yml?color=5c6bc0&labelColor=1a1a2e" alt="CI"></a>
+  <a href="https://codecov.io/github/Lucenor/mnesis"><img src="https://img.shields.io/codecov/c/github/Lucenor/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="Coverage"></a>
+  <a href="https://mnesis.lucenor.tech"><img src="https://img.shields.io/badge/docs-mnesis.lucenor.tech-5c6bc0?labelColor=1a1a2e" alt="Docs"></a>
+  <a href="https://github.com/Lucenor/mnesis/attestations"><img src="https://img.shields.io/badge/provenance-attested-5c6bc0?labelColor=1a1a2e&logo=githubactions&logoColor=white" alt="Attestation"></a>
 </p>
 
 ---
@@ -94,7 +97,7 @@ mnesis works with any LLM provider via [litellm](https://docs.litellm.ai/). Pass
 | Google Gemini | `"gemini/gemini-1.5-pro"` | `GEMINI_API_KEY` |
 | OpenRouter | `"openrouter/meta-llama/llama-3.1-70b-instruct"` | `OPENROUTER_API_KEY` |
 
-See [docs/api.md](docs/api.md#configuring-llm-providers) for the full provider configuration guide.
+See the [Provider Configuration guide](https://mnesis.lucenor.tech/providers/) for the full provider configuration guide.
 
 ### BYO-LLM — use your own SDK
 
