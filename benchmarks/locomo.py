@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
 import time
@@ -124,8 +125,16 @@ def load_conversations(data_path: Path) -> list[dict[str, Any]]:
             }
         }
     """
-    with open(data_path) as f:
-        raw = json.load(f)
+    try:
+        with open(data_path) as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Dataset file not found: {data_path}\n"
+            "Pass --data /path/to/locomo10.json or let the benchmark download it."
+        ) from None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse dataset file {data_path}: {exc}") from exc
     # Top-level may be a dict keyed by conversation ID or a list
     if isinstance(raw, list):
         return raw
@@ -143,7 +152,7 @@ def extract_turns(convo: dict[str, Any]) -> list[tuple[str, str]]:
     idx = 1
     while (key := f"session_{idx}") in conv:
         for turn in conv[key]:
-            turns.append((turn["speaker"], turn["text"]))
+            turns.append((turn.get("speaker", ""), turn.get("text", "")))
         idx += 1
     return turns
 
@@ -229,7 +238,6 @@ async def run_condition(
         compaction=CompactionConfig(auto=False, compaction_model=compaction_model)
     )
     turns = extract_turns(convo)
-    spk_a, spk_b = speaker_names(convo)
 
     async with await MnesisSession.create(
         model=model,
@@ -278,7 +286,8 @@ async def run_condition(
                         f"as concisely as possible:\n{qa['question']}"
                     )
                     prediction = turn.text.strip()
-                except Exception:
+                except Exception as exc:
+                    print(f"    [warn] QA inference failed: {exc}", file=sys.stderr)
                     prediction = ""
                 qa_results.append(
                     {
@@ -753,7 +762,7 @@ async def main() -> None:
             try:
                 Path(db).unlink(missing_ok=True)
             except OSError:
-                pass
+                pass  # Cleanup is best-effort; ignore failures for temp files
 
     # ── aggregate ──────────────────────────────────────────────────────
     baseline_by_cat = aggregate_f1(all_baseline)
@@ -761,8 +770,16 @@ async def main() -> None:
     b_overall = overall_f1(all_baseline)
     m_overall = overall_f1(all_mnesis)
 
-    avg_turns = sum(d["mnesis"]["turns_injected"] for d in token_data) / len(token_data)
-    avg_red = sum(d["mnesis"]["token_reduction_pct"] for d in token_data) / len(token_data)
+    avg_turns = (
+        sum(d["mnesis"]["turns_injected"] for d in token_data) / len(token_data)
+        if token_data
+        else 0
+    )
+    avg_red = (
+        sum(d["mnesis"]["token_reduction_pct"] for d in token_data) / len(token_data)
+        if token_data
+        else 0
+    )
     compact_stats = {
         "conversations": len(conversations),
         "avg_turns": avg_turns,
@@ -781,10 +798,10 @@ async def main() -> None:
         for cat in sorted(CATEGORY_NAMES):
             bv = baseline_by_cat.get(cat, float("nan"))
             mv = mnesis_by_cat.get(cat, float("nan"))
-            d = mv - bv if bv == bv and mv == mv else float("nan")
-            bvs = f"{bv:.3f}" if bv == bv else "—"
-            mvs = f"{mv:.3f}" if mv == mv else "—"
-            ds = f"{d:+.3f}" if d == d else "—"
+            d = mv - bv if not math.isnan(bv) and not math.isnan(mv) else float("nan")
+            bvs = f"{bv:.3f}" if not math.isnan(bv) else "—"
+            mvs = f"{mv:.3f}" if not math.isnan(mv) else "—"
+            ds = f"{d:+.3f}" if not math.isnan(d) else "—"
             print(f"{CATEGORY_NAMES[cat]:<16} {bvs:>10} {mvs:>10} {ds:>8}")
         print("-" * 48)
         print(f"{'Overall':<16} {b_overall:>10.3f} {m_overall:>10.3f} {m_overall - b_overall:>+8.3f}")
