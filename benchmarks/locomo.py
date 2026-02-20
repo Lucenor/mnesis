@@ -164,7 +164,7 @@ def extract_qa(convo: dict[str, Any]) -> list[dict[str, Any]]:
             cat = int(cat)
         except (ValueError, TypeError):
             cat = 0
-        pairs.append({**item, "category": cat})
+        pairs.append({**item, "category": cat, "answer": str(item.get("answer", ""))})
     return pairs
 
 
@@ -179,7 +179,7 @@ def speaker_names(convo: dict[str, Any]) -> tuple[str, str]:
 def _tokenise(text: str) -> list[str]:
     import re
 
-    return re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
+    return re.sub(r"[^a-z0-9\s]", " ", str(text).lower()).split()
 
 
 def token_f1(prediction: str, ground_truth: str) -> float:
