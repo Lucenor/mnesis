@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="docs/images/logo_icon.png" alt="mnesis logo" width="120"><br><br>
-  <img src="docs/images/logo_wordmark.png" alt="mnesis" width="320"><br><br>
+  <img src="https://raw.githubusercontent.com/Lucenor/mnesis/main/docs/images/logo_icon.png" alt="mnesis logo" width="120"><br><br>
+  <img src="https://raw.githubusercontent.com/Lucenor/mnesis/main/docs/images/logo_wordmark.png" alt="mnesis" width="320"><br><br>
   <em>Lossless Context Management for long-horizon LLM agents</em>
   <br><br>
   <a href="https://pypi.org/project/mnesis/"><img src="https://img.shields.io/pypi/v/mnesis?color=5c6bc0&labelColor=1a1a2e" alt="PyPI"></a>
@@ -31,11 +31,11 @@ Evaluated on [OOLONG](https://github.com/abertsch72/oolong), a long-context reas
 
 **Score improvement over raw Opus 4.6 at each context length:**
 
-![OOLONG benchmark — score improvement over raw Opus 4.6](docs/images/benchmark_improvement.png)
+![OOLONG benchmark — score improvement over raw Opus 4.6](https://raw.githubusercontent.com/Lucenor/mnesis/main/docs/images/benchmark_improvement.png)
 
 **Absolute scores vs raw Opus 4.6 baseline:**
 
-![OOLONG benchmark — absolute scores](docs/images/benchmark_scores.png)
+![OOLONG benchmark — absolute scores](https://raw.githubusercontent.com/Lucenor/mnesis/main/docs/images/benchmark_scores.png)
 
 Raw Opus 4.6 uses no context management — scores collapse past 32K tokens.
 
@@ -45,7 +45,7 @@ Raw Opus 4.6 uses no context management — scores collapse past 32K tokens.
 
 Traditional agentic frameworks ("RLM" — Recursive Language Models) ask the model to manage its own context via tool calls. LCM moves that responsibility to a deterministic engine layer:
 
-![RLM vs LCM approach](docs/images/rlm_vs_lcm.png)
+![RLM vs LCM approach](https://raw.githubusercontent.com/Lucenor/mnesis/main/docs/images/rlm_vs_lcm.png)
 
 The engine handles memory deterministically so the model can focus entirely on the task.
 
