@@ -5,14 +5,16 @@ permissions:
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "mkdocs.yml"
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "mkdocs.yml"
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
 
 jobs:
   lint:
