@@ -252,21 +252,32 @@ jobs:
           git push origin main
           git push origin "$TAG"
 
-      # ── 3f. Create GitHub Release ────────────────────────────────────────
-      - name: Create GitHub Release
+      # ── 3f. Create GitHub Release (draft) ───────────────────────────────
+      # Created as a draft so it is not subject to release immutability rules.
+      # Promoted to published only after PyPI succeeds.
+      - name: Create GitHub Release (draft)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           TAG="${{ needs.validate.outputs.tag }}"
           gh release create "$TAG" dist/* \
             --title "mnesis ${TAG}" \
-            --notes-file /tmp/release_notes.md
+            --notes-file /tmp/release_notes.md \
+            --draft
 
       # ── 3g. Publish to PyPI ──────────────────────────────────────────────
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+      # ── 3h. Publish GitHub Release ───────────────────────────────────────
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="${{ needs.validate.outputs.tag }}"
+          gh release edit "$TAG" --draft=false
 
   # ── 4. Rollback (runs only if release job fails) ──────────────────────────
   rollback:
