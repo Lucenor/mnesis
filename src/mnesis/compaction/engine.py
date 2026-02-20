@@ -257,9 +257,7 @@ class CompactionEngine:
 
         # Determine compaction model: explicit override → config → session model
         compaction_model = (
-            model_override
-            or self._config.compaction.compaction_model
-            or self._session_model
+            model_override or self._config.compaction.compaction_model or self._session_model
         )
         if not compaction_model:
             raise ValueError(
@@ -281,8 +279,14 @@ class CompactionEngine:
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
 
+        compaction_prompt = self._config.compaction.compaction_prompt
         candidate = await level1_summarise(
-            non_summary, compaction_model, budget, self._estimator, llm_call
+            non_summary,
+            compaction_model,
+            budget,
+            self._estimator,
+            llm_call,
+            compaction_prompt=compaction_prompt,
         )
 
         # Step 3: Level 2 (if Level 1 failed and level2 is enabled)
@@ -290,7 +294,12 @@ class CompactionEngine:
             if abort and abort.is_set():
                 raise asyncio.CancelledError("Compaction aborted")
             candidate = await level2_summarise(
-                non_summary, compaction_model, budget, self._estimator, llm_call
+                non_summary,
+                compaction_model,
+                budget,
+                self._estimator,
+                llm_call,
+                compaction_prompt=compaction_prompt,
             )
 
         # Step 4: Level 3 (deterministic fallback — always succeeds)

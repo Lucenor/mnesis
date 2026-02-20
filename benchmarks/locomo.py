@@ -72,6 +72,40 @@ CATEGORY_NAMES: dict[int, str] = {
 # Human F1 baseline from LOCOMO paper (Table 1)
 HUMAN_F1 = 0.879
 
+# ── compaction prompt ──────────────────────────────────────────────────────────
+
+LOCOMO_COMPACTION_PROMPT = """\
+You are creating a detailed memory summary of a long personal conversation.
+Your goal is to preserve every factual detail so that questions about this
+conversation can be answered accurately later.
+
+Focus especially on:
+- Specific dates and times when events occurred (preserve exact dates verbatim)
+- Each person's identity, background, relationships, and characteristics
+- Activities, hobbies, habits, and interests of each person
+- Life events: what happened, when it happened, and outcomes
+- Plans and upcoming events, with dates where mentioned
+- Numbers, durations, locations, and named entities (people, places, organisations)
+
+Format your response as:
+
+## Participants
+(For each person: full name, key identity facts, background, relationships)
+
+## Timeline of Events
+(Chronological list — one event per line in the form: DATE — PERSON — EVENT)
+
+## Personal Facts
+(Per-person subsections: hobbies, interests, recurring topics, opinions)
+
+## Plans & Upcoming Events
+(What each person has planned or mentioned wanting to do, with dates if given)
+
+## Key Details
+(Any other specific facts, numbers, durations, locations, or names that might
+be relevant to answer questions about this conversation)
+"""
+
 COLORS = {
     "baseline": "#4878cf",  # blue
     "mnesis": "#e87d3e",  # orange
@@ -234,7 +268,11 @@ async def run_condition(
     from mnesis.models.config import CompactionConfig
 
     config = MnesisConfig(
-        compaction=CompactionConfig(auto=False, compaction_model=compaction_model)
+        compaction=CompactionConfig(
+            auto=False,
+            compaction_model=compaction_model,
+            compaction_prompt=LOCOMO_COMPACTION_PROMPT,
+        )
     )
     turns = extract_turns(convo)
 
