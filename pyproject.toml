@@ -20,7 +20,6 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-
 dependencies = [
     "aiosqlite>=0.20.0",
     "pydantic>=2.7.0",
@@ -33,6 +32,13 @@ dependencies = [
     "jinja2>=3.1.4",
     "jsonschema>=4.22.0",
 ]
+
+[project.urls]
+Homepage      = "https://mnesis.lucenor.tech"
+Documentation = "https://mnesis.lucenor.tech"
+Source        = "https://github.com/Lucenor/mnesis"
+Changelog     = "https://mnesis.lucenor.tech/changelog/"
+Issues        = "https://github.com/Lucenor/mnesis/issues"
 
 [dependency-groups]
 dev = [
