@@ -198,6 +198,7 @@ async def run_condition(
     qa_pairs: list[dict[str, Any]],
     *,
     model: str,
+    compaction_model: str,
     compact: bool,
     db_path: str,
     max_questions: int,
@@ -208,13 +209,15 @@ async def run_condition(
     then answer QA questions.
 
     Args:
-        convo:         LOCOMO conversation dict (with ``qa`` and ``conversation``).
-        qa_pairs:      QA pairs to evaluate (pre-filtered by category if needed).
-        model:         LiteLLM model string.
-        compact:       If True, call ``session.compact()`` after injection.
-        db_path:       SQLite path (unique per run to avoid state bleed).
-        max_questions: Cap on QA pairs evaluated.
-        metrics_only:  Skip QA inference; record token and compaction stats only.
+        convo:             LOCOMO conversation dict (with ``qa`` and ``conversation``).
+        qa_pairs:          QA pairs to evaluate (pre-filtered by category if needed).
+        model:             LiteLLM model string for QA inference.
+        compaction_model:  LiteLLM model string for compaction summarisation.
+                           Defaults to the session model so no second API key is needed.
+        compact:           If True, call ``session.compact()`` after injection.
+        db_path:           SQLite path (unique per run to avoid state bleed).
+        max_questions:     Cap on QA pairs evaluated.
+        metrics_only:      Skip QA inference; record token and compaction stats only.
 
     Returns:
         Dict with per-question results, token counts, and compaction details.
@@ -222,7 +225,9 @@ async def run_condition(
     from mnesis import MnesisConfig, MnesisSession
     from mnesis.models.config import CompactionConfig
 
-    config = MnesisConfig(compaction=CompactionConfig(auto=False))
+    config = MnesisConfig(
+        compaction=CompactionConfig(auto=False, compaction_model=compaction_model)
+    )
     turns = extract_turns(convo)
     spk_a, spk_b = speaker_names(convo)
 
@@ -620,6 +625,18 @@ examples:
         help="Output directory for PNGs and JSON (default: benchmarks/results/)",
     )
     p.add_argument(
+        "--compaction-model",
+        default=None,
+        metavar="MODEL",
+        dest="compaction_model",
+        help=(
+            "LiteLLM model string for compaction summarisation. "
+            "Defaults to the same model as --model so only one API key is needed. "
+            "Override to use a cheaper model for compaction "
+            "(e.g. gemini/gemini-2.0-flash-lite)."
+        ),
+    )
+    p.add_argument(
         "--metrics-only",
         action="store_true",
         help="Skip QA inference; report token/compaction stats only (no API key needed)",
@@ -639,13 +656,16 @@ async def main() -> None:
     ensure_data(data_path)
     conversations = load_conversations(data_path)[: args.conversations]
 
+    compaction_model = args.compaction_model or args.model
+
     print("LOCOMO Benchmark")
-    print(f"  Model        : {args.model}")
-    print(f"  Conversations: {len(conversations)}")
-    print(f"  Max questions: {args.questions_per}")
-    print(f"  Category     : {CATEGORY_NAMES.get(args.category, 'all') if args.category else 'all'}")
-    print(f"  Mode         : {'metrics-only' if args.metrics_only else 'full QA'}")
-    print(f"  Output       : {args.output_dir}\n")
+    print(f"  Model            : {args.model}")
+    print(f"  Compaction model : {compaction_model}")
+    print(f"  Conversations    : {len(conversations)}")
+    print(f"  Max questions    : {args.questions_per}")
+    print(f"  Category         : {CATEGORY_NAMES.get(args.category, 'all') if args.category else 'all'}")
+    print(f"  Mode             : {'metrics-only' if args.metrics_only else 'full QA'}")
+    print(f"  Output           : {args.output_dir}\n")
 
     if os.environ.get("MNESIS_MOCK_LLM") == "1" and not args.metrics_only:
         print(
@@ -691,6 +711,7 @@ async def main() -> None:
         baseline = await run_condition(
             convo, qa_pairs,
             model=args.model,
+            compaction_model=compaction_model,
             compact=False,
             db_path=db_base,
             max_questions=args.questions_per,
@@ -704,6 +725,7 @@ async def main() -> None:
         mnesis = await run_condition(
             convo, qa_pairs,
             model=args.model,
+            compaction_model=compaction_model,
             compact=True,
             db_path=db_mnes,
             max_questions=args.questions_per,
