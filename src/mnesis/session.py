@@ -609,6 +609,9 @@ class MnesisSession:
                 token_estimate = self._estimator.estimate(
                     "\n".join(tool_segments), self._model_info
                 )
+            else:
+                # Other part types — repr-length heuristic, mirrors estimate_message()
+                token_estimate = max(1, len(str(part)) // 4)
             assistant_output_tokens += token_estimate
             raw = RawMessagePart(
                 id=make_id("part"),
@@ -625,9 +628,14 @@ class MnesisSession:
 
         # Resolve token usage — estimate from all parts if not provided
         if tokens is None:
-            user_text = " ".join(p.text for p in user_parts if isinstance(p, TextPart))
+            user_input_tokens = sum(
+                self._estimator.estimate(p.text, self._model_info)
+                if isinstance(p, TextPart)
+                else max(1, len(str(p)) // 4)
+                for p in user_parts
+            )
             tokens = TokenUsage(
-                input=self._estimator.estimate(user_text, self._model_info),
+                input=user_input_tokens,
                 output=assistant_output_tokens,
             )
 
