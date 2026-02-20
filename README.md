@@ -247,7 +247,7 @@ Operators (independent of session)
 
 Contributions are welcome — bug reports, feature requests, and pull requests alike.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide. The short version:
+See [CONTRIBUTING.md](https://github.com/Lucenor/mnesis/blob/main/CONTRIBUTING.md) for the full guide. The short version:
 
 ```bash
 # Clone and install with dev dependencies
@@ -280,4 +280,4 @@ Open an issue before starting large changes — it avoids duplicated effort.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache 2.0 — see [LICENSE](https://github.com/Lucenor/mnesis/blob/main/LICENSE) and [NOTICE](https://github.com/Lucenor/mnesis/blob/main/NOTICE).
