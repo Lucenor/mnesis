@@ -275,3 +275,134 @@ class TestMnesisSessionRecord:
 
         assert result.user_message_id.startswith("msg_")
         assert result.assistant_message_id.startswith("msg_")
+
+    async def test_record_tool_part_token_estimate_covers_input_output_error(self, tmp_path):
+        """record() without explicit tokens accounts for ToolPart input/output/error_message.
+
+        Regression test: previously token_estimate was computed from part.output only,
+        and the session-level output token count was derived from text-only content.
+        A ToolPart-only response therefore contributed 0 to tokens.output, preventing
+        auto-compaction from triggering on tool-heavy sessions.
+        """
+        from mnesis import MnesisSession
+        from mnesis.models.message import ToolPart, ToolStatus
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            # Completed tool with non-empty input and output
+            completed = ToolPart(
+                tool_name="read_file",
+                tool_call_id="call_ok",
+                input={"path": "/tmp/big_file.txt"},
+                output="line1\nline2\nline3",
+                status=ToolStatus(state="completed"),
+            )
+            result_ok = await session.record(
+                user_message="Read the file.",
+                assistant_response=[completed],
+            )
+
+            # Error tool with error_message but no output
+            errored = ToolPart(
+                tool_name="read_file",
+                tool_call_id="call_err",
+                input={"path": "/tmp/missing.txt"},
+                error_message="FileNotFoundError: /tmp/missing.txt",
+                status=ToolStatus(state="error"),
+            )
+            result_err = await session.record(
+                user_message="Read the missing file.",
+                assistant_response=[errored],
+            )
+
+        # Both turns must have non-zero output token estimates
+        assert result_ok.tokens.output > 0
+        assert result_err.tokens.output > 0
+
+    async def test_record_tool_part_persists_tool_call_id(self, tmp_path):
+        """record() with ToolPart writes tool_call_id/tool_name/tool_state to the DB row.
+
+        Regression test: before the fix, record() built RawMessagePart without setting
+        these fields, so the pruner's part_id_map lookup always failed and tool output
+        tombstoning was silently broken for the BYO-LLM pattern.
+        """
+        from mnesis import MnesisSession
+        from mnesis.models.message import ToolPart, ToolStatus
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            tool = ToolPart(
+                tool_name="list_directory",
+                tool_call_id="call_test_001",
+                input={"path": "/tmp"},
+                output="file1.txt  file2.txt",
+                status=ToolStatus(state="completed"),
+            )
+            result = await session.record(
+                user_message="List /tmp",
+                assistant_response=[tool],
+            )
+
+            raw_parts = await session._store.get_parts(result.assistant_message_id)
+
+        tool_raw = [p for p in raw_parts if p.part_type == "tool"]
+        assert len(tool_raw) == 1
+        assert tool_raw[0].tool_call_id == "call_test_001"
+        assert tool_raw[0].tool_name == "list_directory"
+        assert tool_raw[0].tool_state == "completed"
+
+    async def test_record_tool_parts_are_prunable(self, tmp_path, monkeypatch):
+        """ToolParts recorded via record() can be tombstoned by the pruner.
+
+        Regression test: tombstoning requires tool_call_id on the raw DB row.
+        Without the session.record() fix, no tombstones would ever be created.
+        """
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import CompactionConfig
+        from mnesis.models.message import TextPart, ToolPart, ToolStatus
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        config = MnesisConfig(
+            compaction=CompactionConfig(
+                prune=True,
+                prune_protect_tokens=50,
+                prune_minimum_tokens=10,
+            )
+        )
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+            config=config,
+        ) as session:
+            for i in range(4):
+                tool = ToolPart(
+                    tool_name="read_file",
+                    tool_call_id=f"call_{i:03d}",
+                    input={"path": f"/tmp/file_{i}.txt"},
+                    output=f"Content of file {i}: " + "x" * 200,
+                    status=ToolStatus(state="completed"),
+                )
+                await session.record(
+                    user_message=f"Read file {i}.",
+                    assistant_response=[
+                        tool,
+                        TextPart(text=f"File {i} read successfully."),
+                    ],
+                )
+
+            await session.compact()
+            messages_after = await session.messages()
+
+        tombstoned = sum(
+            1
+            for mwp in messages_after
+            for part in mwp.parts
+            if isinstance(part, ToolPart) and part.compacted_at is not None
+        )
+        assert tombstoned > 0, "Expected at least one tool output tombstoned after compaction"
