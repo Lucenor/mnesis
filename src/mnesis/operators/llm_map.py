@@ -98,7 +98,9 @@ class LLMMap:
         Raises:
             ValueError: If ``prompt_template`` does not contain ``{{ item }}``.
         """
-        if "{{ item }}" not in prompt_template and "{{item}}" not in prompt_template:
+        import re
+
+        if not re.search(r"\{\{[^}]*\bitem\b[^}]*\}\}", prompt_template):
             raise ValueError("prompt_template must contain {{ item }}")
 
         max_conc = concurrency or self._config.llm_map_concurrency
@@ -167,7 +169,14 @@ class LLMMap:
         timeout: float,  # noqa: ASYNC109
     ) -> MapResult:
         """Process a single item with retry logic."""
+        import os
+
         prompt = template.render(item=item)
+
+        if os.environ.get("MNESIS_MOCK_LLM") == "1":
+            async with semaphore:
+                return MapResult(input=item, output={"_mock": True}, success=True, attempts=1)
+
         last_error = ""
 
         for attempt in range(1, max_retries + 2):

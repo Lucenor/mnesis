@@ -104,7 +104,9 @@ class AgenticMap:
         Raises:
             ValueError: If ``agent_prompt_template`` does not contain ``{{ item }}``.
         """
-        if "{{ item }}" not in agent_prompt_template and "{{item}}" not in agent_prompt_template:
+        import re
+
+        if not re.search(r"\{\{[^}]*\bitem\b[^}]*\}\}", agent_prompt_template):
             raise ValueError("agent_prompt_template must contain {{ item }}")
 
         max_conc = concurrency or self._config.agentic_map_concurrency
