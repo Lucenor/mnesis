@@ -19,7 +19,7 @@ LLMs suffer from **context rot**: accuracy degrades 30–40% before hitting nomi
 
 The standard fix — telling the model to "summarize itself" — is unreliable. The model may silently drop constraints, forget file paths, or produce a summary that is itself too large.
 
-**mnesis** solves this by making the *engine* — not the model — responsible for memory. It is a Python implementation of the [LCM: Lossless Context Management](docs/LCM.pdf) architecture.
+**mnesis** solves this by making the *engine* — not the model — responsible for memory. It is a Python implementation of the [LCM: Lossless Context Management](https://github.com/Lucenor/mnesis/blob/main/docs/LCM.pdf) architecture.
 
 ---
 
