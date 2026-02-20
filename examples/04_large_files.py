@@ -14,6 +14,7 @@ Run without an API key:
 """
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -189,8 +190,6 @@ async def main() -> None:
     await store.close()
     print("\nDone!")
 
-
-import json
 
 if __name__ == "__main__":
     asyncio.run(main())

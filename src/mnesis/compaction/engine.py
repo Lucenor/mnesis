@@ -28,6 +28,22 @@ def _make_llm_call(model: str) -> Any:
     """Return an async function that calls an LLM for compaction."""
 
     async def _call(*, model: str = model, messages: list[dict[str, str]], max_tokens: int) -> str:
+        import os
+
+        if os.environ.get("MNESIS_MOCK_LLM") == "1":
+            content = messages[0]["content"] if messages else ""
+            conv_text = ""
+            if "<conversation>" in content:
+                conv_text = content.split("<conversation>")[1].split("</conversation>")[0].strip()
+            lines = [ln.strip() for ln in conv_text.splitlines() if ln.strip()]
+            bullets = "\n".join(f"- {ln[:120]}" for ln in lines[:8]) or "- (session in progress)"
+            return (
+                "## Goal\nComplete the described task.\n\n"
+                "## Completed Work\n" + bullets + "\n\n"
+                "## In Progress\nContinuing as directed.\n\n"
+                "## Remaining Work\n- Follow up on outstanding items.\n"
+            )
+
         import litellm
 
         response = await litellm.acompletion(
