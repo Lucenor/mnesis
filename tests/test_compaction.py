@@ -169,6 +169,7 @@ class TestCompactionEngine:
             event_bus,
             config,
             id_generator=lambda p: f"{p}_never_raises",
+            session_model="nonexistent-model-xyz",
         )
         # Populate with some messages
         for i in range(4):
@@ -191,7 +192,8 @@ class TestCompactionEngine:
         from mnesis.events.bus import MnesisEvent
 
         engine = CompactionEngine(
-            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_event_test"
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_event_test",
+            session_model="nonexistent-model-xyz",
         )
         for i in range(4):
             msg = make_message(
@@ -227,6 +229,7 @@ class TestCompactionEngine:
             estimator,
             event_bus,
             config,
+            session_model="anthropic/claude-haiku-4-5",
         )
         # level1_summarise requires >= 4 messages to have anything to summarise
         for i in range(6):

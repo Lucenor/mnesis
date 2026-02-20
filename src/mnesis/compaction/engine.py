@@ -255,13 +255,17 @@ class CompactionEngine:
 
         tokens_before = sum(self._estimator.estimate_message(m) for m in non_summary)
 
-        # Determine compaction model: explicit override → config → session model → haiku
+        # Determine compaction model: explicit override → config → session model
         compaction_model = (
             model_override
             or self._config.compaction.compaction_model
             or self._session_model
-            or "anthropic/claude-haiku-3-5"
         )
+        if not compaction_model:
+            raise ValueError(
+                "No compaction model available. Set compaction.compaction_model in "
+                "MnesisConfig or pass a model when creating the session."
+            )
 
         # Compute a generous budget for the summary
         budget = ContextBudget(
