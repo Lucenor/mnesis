@@ -83,12 +83,14 @@ class CompactionEngine:
         event_bus: EventBus,
         config: MnesisConfig,
         id_generator: Any = None,
+        session_model: str | None = None,
     ) -> None:
         self._store = store
         self._dag_store = dag_store
         self._estimator = token_estimator
         self._event_bus = event_bus
         self._config = config
+        self._session_model = session_model
         self._pruner = ToolOutputPrunerAsync(store, token_estimator, config)
         self._id_gen = id_generator or _default_id_generator
         self._logger = structlog.get_logger("mnesis.compaction")
@@ -253,10 +255,11 @@ class CompactionEngine:
 
         tokens_before = sum(self._estimator.estimate_message(m) for m in non_summary)
 
-        # Determine compaction model
+        # Determine compaction model: explicit override → config → session model → haiku
         compaction_model = (
             model_override
             or self._config.compaction.compaction_model
+            or self._session_model
             or "anthropic/claude-haiku-3-5"
         )
 
