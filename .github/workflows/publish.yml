@@ -249,7 +249,8 @@ jobs:
           git add pyproject.toml docs/changelog.md
           git commit -m "chore: release ${VERSION}"
           git tag -a "$TAG" -m "Release ${VERSION}"
-          git push origin main --follow-tags
+          git push origin main
+          git push origin "$TAG"
 
       # ── 3f. Create GitHub Release ────────────────────────────────────────
       - name: Create GitHub Release
