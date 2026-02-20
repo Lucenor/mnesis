@@ -208,3 +208,34 @@ class TestCompactionEngine:
             MnesisEvent.COMPACTION_COMPLETED in published_events
             or MnesisEvent.COMPACTION_FAILED in published_events
         )
+
+    async def test_run_compaction_uses_level1_in_mock_mode(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        """run_compaction reaches level 1 (not level 3) when MNESIS_MOCK_LLM=1.
+
+        Regression test for the bug where _make_llm_call always called litellm,
+        causing AuthenticationError in CI/test environments before falling back to
+        level 3.  With the fix, MNESIS_MOCK_LLM=1 short-circuits to a mock summary
+        and the engine reports level_used=1.
+        """
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
+        )
+        # level1_summarise requires >= 4 messages to have anything to summarise
+        for i in range(6):
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_ml1_{i:03d}"
+            )
+            await store.append_message(msg)
+            part = make_raw_part(msg.id, session_id, part_id=f"part_ml1_{i:03d}")
+            await store.append_part(part)
+
+        result = await engine.run_compaction(session_id)
+        assert result.level_used == 1
