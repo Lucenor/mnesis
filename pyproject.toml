@@ -21,6 +21,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+[project.urls]
+Homepage      = "https://mnesis.lucenor.tech"
+Documentation = "https://mnesis.lucenor.tech"
+Source        = "https://github.com/Lucenor/mnesis"
+Changelog     = "https://mnesis.lucenor.tech/changelog/"
+Issues        = "https://github.com/Lucenor/mnesis/issues"
+
 dependencies = [
     "aiosqlite>=0.20.0",
     "pydantic>=2.7.0",
