@@ -276,6 +276,51 @@ class TestMnesisSessionRecord:
         assert result.user_message_id.startswith("msg_")
         assert result.assistant_message_id.startswith("msg_")
 
+    async def test_record_tool_part_token_estimate_covers_input_output_error(self, tmp_path):
+        """record() without explicit tokens accounts for ToolPart input/output/error_message.
+
+        Regression test: previously token_estimate was computed from part.output only,
+        and the session-level output token count was derived from text-only content.
+        A ToolPart-only response therefore contributed 0 to tokens.output, preventing
+        auto-compaction from triggering on tool-heavy sessions.
+        """
+        from mnesis import MnesisSession
+        from mnesis.models.message import ToolPart, ToolStatus
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            # Completed tool with non-empty input and output
+            completed = ToolPart(
+                tool_name="read_file",
+                tool_call_id="call_ok",
+                input={"path": "/tmp/big_file.txt"},
+                output="line1\nline2\nline3",
+                status=ToolStatus(state="completed"),
+            )
+            result_ok = await session.record(
+                user_message="Read the file.",
+                assistant_response=[completed],
+            )
+
+            # Error tool with error_message but no output
+            errored = ToolPart(
+                tool_name="read_file",
+                tool_call_id="call_err",
+                input={"path": "/tmp/missing.txt"},
+                error_message="FileNotFoundError: /tmp/missing.txt",
+                status=ToolStatus(state="error"),
+            )
+            result_err = await session.record(
+                user_message="Read the missing file.",
+                assistant_response=[errored],
+            )
+
+        # Both turns must have non-zero output token estimates
+        assert result_ok.tokens.output > 0
+        assert result_err.tokens.output > 0
+
     async def test_record_tool_part_persists_tool_call_id(self, tmp_path):
         """record() with ToolPart writes tool_call_id/tool_name/tool_state to the DB row.
 
