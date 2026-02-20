@@ -251,7 +251,25 @@ jobs:
         with:
           subject-path: dist/*
 
-      # ── 3f. Commit, tag, push ────────────────────────────────────────────
+      # ── 3f. Generate and attest SBOM ─────────────────────────────────────
+      # Generates an SPDX SBOM listing every dependency in the release
+      # artifacts, then attests it with Sigstore. Complements provenance
+      # ("who built it") with a full dependency inventory ("what's in it").
+      - name: Generate SBOM
+        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.17.0
+        with:
+          path: dist/
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.0.0
+        with:
+          subject-path: dist/*
+          sbom-path: sbom.spdx.json
+
+      # ── 3g. Commit, tag, push ────────────────────────────────────────────
       - name: Commit and tag release
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
@@ -263,7 +281,7 @@ jobs:
           git push origin main
           git push origin "$TAG"
 
-      # ── 3f. Create GitHub Release (draft) ───────────────────────────────
+      # ── 3h. Create GitHub Release (draft) ───────────────────────────────
       # Created as a draft so it is not subject to release immutability rules.
       # Promoted to published only after PyPI succeeds.
       - name: Create GitHub Release (draft)
@@ -276,13 +294,13 @@ jobs:
             --notes-file /tmp/release_notes.md \
             --draft
 
-      # ── 3g. Publish to PyPI ──────────────────────────────────────────────
+      # ── 3i. Publish to PyPI ──────────────────────────────────────────────
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
         with:
           packages-dir: dist/
 
-      # ── 3h. Publish GitHub Release ───────────────────────────────────────
+      # ── 3j. Publish GitHub Release ───────────────────────────────────────
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
