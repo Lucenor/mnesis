@@ -22,6 +22,7 @@ from mnesis.models.message import (
     RecordResult,
     TextPart,
     TokenUsage,
+    ToolPart,
     TurnResult,
 )
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
@@ -587,9 +588,17 @@ class MnesisSession:
         assistant_text = ""
         for part in assistant_parts:
             token_estimate = 0
+            tool_call_id: str | None = None
+            tool_name: str | None = None
+            tool_state: str | None = None
             if isinstance(part, TextPart):
                 assistant_text += part.text
                 token_estimate = self._estimator.estimate(part.text, self._model_info)
+            elif isinstance(part, ToolPart):
+                tool_call_id = part.tool_call_id
+                tool_name = part.tool_name
+                tool_state = part.status.state
+                token_estimate = self._estimator.estimate(part.output or "", self._model_info)
             raw = RawMessagePart(
                 id=make_id("part"),
                 message_id=assistant_msg_id,
@@ -597,6 +606,9 @@ class MnesisSession:
                 part_type=part.type,
                 content=json.dumps(part.model_dump()),
                 token_estimate=token_estimate,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                tool_state=tool_state,
             )
             await self._store.append_part(raw)
 
