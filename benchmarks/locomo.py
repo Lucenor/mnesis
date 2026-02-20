@@ -57,9 +57,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-LOCOMO_DATA_URL = (
-    "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
-)
+LOCOMO_DATA_URL = "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
 LOCOMO_DATA_FILENAME = "locomo10.json"
 
 # Integer categories as used in locomo10.json
@@ -76,9 +74,9 @@ HUMAN_F1 = 0.879
 
 COLORS = {
     "baseline": "#4878cf",  # blue
-    "mnesis": "#e87d3e",    # orange
-    "human": "#6aaa5a",     # green
-    "reduction": "#d62728", # red
+    "mnesis": "#e87d3e",  # orange
+    "human": "#6aaa5a",  # green
+    "reduction": "#d62728",  # red
 }
 
 plt.rcParams.update(
@@ -126,7 +124,7 @@ def load_conversations(data_path: Path) -> list[dict[str, Any]]:
         }
     """
     try:
-        with open(data_path) as f:
+        with Path(data_path).open() as f:
             raw = json.load(f)
     except FileNotFoundError:
         raise FileNotFoundError(
@@ -180,6 +178,7 @@ def speaker_names(convo: dict[str, Any]) -> tuple[str, str]:
 
 def _tokenise(text: str) -> list[str]:
     import re
+
     return re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
 
 
@@ -248,14 +247,11 @@ async def run_condition(
         config=config,
         db_path=db_path,
     ) as session:
-
         # ── inject conversation turns ──────────────────────────────────────
         for i in range(0, len(turns), 2):
             user_text = f"{turns[i][0]}: {turns[i][1]}"
             asst_text = (
-                f"{turns[i + 1][0]}: {turns[i + 1][1]}"
-                if i + 1 < len(turns)
-                else "(no reply)"
+                f"{turns[i + 1][0]}: {turns[i + 1][1]}" if i + 1 < len(turns) else "(no reply)"
             )
             await session.record(
                 user_message=user_text,
@@ -299,9 +295,7 @@ async def run_condition(
                     }
                 )
 
-    reduction_pct = (
-        (1 - tokens_after / tokens_before) * 100 if tokens_before > 0 else 0.0
-    )
+    reduction_pct = (1 - tokens_after / tokens_before) * 100 if tokens_before > 0 else 0.0
     return {
         "results": qa_results,
         "tokens_before_compaction": tokens_before,
@@ -366,15 +360,26 @@ def plot_f1_by_category(
 
     fig, ax = plt.subplots(figsize=(10, 5))
     bars_b = ax.bar(
-        x - w / 2, b_vals, w,
-        label="Baseline (no compaction)", color=COLORS["baseline"], alpha=0.85,
+        x - w / 2,
+        b_vals,
+        w,
+        label="Baseline (no compaction)",
+        color=COLORS["baseline"],
+        alpha=0.85,
     )
     bars_m = ax.bar(
-        x + w / 2, m_vals, w,
-        label="Mnesis (compacted)", color=COLORS["mnesis"], alpha=0.85,
+        x + w / 2,
+        m_vals,
+        w,
+        label="Mnesis (compacted)",
+        color=COLORS["mnesis"],
+        alpha=0.85,
     )
     ax.axhline(
-        HUMAN_F1, color=COLORS["human"], linestyle="--", linewidth=1.5,
+        HUMAN_F1,
+        color=COLORS["human"],
+        linestyle="--",
+        linewidth=1.5,
         label=f"Human baseline ({HUMAN_F1:.1%})",
     )
     _annotate_bars(ax, bars_b)
@@ -415,17 +420,25 @@ def plot_token_usage(
 
     fig, ax = plt.subplots(figsize=(max(6, n * 2), 5))
     ax.bar(
-        x - w / 2, before, w,
-        label="Before compaction (baseline)", color=COLORS["baseline"], alpha=0.85,
+        x - w / 2,
+        before,
+        w,
+        label="Before compaction (baseline)",
+        color=COLORS["baseline"],
+        alpha=0.85,
     )
     ax.bar(
-        x + w / 2, after, w,
-        label="After compaction (mnesis)", color=COLORS["mnesis"], alpha=0.85,
+        x + w / 2,
+        after,
+        w,
+        label="After compaction (mnesis)",
+        color=COLORS["mnesis"],
+        alpha=0.85,
     )
 
-    for i, (a, r) in enumerate(zip(after, reductions)):
+    for i, (a, r) in enumerate(zip(after, reductions, strict=False)):
         ax.annotate(
-            f"−{r:.0f}%",
+            f"-{r:.0f}%",
             xy=(x[i] + w / 2, a),
             xytext=(0, 6),
             textcoords="offset points",
@@ -459,7 +472,7 @@ def plot_summary(
     metrics_only: bool,
 ) -> None:
     """
-    2×2 dashboard combining all benchmark metrics into a single figure:
+    2x2 dashboard combining all benchmark metrics into a single figure:
 
     - Top-left:  Overall F1, baseline vs mnesis vs human
     - Top-right: F1 by question category
@@ -469,7 +482,7 @@ def plot_summary(
     fig = plt.figure(figsize=(14, 10))
     gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.38)
 
-    na_kw = dict(transform=None, ha="center", va="center", fontsize=12, color="gray")
+    na_kw = {"transform": None, "ha": "center", "va": "center", "fontsize": 12, "color": "gray"}
 
     # ── top-left: Overall F1 ──────────────────────────────────────────
     ax0 = fig.add_subplot(gs[0, 0])
@@ -500,12 +513,20 @@ def plot_summary(
         x = np.arange(len(cats))
         w = 0.35
         ax1.bar(
-            x - w / 2, [baseline_by_cat.get(c, 0) for c in cats], w,
-            color=COLORS["baseline"], alpha=0.85, label="Baseline",
+            x - w / 2,
+            [baseline_by_cat.get(c, 0) for c in cats],
+            w,
+            color=COLORS["baseline"],
+            alpha=0.85,
+            label="Baseline",
         )
         ax1.bar(
-            x + w / 2, [mnesis_by_cat.get(c, 0) for c in cats], w,
-            color=COLORS["mnesis"], alpha=0.85, label="Mnesis",
+            x + w / 2,
+            [mnesis_by_cat.get(c, 0) for c in cats],
+            w,
+            color=COLORS["mnesis"],
+            alpha=0.85,
+            label="Mnesis",
         )
         ax1.axhline(HUMAN_F1, color=COLORS["human"], linestyle="--", linewidth=1)
         ax1.set_xticks(x)
@@ -604,7 +625,7 @@ examples:
         type=int,
         default=1,
         metavar="N",
-        help="Conversations to evaluate, 1–10 (default: 1)",
+        help="Conversations to evaluate, 1-10 (default: 1)",
     )
     p.add_argument(
         "--questions-per",
@@ -672,7 +693,8 @@ async def main() -> None:
     print(f"  Compaction model : {compaction_model}")
     print(f"  Conversations    : {len(conversations)}")
     print(f"  Max questions    : {args.questions_per}")
-    print(f"  Category         : {CATEGORY_NAMES.get(args.category, 'all') if args.category else 'all'}")
+    cat_label = CATEGORY_NAMES.get(args.category, "all") if args.category else "all"
+    print(f"  Category         : {cat_label}")
     print(f"  Mode             : {'metrics-only' if args.metrics_only else 'full QA'}")
     print(f"  Output           : {args.output_dir}\n")
 
@@ -688,8 +710,7 @@ async def main() -> None:
     # back to level 3 (deterministic), giving a realistic token-reduction figure.
     if args.metrics_only and not os.environ.get("MNESIS_MOCK_LLM"):
         _has_key = any(
-            os.environ.get(k)
-            for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")
+            os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")
         )
         if not _has_key:
             os.environ["MNESIS_MOCK_LLM"] = "1"
@@ -718,7 +739,8 @@ async def main() -> None:
         print("  [baseline] injecting history…", end=" ", flush=True)
         t0 = time.monotonic()
         baseline = await run_condition(
-            convo, qa_pairs,
+            convo,
+            qa_pairs,
             model=args.model,
             compaction_model=compaction_model,
             compact=False,
@@ -732,7 +754,8 @@ async def main() -> None:
         print("  [mnesis  ] injecting + compacting…", end=" ", flush=True)
         t0 = time.monotonic()
         mnesis = await run_condition(
-            convo, qa_pairs,
+            convo,
+            qa_pairs,
             model=args.model,
             compaction_model=compaction_model,
             compact=True,
@@ -804,7 +827,8 @@ async def main() -> None:
             ds = f"{d:+.3f}" if not math.isnan(d) else "—"
             print(f"{CATEGORY_NAMES[cat]:<16} {bvs:>10} {mvs:>10} {ds:>8}")
         print("-" * 48)
-        print(f"{'Overall':<16} {b_overall:>10.3f} {m_overall:>10.3f} {m_overall - b_overall:>+8.3f}")
+        delta_overall = m_overall - b_overall
+        print(f"{'Overall':<16} {b_overall:>10.3f} {m_overall:>10.3f} {delta_overall:>+8.3f}")
         print(f"{'Human baseline':<16} {HUMAN_F1:>10.3f}")
 
     print(f"\nAvg token reduction : {compact_stats['avg_reduction_pct']:.1f}%")
@@ -813,7 +837,7 @@ async def main() -> None:
 
     # ── save raw results ───────────────────────────────────────────────
     out_json = args.output_dir / "locomo_results.json"
-    with open(out_json, "w") as f:
+    with out_json.open("w") as f:
         json.dump(
             {
                 "model": args.model,

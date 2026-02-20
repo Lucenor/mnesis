@@ -8,6 +8,7 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "benchmarks/**"
       - "pyproject.toml"
   pull_request:
     branches: [main]
@@ -30,10 +31,10 @@ jobs:
         run: uv sync --dev
 
       - name: Ruff lint
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/ tests/ benchmarks/
 
       - name: Ruff format check
-        run: uv run ruff format --check src/ tests/
+        run: uv run ruff format --check src/ tests/ benchmarks/
 
   typecheck:
     name: Type Check
@@ -89,3 +90,24 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
           use_oidc: true
+
+  benchmark-smoke:
+    name: Benchmark Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: LOCOMO dry-run (metrics only, no API key needed)
+        env:
+          MNESIS_MOCK_LLM: "1"
+        run: uv run python benchmarks/locomo.py --metrics-only --conversations 1
