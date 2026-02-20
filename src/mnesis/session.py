@@ -585,20 +585,31 @@ class MnesisSession:
         )
         await self._store.append_message(assistant_msg)
 
-        assistant_text = ""
+        assistant_output_tokens = 0
         for part in assistant_parts:
             token_estimate = 0
             tool_call_id: str | None = None
             tool_name: str | None = None
             tool_state: str | None = None
             if isinstance(part, TextPart):
-                assistant_text += part.text
                 token_estimate = self._estimator.estimate(part.text, self._model_info)
             elif isinstance(part, ToolPart):
                 tool_call_id = part.tool_call_id
                 tool_name = part.tool_name
                 tool_state = part.status.state
-                token_estimate = self._estimator.estimate(part.output or "", self._model_info)
+                tool_segments: list[str] = []
+                if part.input:
+                    tool_segments.append(
+                        part.input if isinstance(part.input, str) else json.dumps(part.input)
+                    )
+                if part.output:
+                    tool_segments.append(part.output)
+                if part.error_message:
+                    tool_segments.append(part.error_message)
+                token_estimate = self._estimator.estimate(
+                    "\n".join(tool_segments), self._model_info
+                )
+            assistant_output_tokens += token_estimate
             raw = RawMessagePart(
                 id=make_id("part"),
                 message_id=assistant_msg_id,
@@ -612,12 +623,12 @@ class MnesisSession:
             )
             await self._store.append_part(raw)
 
-        # Resolve token usage — estimate from text if not provided
+        # Resolve token usage — estimate from all parts if not provided
         if tokens is None:
             user_text = " ".join(p.text for p in user_parts if isinstance(p, TextPart))
             tokens = TokenUsage(
                 input=self._estimator.estimate(user_text, self._model_info),
-                output=self._estimator.estimate(assistant_text, self._model_info),
+                output=assistant_output_tokens,
             )
 
         await self._store.update_message_tokens(assistant_msg_id, tokens, 0.0, finish_reason)
