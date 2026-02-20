@@ -52,7 +52,7 @@ mnesis stores conversation history and file content in a local SQLite database. 
 
 ## Disclosure Policy
 
-We follow a coordinated disclosure model. Once a fix is available we will:
+We follow a coordinated disclosure model. Once a fix is available, we will:
 
 1. Release a patched version to PyPI.
 2. Publish a GitHub Security Advisory with full details.
