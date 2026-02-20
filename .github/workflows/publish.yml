@@ -256,7 +256,7 @@ jobs:
       # artifacts, then attests it with Sigstore. Complements provenance
       # ("who built it") with a full dependency inventory ("what's in it").
       - name: Generate SBOM
-        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0
+        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.17.0
         with:
           path: dist/
           format: spdx-json
@@ -264,7 +264,7 @@ jobs:
           upload-artifact: false
 
       - name: Attest SBOM
-        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.0.0
         with:
           subject-path: dist/*
           sbom-path: sbom.spdx.json
