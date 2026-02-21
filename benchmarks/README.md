@@ -123,7 +123,8 @@ uv run python benchmarks/locomo.py \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `anthropic/claude-haiku-4-5` | LiteLLM model string |
+| `--model` | `anthropic/claude-haiku-4-5` | LiteLLM model string for QA inference |
+| `--compaction-model` | same as `--model` | LiteLLM model string for compaction summarisation (use a cheaper model to reduce cost) |
 | `--conversations` | `1` | Conversations to evaluate (1–10) |
 | `--questions-per` | `20` | Max QA pairs per conversation |
 | `--category` | all | Restrict to one category (1–5) |

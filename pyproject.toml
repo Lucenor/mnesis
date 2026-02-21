@@ -53,8 +53,8 @@ dev = [
     "respx>=0.21.0",
     "freezegun>=1.5.0",
     "hypothesis>=6.100.0",
-    "matplotlib>=3.5",
-    "numpy>=1.22",
+    "matplotlib>=3.7.0",
+    "numpy>=1.24.0",
 ]
 
 docs = [
