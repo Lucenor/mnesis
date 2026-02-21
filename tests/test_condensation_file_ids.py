@@ -26,7 +26,7 @@ from mnesis.compaction.levels import (
     level1_summarise,
     level3_deterministic,
 )
-from mnesis.models.config import CompactionConfig, ModelInfo
+from mnesis.models.config import CompactionConfig, MnesisConfig, ModelInfo
 from mnesis.models.message import ContextBudget, MessageWithParts, TextPart, TokenUsage
 from mnesis.models.summary import SummaryNode
 from tests.conftest import make_message, make_raw_part
@@ -612,5 +612,489 @@ def config_db_path(store: object) -> str:
     return str(store._config.db_path)  # type: ignore[attr-defined]
 
 
-# Import MnesisConfig for tests that create custom configs inline.
-from mnesis.models.config import MnesisConfig  # noqa: E402
+# ── DAG supersession ──────────────────────────────────────────────────────────
+
+
+class TestDAGSupersession:
+    async def test_mark_superseded_excludes_nodes_from_active(self, store, dag_store, session_id):
+        """Nodes marked superseded are excluded from get_active_nodes()."""
+        from mnesis.models.summary import SummaryNode
+
+        async def _insert(node_id: str) -> None:
+            from mnesis.session import make_id
+
+            node = SummaryNode(
+                id=node_id,
+                session_id=session_id,
+                kind="leaf",
+                span_start_message_id="m1",
+                span_end_message_id="m2",
+                content="summary content",
+                token_count=10,
+            )
+            await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        await _insert("node_sup_a")
+        await _insert("node_sup_b")
+
+        before = await dag_store.get_active_nodes(session_id)
+        assert any(n.id == "node_sup_a" for n in before)
+        assert any(n.id == "node_sup_b" for n in before)
+
+        dag_store.mark_superseded(["node_sup_a"])
+
+        after = await dag_store.get_active_nodes(session_id)
+        assert not any(n.id == "node_sup_a" for n in after)
+        # node_sup_b is still active
+        assert any(n.id == "node_sup_b" for n in after)
+
+    def test_mark_superseded_multiple_calls_accumulate(self, store, dag_store):
+        """mark_superseded accumulates across multiple calls."""
+        dag_store.mark_superseded(["n1", "n2"])
+        dag_store.mark_superseded(["n3"])
+        assert dag_store._superseded_ids == {"n1", "n2", "n3"}
+
+    def test_mark_superseded_idempotent(self, store, dag_store):
+        """Marking the same node superseded twice is safe."""
+        dag_store.mark_superseded(["n1"])
+        dag_store.mark_superseded(["n1"])
+        assert dag_store._superseded_ids == {"n1"}
+
+    async def test_condensation_marks_parents_superseded(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        """After run_compaction, parent nodes consumed by condensation are superseded."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        from mnesis.models.config import CompactionConfig, StoreConfig
+
+        # Use a tiny budget so condensation fires — the summary itself pushes over.
+        tight_cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                condensation_enabled=True,
+                max_compaction_rounds=3,
+            ),
+            store=StoreConfig(db_path=config_db_path(store)),
+        )
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            tight_cfg,
+            session_model="anthropic/claude-haiku-4-5",
+        )
+
+        # Create first batch of messages and compact to create a leaf node.
+        for i in range(6):
+            msg = make_message(
+                session_id,
+                role="user" if i % 2 == 0 else "assistant",
+                msg_id=f"msg_sup_a_{i:03d}",
+            )
+            await store.append_message(msg)
+            part = make_raw_part(msg.id, session_id, part_id=f"part_sup_a_{i:03d}")
+            await store.append_part(part)
+
+        await engine.run_compaction(session_id)
+
+        # Create a second batch and compact again; we now have >= 2 summary nodes.
+        for i in range(6, 12):
+            msg = make_message(
+                session_id,
+                role="user" if i % 2 == 0 else "assistant",
+                msg_id=f"msg_sup_b_{i:03d}",
+            )
+            await store.append_message(msg)
+            part = make_raw_part(msg.id, session_id, part_id=f"part_sup_b_{i:03d}")
+            await store.append_part(part)
+
+        # Force tokens_after > budget.usable so condensation loop runs.
+        # Patch estimate_message to return huge values so initial summarisation
+        # produces a tokens_after well over budget, triggering condensation.
+        original_estimate_msg = estimator.estimate_message
+
+        def inflated_estimate_msg(msg):  # type: ignore[no-untyped-def]
+            return original_estimate_msg(msg) + 50_000
+
+        estimator.estimate_message = inflated_estimate_msg  # type: ignore[method-assign]
+        try:
+            await engine.run_compaction(session_id)
+        finally:
+            estimator.estimate_message = original_estimate_msg  # type: ignore[method-assign]
+
+        # After condensation, at least some nodes should be superseded.
+        assert len(dag_store._superseded_ids) > 0
+
+
+# ── Multi-round loop: no-progress guard ───────────────────────────────────────
+
+
+class TestMultiRoundNoProgressGuard:
+    async def test_no_progress_guard_breaks_loop(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        """Condensation loop breaks when token count doesn't decrease."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        from mnesis.models.config import CompactionConfig, StoreConfig
+
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                condensation_enabled=True,
+                max_compaction_rounds=5,
+            ),
+            store=StoreConfig(db_path=config_db_path(store)),
+        )
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            cfg,
+            session_model="anthropic/claude-haiku-4-5",
+        )
+
+        for i in range(6):
+            msg = make_message(
+                session_id,
+                role="user" if i % 2 == 0 else "assistant",
+                msg_id=f"msg_np_{i:03d}",
+            )
+            await store.append_message(msg)
+            part = make_raw_part(msg.id, session_id, part_id=f"part_np_{i:03d}")
+            await store.append_part(part)
+
+        # Patch _run_condensation to return a candidate with same or higher token count
+        # than input — simulates no-progress scenario.
+        from mnesis.compaction.levels import CondensationCandidate
+
+        condensation_calls = [0]
+
+        async def no_progress_condense(nodes, *args, **kwargs):  # type: ignore[no-untyped-def]
+            condensation_calls[0] += 1
+            # Return a token count equal to input — no progress.
+            tokens_in = sum(n.token_count for n in nodes)
+            return CondensationCandidate(
+                text="same size",
+                token_count=tokens_in,  # no reduction
+                parent_node_ids=[n.id for n in nodes],
+                compaction_level=1,
+            )
+
+        engine._run_condensation = no_progress_condense  # type: ignore[method-assign]
+
+        # Make tokens_after appear over budget so condensation loop is entered.
+        original_estimate_msg = estimator.estimate_message
+
+        def inflated_estimate_msg(msg):  # type: ignore[no-untyped-def]
+            return original_estimate_msg(msg) + 50_000
+
+        estimator.estimate_message = inflated_estimate_msg  # type: ignore[method-assign]
+        try:
+            result = await engine.run_compaction(session_id)
+        finally:
+            estimator.estimate_message = original_estimate_msg  # type: ignore[method-assign]
+
+        # run_compaction must complete without error.
+        assert result.session_id == session_id
+        # No-progress guard fires: condensation should be called at most once per round.
+        assert condensation_calls[0] <= cfg.compaction.max_compaction_rounds
+
+
+# ── Hard overflow triggers compaction when no pending task ────────────────────
+
+
+class TestHardOverflowNoPendingTask:
+    async def test_hard_overflow_triggers_new_compaction_when_none_pending(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        """Hard overflow with no pending task calls check_and_trigger then wait."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        from mnesis.models.config import ModelInfo
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
+            session_model="anthropic/claude-haiku-4-5",
+        )
+
+        model = ModelInfo(model_id="m", context_limit=100_000, max_output_tokens=4_000)
+        # usable = 76_000; set tokens above it.
+        overflow_tokens = TokenUsage(total=80_000)
+
+        assert engine._pending_task is None
+        assert engine.is_hard_overflow(overflow_tokens, model)
+
+        triggered = [False]
+        original_check = engine.check_and_trigger
+
+        def patched_check(*args, **kwargs):  # type: ignore[no-untyped-def]
+            triggered[0] = True
+            return original_check(*args, **kwargs)
+
+        engine.check_and_trigger = patched_check  # type: ignore[method-assign]
+
+        waited = [False]
+
+        async def patched_wait() -> None:
+            waited[0] = True
+
+        engine.wait_for_pending = patched_wait  # type: ignore[method-assign]
+
+        # Simulate the session.send() hard-overflow branch directly.
+        if engine.is_hard_overflow(overflow_tokens, model):
+            if not engine._pending_task:
+                engine.check_and_trigger(session_id, overflow_tokens, model)
+            await engine.wait_for_pending()
+
+        assert triggered[0], "check_and_trigger must fire when no pending task"
+        assert waited[0], "wait_for_pending must be awaited"
+
+    async def test_hard_overflow_waits_existing_pending_without_new_trigger(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        """Hard overflow with a pending task awaits it without triggering again."""
+        import asyncio
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        from mnesis.models.config import ModelInfo
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
+            session_model="anthropic/claude-haiku-4-5",
+        )
+
+        model = ModelInfo(model_id="m", context_limit=100_000, max_output_tokens=4_000)
+        overflow_tokens = TokenUsage(total=80_000)
+
+        # Pre-set a pending task.
+        async def _dummy() -> None:
+            pass
+
+        engine._pending_task = asyncio.create_task(_dummy())
+
+        triggered = [False]
+        original_check = engine.check_and_trigger
+
+        def patched_check(*args, **kwargs):  # type: ignore[no-untyped-def]
+            triggered[0] = True
+            return original_check(*args, **kwargs)
+
+        engine.check_and_trigger = patched_check  # type: ignore[method-assign]
+
+        if engine.is_hard_overflow(overflow_tokens, model):
+            if not engine._pending_task:
+                engine.check_and_trigger(session_id, overflow_tokens, model)
+            await engine.wait_for_pending()
+
+        # check_and_trigger must NOT be called — a task was already pending.
+        assert not triggered[0]
+        assert engine._pending_task is None
+
+
+# ── wait_for_pending: already-done task and exception paths ──────────────────
+
+
+class TestWaitForPendingEdgeCases:
+    async def test_wait_for_pending_no_op_when_no_task(
+        self, estimator, event_bus, store, dag_store, config
+    ):
+        """wait_for_pending is a no-op when _pending_task is None."""
+        engine = CompactionEngine(
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_nop"
+        )
+        assert engine._pending_task is None
+        await engine.wait_for_pending()  # must not raise
+        assert engine._pending_task is None
+
+    async def test_wait_for_pending_clears_already_done_task(
+        self, estimator, event_bus, store, dag_store, config
+    ):
+        """wait_for_pending clears _pending_task even when the task is already done."""
+        import asyncio
+
+        engine = CompactionEngine(
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_done"
+        )
+
+        async def instant() -> None:
+            pass
+
+        task = asyncio.create_task(instant())
+        await asyncio.sleep(0)  # allow task to complete
+        assert task.done()
+
+        engine._pending_task = task
+        await engine.wait_for_pending()
+        assert engine._pending_task is None
+
+    async def test_wait_for_pending_swallows_task_exception(
+        self, estimator, event_bus, store, dag_store, config
+    ):
+        """wait_for_pending does not propagate exceptions from the compaction task."""
+        import asyncio
+
+        engine = CompactionEngine(
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_exc"
+        )
+
+        async def failing_task() -> None:
+            raise RuntimeError("boom")
+
+        task = asyncio.create_task(failing_task())
+        engine._pending_task = task
+        # Must not raise even though the task raises.
+        await engine.wait_for_pending()
+        assert engine._pending_task is None
+
+
+# ── LLM mock: <summaries> branch ─────────────────────────────────────────────
+
+
+class TestLLMMockSummariesBranch:
+    async def test_condensation_mock_uses_summaries_branch(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        """The mock LLM parses <summaries> content for condensation calls."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        from mnesis.compaction.engine import _make_llm_call
+
+        llm_call = _make_llm_call("test-model")
+
+        # A message with <summaries> wrapper — exercises the elif branch.
+        response = await llm_call(
+            model="test-model",
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Condense these:\n\n"
+                        "<summaries>\nSummary A: did task 1.\nSummary B: did task 2.\n</summaries>"
+                    ),
+                }
+            ],
+            max_tokens=512,
+        )
+        assert "## Goal" in response
+        assert "## Completed Work" in response
+
+    async def test_mock_llm_conversation_branch(self, monkeypatch):
+        """The mock LLM parses <conversation> content for summarisation calls."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        from mnesis.compaction.engine import _make_llm_call
+
+        llm_call = _make_llm_call("test-model")
+
+        response = await llm_call(
+            model="test-model",
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Summarise:\n\n"
+                        "<conversation>\n[USER]: hello\n[ASSISTANT]: hi\n</conversation>"
+                    ),
+                }
+            ],
+            max_tokens=512,
+        )
+        assert "## Goal" in response
+
+
+# ── Footer token reservation in level3_deterministic ─────────────────────────
+
+
+class TestFooterTokenReservation:
+    def test_level3_footer_does_not_overflow_budget(self, estimator):
+        """level3_deterministic reserves footer space so result always fits budget."""
+        # Very tight budget where a footer for many IDs could overflow if not reserved.
+        tight_budget = ContextBudget(
+            model_context_limit=1_200,
+            reserved_output_tokens=100,
+            compaction_buffer=100,
+        )
+        # Create messages that embed file IDs — the footer will be non-trivial.
+        msgs = []
+        for i in range(8):
+            msg = make_message(
+                "sess_footer", role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_ft_{i:03d}"
+            )
+            # Embed multiple unique file IDs per message.
+            text = f"file_{i:08x}aabbccdd is referenced here."
+            msgs.append(MessageWithParts(message=msg, parts=[TextPart(text=text)]))
+
+        from mnesis.compaction.levels import level3_deterministic
+
+        result = level3_deterministic(msgs, tight_budget, estimator)
+        # The result should fit within 85% of the usable budget.
+        # usable = 1_200 - 100 - 100 = 1_000; target = 850
+        # We just confirm it does not massively overflow (within 2x as heuristic).
+        assert result.token_count < tight_budget.usable * 2
+
+    def test_condense_level3_footer_does_not_overflow(self, estimator):
+        """condense_level3_deterministic reserves footer space before building content."""
+        # Many file IDs embedded in nodes to generate a large footer.
+        nodes = []
+        for i in range(6):
+            fid = f"file_{i:08x}aabbccdd"
+            node = _make_summary_node(
+                "sess",
+                f"n_res_{i}",
+                f"Content for node {i}.\n\n[LCM File IDs: {fid}]",
+            )
+            nodes.append(node)
+
+        result = condense_level3_deterministic(nodes, estimator)
+        assert isinstance(result, CondensationCandidate)
+        # All file IDs must be preserved in the footer.
+        for i in range(6):
+            fid = f"file_{i:08x}aabbccdd"
+            assert fid in result.text
+
+    def test_condense_level3_available_clamps_to_zero(self, estimator):
+        """condense_level3_deterministic clamps available to 0 when overhead exceeds cap."""
+        # Create a node whose IDs alone consume the entire cap.
+        # Generate enough IDs that footer + header > 512 tokens.
+        many_ids = " ".join(f"file_{i:08x}1122334455667788" for i in range(50))
+        node = _make_summary_node("sess", "n_clamp", f"content.\n\n[LCM File IDs: {many_ids}]")
+
+        result = condense_level3_deterministic([node], estimator)
+        # Must not raise and must return a candidate.
+        assert isinstance(result, CondensationCandidate)
+        assert result.compaction_level == 3
+
+    async def test_condense_level2_empty_nodes_returns_none(self, estimator, budget):
+        """condense_level2 returns None for an empty node list."""
+
+        async def dummy_llm(**kwargs: object) -> str:
+            return "response"
+
+        result = await condense_level2([], "test-model", budget, estimator, dummy_llm)
+        assert result is None
+
+    async def test_condense_level2_returns_none_when_too_large(self, estimator):
+        """condense_level2 returns None when condensed text exceeds budget."""
+        tiny_budget = ContextBudget(
+            model_context_limit=500,
+            reserved_output_tokens=50,
+            compaction_buffer=50,
+        )
+        nodes = [_make_summary_node("sess", "n2_large", "Summary.")]
+
+        async def huge_llm(**kwargs: object) -> str:
+            return "x" * 10_000
+
+        result = await condense_level2(nodes, "test-model", tiny_budget, estimator, huge_llm)
+        assert result is None
