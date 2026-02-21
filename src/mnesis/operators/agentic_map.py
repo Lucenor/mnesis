@@ -40,7 +40,7 @@ class AgenticMap:
 
     Permission restrictions (always applied):
     - Sub-sessions cannot spawn further sub-agents.
-    - When ``read_only=True``, write-oriented tools are blocked.
+    - ``read_only=True`` is not yet implemented; passing it raises ``NotImplementedError``.
 
     Example::
 
@@ -49,6 +49,7 @@ class AgenticMap:
             inputs=repositories,
             agent_prompt_template="Analyze this repository and report quality issues:\\n{{ item }}",
             model="anthropic/claude-opus-4-6",
+            read_only=False,
             max_turns=20,
         ):
             print(f"Repo: {result.input}\\nFindings: {result.output_text[:200]}")
@@ -87,12 +88,13 @@ class AgenticMap:
             agent_prompt_template: Jinja2 template for the initial user message.
             model: LLM model string for all sub-sessions.
             concurrency: Maximum concurrent sub-sessions.
-            read_only: Block write-oriented tools in sub-sessions.
+            read_only: Reserved. ``True`` raises ``NotImplementedError`` until enforcement
+                is implemented.
             parent_session_id: Optional parent session ID for lineage tracking.
             tools: Optional tool definitions for sub-sessions.
             max_turns: Maximum turns per sub-session before stopping.
             agent: Agent role for sub-sessions.
-            lcm_config: Mnesis config for sub-sessions. Defaults to MnesisConfig.default().
+            lcm_config: Mnesis config for sub-sessions. Defaults to ``MnesisConfig()``.
             db_path: Override database path (useful for testing).
             pool: Shared ``StorePool`` so all sub-sessions use one connection.
                 If omitted a fresh pool is created and closed automatically
@@ -102,8 +104,15 @@ class AgenticMap:
             AgentMapResult objects as sub-sessions complete (not in input order).
 
         Raises:
+            NotImplementedError: If ``read_only=True`` is passed (not yet implemented).
             ValueError: If ``agent_prompt_template`` does not contain ``{{ item }}``.
         """
+        if read_only:
+            raise NotImplementedError(
+                "read_only enforcement is not yet implemented. "
+                "Pass read_only=False to proceed without write-tool filtering."
+            )
+
         import re
 
         if not re.search(r"\{\{[^}]*\bitem\b[^}]*\}\}", agent_prompt_template):

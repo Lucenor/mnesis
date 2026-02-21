@@ -6,6 +6,7 @@ from mnesis.models.config import (
     MnesisConfig,
     ModelInfo,
     OperatorConfig,
+    SessionConfig,
     StoreConfig,
 )
 from mnesis.models.message import (
@@ -33,6 +34,7 @@ __all__ = [
     "ModelInfo",
     "OperatorConfig",
     "RecordResult",
+    "SessionConfig",
     "StoreConfig",
     "TextPart",
     "TokenUsage",

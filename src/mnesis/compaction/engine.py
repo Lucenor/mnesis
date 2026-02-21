@@ -137,7 +137,8 @@ class CompactionEngine:
 
     def _usable_tokens(self, model: ModelInfo) -> int:
         """Return the hard-limit usable token count for *model*."""
-        return model.context_limit - model.max_output_tokens - self._config.compaction.buffer
+        budget = self._config.compaction.compaction_output_budget
+        return model.context_limit - model.max_output_tokens - budget
 
     def is_soft_overflow(self, tokens: TokenUsage, model: ModelInfo) -> bool:
         """
@@ -359,7 +360,7 @@ class CompactionEngine:
         budget = ContextBudget(
             model_context_limit=200_000,
             reserved_output_tokens=8_192,
-            compaction_buffer=self._config.compaction.buffer,
+            compaction_buffer=self._config.compaction.compaction_output_budget,
         )
 
         llm_call = _make_llm_call(compaction_model)

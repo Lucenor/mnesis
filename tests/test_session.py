@@ -96,6 +96,52 @@ class TestMnesisSession:
         assert len(messages) >= 2
         await session2.close()
 
+    async def test_load_restores_system_prompt(self, tmp_path, mock_llm_env):
+        """C-1: load() restores the original system_prompt, not a hardcoded fallback."""
+        from mnesis import MnesisSession
+
+        db = str(tmp_path / "test.db")
+        custom_prompt = "You are a specialized coding assistant."
+
+        session1 = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=db,
+            system_prompt=custom_prompt,
+        )
+        session_id = session1.id
+        await session1.close()
+
+        session2 = await MnesisSession.load(session_id, db_path=db)
+        assert session2._system_prompt == custom_prompt
+        await session2.close()
+
+    async def test_load_raises_when_model_id_missing(self, tmp_path):
+        """M-9: load() raises ValueError when the stored session has no model_id."""
+        from mnesis.models.config import MnesisConfig, StoreConfig
+        from mnesis.store.immutable import ImmutableStore
+
+        db = str(tmp_path / "test.db")
+        cfg = MnesisConfig()
+        cfg = cfg.model_copy(update={"store": StoreConfig(db_path=db)})
+        store = ImmutableStore(cfg.store)
+        await store.initialize()
+
+        # Insert a session row with an empty model_id to simulate a legacy/corrupted record.
+        await store._conn_or_raise().execute(
+            "INSERT INTO sessions (id, parent_id, created_at, updated_at, model_id, "
+            "provider_id, agent, is_active) VALUES (?, NULL, 1, 1, '', '', 'default', 1)",
+            ("sess_no_model_id",),
+        )
+        await store._conn_or_raise().commit()
+        await store.close()
+
+        import pytest
+
+        from mnesis import MnesisSession
+
+        with pytest.raises(ValueError, match="has no stored model_id"):
+            await MnesisSession.load("sess_no_model_id", db_path=db)
+
     async def test_context_manager_closes_on_exception(self, tmp_path, mock_llm_env):
         """Session is closed even when send() raises."""
         from mnesis import MnesisSession
@@ -406,3 +452,56 @@ class TestMnesisSessionRecord:
             if isinstance(part, ToolPart) and part.compacted_at is not None
         )
         assert tombstoned > 0, "Expected at least one tool output tombstoned after compaction"
+
+
+class TestPublicAPIContracts:
+    """Tests for public API correctness: exception exports, finish_reason typing."""
+
+    def test_session_not_found_error_importable_from_mnesis(self):
+        """H-1: SessionNotFoundError must be importable from the top-level mnesis package."""
+        from mnesis import SessionNotFoundError
+        from mnesis.store.immutable import SessionNotFoundError as _StoreImpl
+
+        assert SessionNotFoundError is _StoreImpl
+
+    def test_mnesis_store_error_importable_from_mnesis(self):
+        """H-1: MnesisStoreError must be importable from the top-level mnesis package."""
+        from mnesis import MnesisStoreError
+        from mnesis.store.immutable import MnesisStoreError as _StoreImpl
+
+        assert MnesisStoreError is _StoreImpl
+
+    def test_session_not_found_error_in_all(self):
+        """H-1: Both exceptions must appear in mnesis.__all__."""
+        from mnesis import __all__ as mnesis_all
+
+        assert "SessionNotFoundError" in mnesis_all
+        assert "MnesisStoreError" in mnesis_all
+
+    def test_session_not_found_error_is_mnesis_store_error_subclass(self):
+        """SessionNotFoundError must be a subclass of MnesisStoreError for catch-hierarchy."""
+        from mnesis import MnesisStoreError, SessionNotFoundError
+
+        assert issubclass(SessionNotFoundError, MnesisStoreError)
+
+    def test_turn_result_finish_reason_literal_annotation(self):
+        """C-3: TurnResult.finish_reason must carry a Literal type annotation."""
+        from typing import Union, get_args, get_origin, get_type_hints
+
+        from mnesis.models.message import TurnResult
+
+        hints = get_type_hints(TurnResult)
+        fr_type = hints["finish_reason"]
+        # The annotation is `Literal[...] | str` which is a Union in 3.12+
+        # Verify that at least one arm contains a Literal with "error".
+        origin = get_origin(fr_type)
+        assert origin is Union, f"Expected Union, got {origin}"
+        args = get_args(fr_type)
+        from typing import Literal
+
+        literal_args = []
+        for arg in args:
+            if get_origin(arg) is Literal:
+                literal_args.extend(get_args(arg))
+        assert "error" in literal_args, f"'error' not found in Literal args: {literal_args}"
+        assert "stop" in literal_args

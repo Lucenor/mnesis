@@ -159,34 +159,36 @@ Files exceeding the inline threshold (default 10K tokens) are stored externally 
 ## Configuration
 
 ```python
-from mnesis import MnesisConfig, CompactionConfig, FileConfig
+from mnesis import MnesisConfig, CompactionConfig, FileConfig, SessionConfig
 
 config = MnesisConfig(
     compaction=CompactionConfig(
         auto=True,
-        buffer=20_000,               # tokens reserved for compaction output
+        compaction_output_budget=20_000,  # tokens reserved for compaction output
         prune=True,
-        prune_protect_tokens=40_000, # never prune within last 40K tokens
-        prune_minimum_tokens=20_000, # skip pruning if volume is too small
+        prune_protect_tokens=40_000,      # never prune within last 40K tokens
+        prune_minimum_tokens=20_000,      # skip pruning if volume is too small
         level2_enabled=True,
     ),
     file=FileConfig(
-        inline_threshold=10_000,     # files > 10K tokens → FileRefPart
+        inline_threshold=10_000,          # files > 10K tokens → FileRefPart
     ),
-    doom_loop_threshold=3,           # consecutive identical tool calls before warning
+    session=SessionConfig(
+        doom_loop_threshold=3,            # consecutive identical tool calls before warning
+    ),
 )
 ```
 
 | Parameter | Default | Description |
 |---|---|---|
 | `compaction.auto` | `True` | Auto-trigger on overflow |
-| `compaction.buffer` | `20,000` | Tokens reserved for summary output |
+| `compaction.compaction_output_budget` | `20,000` | Tokens reserved for summary output |
 | `compaction.prune_protect_tokens` | `40,000` | Recent tokens never pruned |
 | `compaction.prune_minimum_tokens` | `20,000` | Minimum prunable volume |
 | `file.inline_threshold` | `10,000` | Inline limit in tokens |
 | `operators.llm_map_concurrency` | `16` | `LLMMap` parallel calls |
 | `operators.agentic_map_concurrency` | `4` | `AgenticMap` parallel sessions |
-| `doom_loop_threshold` | `3` | Identical tool call threshold |
+| `session.doom_loop_threshold` | `3` | Identical tool call threshold |
 
 ---
 
