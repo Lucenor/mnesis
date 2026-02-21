@@ -1,0 +1,3 @@
+# `mnesis.events`
+
+::: mnesis.events

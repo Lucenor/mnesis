@@ -16,7 +16,49 @@ nav = [
   {"Concepts" = "concepts.md"},
   {"Configuration" = "configuration.md"},
   {"Examples" = "examples.md"},
-  {"API Reference" = "api/"},
+  {"API Reference" = [
+    {"mnesis" = "api/index.md"},
+    {"session" = "api/session.md"},
+    {"compaction" = [
+      {"mnesis.compaction" = "api/compaction/index.md"},
+      {"engine" = "api/compaction/engine.md"},
+      {"levels" = "api/compaction/levels.md"},
+      {"pruner" = "api/compaction/pruner.md"},
+    ]},
+    {"context" = [
+      {"mnesis.context" = "api/context/index.md"},
+      {"builder" = "api/context/builder.md"},
+    ]},
+    {"events" = [
+      {"mnesis.events" = "api/events/index.md"},
+      {"bus" = "api/events/bus.md"},
+    ]},
+    {"files" = [
+      {"mnesis.files" = "api/files/index.md"},
+      {"handler" = "api/files/handler.md"},
+    ]},
+    {"models" = [
+      {"mnesis.models" = "api/models/index.md"},
+      {"config" = "api/models/config.md"},
+      {"message" = "api/models/message.md"},
+      {"summary" = "api/models/summary.md"},
+    ]},
+    {"operators" = [
+      {"mnesis.operators" = "api/operators/index.md"},
+      {"agentic_map" = "api/operators/agentic_map.md"},
+      {"llm_map" = "api/operators/llm_map.md"},
+    ]},
+    {"store" = [
+      {"mnesis.store" = "api/store/index.md"},
+      {"immutable" = "api/store/immutable.md"},
+      {"pool" = "api/store/pool.md"},
+      {"summary_dag" = "api/store/summary_dag.md"},
+    ]},
+    {"tokens" = [
+      {"mnesis.tokens" = "api/tokens/index.md"},
+      {"estimator" = "api/tokens/estimator.md"},
+    ]},
+  ]},
   {"Changelog" = "changelog.md"},
 ]
 
@@ -41,12 +83,6 @@ primary = "deep purple"
 accent = "deep purple"
 
 [project.plugins.search]
-
-[project.plugins.gen-files]
-scripts = ["docs/gen_ref_pages.py"]
-
-[project.plugins.literate-nav]
-nav_file = "SUMMARY.md"
 
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["src"]

@@ -1,53 +1,80 @@
 """Generate API reference pages from source modules automatically.
 
-This script is executed by mkdocs-gen-files at build time. It walks the
-src/mnesis package tree and creates one Markdown page per module under
-docs/api/, then writes a SUMMARY.md for mkdocs-literate-nav to consume.
+This script is run standalone (e.g. ``python docs/gen_ref_pages.py``) from
+the project root before running ``zensical build``.  It walks the
+``src/mnesis`` package tree and writes one Markdown stub per module under
+``docs/api/``.  The stubs contain only an ``:::`` mkdocstrings directive so
+that Zensical + mkdocstrings can render the full API documentation.
 
-Nothing in this file is committed to the docs/ directory — everything is
-generated in memory during the mkdocs build.
+Unlike the previous version, this script does **not** depend on
+``mkdocs_gen_files`` or ``mkdocs_literate_nav``, which are MkDocs-only plugins
+that Zensical does not execute.  The generated files are committed to the
+repository so that ``zensical build`` can find them without any plugin hooks.
+
+Usage::
+
+    python docs/gen_ref_pages.py          # from project root
+    uv run python docs/gen_ref_pages.py   # via uv
+
+The script is idempotent: re-running it overwrites existing stubs with the
+same content, leaving the working tree clean if nothing changed.
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 
-import mkdocs_gen_files
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 
-src = Path(__file__).parent.parent / "src"
-nav = mkdocs_gen_files.Nav()
+REPO_ROOT = Path(__file__).parent.parent
+SRC = REPO_ROOT / "src"
+DOCS_API = REPO_ROOT / "docs" / "api"
 
-for path in sorted(src.rglob("*.py")):
-    module_path = path.relative_to(src).with_suffix("")
-    doc_path = path.relative_to(src / "mnesis").with_suffix(".md")
-    full_doc_path = Path("api", doc_path)
 
-    parts = tuple(module_path.parts)
+def main() -> None:
+    """Walk src/mnesis and write one .md stub per public module."""
 
-    # Skip __main__ and private helpers
-    if parts[-1] in ("__main__",) or any(p.startswith("_") and p != "__init__" for p in parts):
-        continue
+    # Collect pages: (full_doc_path, mkdocstrings_identifier, edit_path)
+    pages: list[tuple[Path, str, Path]] = []
 
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
-        doc_path = doc_path.with_name("index.md")
-        full_doc_path = full_doc_path.with_name("index.md")
+    for path in sorted(SRC.rglob("*.py")):
+        module_path = path.relative_to(SRC).with_suffix("")
+        doc_path = path.relative_to(SRC / "mnesis").with_suffix(".md")
+        full_doc_path = DOCS_API / doc_path
 
-    if not parts:
-        continue
+        parts = tuple(module_path.parts)
 
-    # Strip the leading "mnesis" package segment so nav sections are clean
-    nav_parts = parts[1:] if parts[0] == "mnesis" else parts
-    if not nav_parts:
-        continue
+        # Skip __main__ and private helpers (but not __init__)
+        if parts[-1] in ("__main__",) or any(
+            p.startswith("_") and p != "__init__" for p in parts
+        ):
+            continue
 
-    # SUMMARY.md lives inside api/, so paths must be relative to api/
-    nav[nav_parts] = str(doc_path)
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+            full_doc_path = full_doc_path.with_name("index.md")
 
-    with mkdocs_gen_files.open(full_doc_path, "w") as fd:
+        if not parts:
+            continue
+
         ident = ".".join(parts)
-        fd.write(f"# `{ident}`\n\n")
-        fd.write(f"::: {ident}\n")
+        edit_path = path.relative_to(REPO_ROOT)
+        pages.append((full_doc_path, ident, edit_path))
 
-    mkdocs_gen_files.set_edit_path(full_doc_path, path.relative_to(src.parent))
+    # Write stubs
+    for full_doc_path, ident, edit_path in pages:
+        full_doc_path.parent.mkdir(parents=True, exist_ok=True)
+        content = (
+            f"# `{ident}`\n\n"
+            f"::: {ident}\n"
+        )
+        full_doc_path.write_text(content, encoding="utf-8")
+        print(f"  wrote {full_doc_path.relative_to(REPO_ROOT)}")
 
-with mkdocs_gen_files.open("api/SUMMARY.md", "w") as nav_file:
-    nav_file.writelines(nav.build_literate_nav())
+    print(f"\nGenerated {len(pages)} API reference pages under docs/api/")
+
+
+if __name__ == "__main__":
+    main()
