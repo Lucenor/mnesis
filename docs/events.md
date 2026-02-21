@@ -167,7 +167,7 @@ Fired by: `MnesisEvent.DOOM_LOOP_DETECTED`
 
 ## Operator Events
 
-`MAP_STARTED`, `MAP_ITEM_COMPLETED`, and `MAP_COMPLETED` fire on the **operator's own `EventBus`**, not the session bus. To receive them via the session bus, inject the session bus when constructing the operator:
+`MAP_STARTED`, `MAP_ITEM_COMPLETED`, and `MAP_COMPLETED` are emitted by operators only when they are constructed with an `event_bus=...` argument, and the events are published on that provided bus. To receive them via the session bus, pass `session.event_bus` when constructing the operator:
 
 ```python
 from mnesis.operators import LLMMap, AgenticMap
@@ -285,15 +285,16 @@ async def main() -> None:
         # Operator events flow to the session bus because we injected it
         llm_map = LLMMap(config.operators, event_bus=session.event_bus)
         reviews = ["Great product!", "Terrible quality.", "It is okay."]
-        sentiments = await llm_map.run(
-            items=reviews,
+        batch = await llm_map.run_all(
+            inputs=reviews,
             prompt_template="Classify the sentiment of: {{ item }}",
             output_schema=Sentiment,
             model="openai/gpt-4o",
         )
-        for review, sentiment in zip(reviews, sentiments):
-            if sentiment is not None:
-                print(f"  {review!r} → {sentiment.label} ({sentiment.confidence:.2f})")
+        for result in batch.successes:
+            sentiment = result.output
+            if isinstance(sentiment, Sentiment):
+                print(f"  {result.input!r} → {sentiment.label} ({sentiment.confidence:.2f})")
 
 
 if __name__ == "__main__":
@@ -301,4 +302,4 @@ if __name__ == "__main__":
 ```
 
 !!! tip "Async handlers and task lifetime"
-    Async handlers are scheduled via `asyncio.create_task`. If your program exits immediately after the last `await`, pending handler tasks may be cancelled before they complete. In long-running services this is rarely an issue; in short scripts, add a brief `await asyncio.sleep(0)` after the session closes to flush pending tasks.
+    Async handlers are scheduled via `asyncio.create_task` and are not awaited by the `EventBus`. If your program exits immediately after the last `await`, pending handler tasks may be cancelled before they complete. In long-running services this is rarely an issue; in short scripts, keep the event loop alive long enough for handlers to run, or have your handlers manage any long-running work they spawn if you need deterministic completion.

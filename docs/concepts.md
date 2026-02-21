@@ -34,7 +34,7 @@ Tool outputs tend to dominate context usage in agentic sessions. The `ToolOutput
 Key parameters:
 
 - **`prune_protect_tokens`** (default: 40K) — token window from the end of history that is never pruned. Tool outputs within this window are always kept verbatim.
-- **`prune_minimum_tokens`** (default: 20K) — minimum prunable volume required before pruning fires. If total prunable tokens fall below this threshold, the pass is skipped entirely.
+- **`prune_minimum_tokens`** (default: 20K) — minimum prunable volume required before pruning fires. If total prunable tokens are at or below this threshold, the pass is skipped entirely.
 - The **most recent user turn** is always protected, regardless of token position.
 - Certain tool names (e.g. `skill`) are **never pruned**, even if they fall outside the protect window.
 
