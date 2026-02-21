@@ -97,7 +97,7 @@ class ContextBuilder:
         budget = ContextBudget(
             model_context_limit=model.context_limit,
             reserved_output_tokens=model.max_output_tokens,
-            compaction_buffer=config.compaction.buffer,
+            compaction_buffer=config.compaction.compaction_output_budget,
         )
         system_tokens = self._estimator.estimate(system_prompt, model)
         available = budget.usable - system_tokens

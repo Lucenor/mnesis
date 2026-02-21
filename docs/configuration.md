@@ -3,7 +3,7 @@
 All configuration is done through `MnesisConfig`, which groups settings into sub-configs. Every field has a sensible default — you only need to override what you want to change.
 
 ```python
-from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig
+from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig, SessionConfig
 from mnesis.models.config import StoreConfig, OperatorConfig
 
 config = MnesisConfig(
@@ -11,7 +11,7 @@ config = MnesisConfig(
     file=FileConfig(...),
     store=StoreConfig(...),
     operators=OperatorConfig(...),
-    doom_loop_threshold=3,
+    session=SessionConfig(doom_loop_threshold=3),
 )
 
 session = await MnesisSession.create(model="openai/gpt-4o", config=config)
@@ -26,7 +26,7 @@ Controls when and how context compaction fires.
 | Field | Default | Description |
 |---|---|---|
 | `auto` | `True` | Auto-trigger compaction on overflow |
-| `buffer` | `20_000` | Tokens reserved as headroom for compaction summary output |
+| `compaction_output_budget` | `20_000` | Tokens reserved as headroom for compaction summary output |
 | `prune` | `True` | Run tool output pruning before compaction |
 | `prune_protect_tokens` | `40_000` | Token window from the end of history that is never pruned |
 | `prune_minimum_tokens` | `20_000` | Minimum prunable volume required before pruning fires |
@@ -36,11 +36,11 @@ Controls when and how context compaction fires.
 
 ### Tuning for large models
 
-For models with 1M+ token contexts (e.g. Gemini 1.5 Pro), raise the buffer and protect window:
+For models with 1M+ token contexts (e.g. Gemini 1.5 Pro), raise the budget and protect window:
 
 ```python
 CompactionConfig(
-    buffer=100_000,
+    compaction_output_budget=100_000,
     prune_protect_tokens=200_000,
     prune_minimum_tokens=50_000,
 )
@@ -92,7 +92,9 @@ Controls `LLMMap` and `AgenticMap` parallelism.
 
 ---
 
-## Top-level MnesisConfig
+## SessionConfig
+
+Controls session-level behaviour.
 
 | Field | Default | Description |
 |---|---|---|
