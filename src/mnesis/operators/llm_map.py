@@ -8,10 +8,12 @@ from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 import structlog
+from jinja2 import Environment as _JinjaEnv
 from pydantic import BaseModel
 
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import OperatorConfig
+from mnesis.operators.template_utils import require_item_variable
 from mnesis.tokens.estimator import TokenEstimator
 
 _DEFAULT_RETRY_GUIDANCE = (
@@ -86,8 +88,8 @@ class LLMMap:
         inputs: list[Any],
         prompt_template: str,
         output_schema: dict[str, Any] | type[BaseModel],
-        model: str | None = None,
         *,
+        model: str | None = None,
         concurrency: int | None = None,
         max_retries: int | None = None,
         system_prompt: str | None = None,
@@ -107,8 +109,8 @@ class LLMMap:
                 subclass or a JSON Schema ``dict``. When a ``dict`` is passed,
                 ``jsonschema`` must be installed (``pip install jsonschema``).
                 Responses are validated and retried on failure.
-            model: LLM model string in litellm format. Falls back to the model
-                set on ``__init__`` if not provided here.
+            model: LLM model string in litellm format (keyword-only). Falls back
+                to the model set on ``__init__`` if not provided here.
             concurrency: Override config concurrency limit.
             max_retries: Override config max retries per item.
             system_prompt: Optional system prompt for all calls.
@@ -154,7 +156,10 @@ class LLMMap:
             )
 
         # Validate template references 'item' via Jinja2 AST (not fragile regex).
-        _require_item_variable(prompt_template)
+        require_item_variable(prompt_template)
+
+        # Compile template once; each task renders it with its own item.
+        compiled_template = _JinjaEnv().from_string(prompt_template)
 
         max_conc = concurrency or self._config.llm_map_concurrency
         retries = max_retries if max_retries is not None else self._config.max_retries
@@ -178,7 +183,7 @@ class LLMMap:
             asyncio.create_task(
                 self._process_item(
                     item=item,
-                    template_str=prompt_template,
+                    compiled_template=compiled_template,
                     schema=schema_dict,
                     pydantic_model=pydantic_model,
                     model=resolved_model,
@@ -214,8 +219,8 @@ class LLMMap:
         inputs: list[Any],
         prompt_template: str,
         output_schema: dict[str, Any] | type[BaseModel],
-        model: str | None = None,
         *,
+        model: str | None = None,
         concurrency: int | None = None,
         max_retries: int | None = None,
         system_prompt: str | None = None,
@@ -264,7 +269,7 @@ class LLMMap:
         self,
         *,
         item: Any,
-        template_str: str,
+        compiled_template: Any,
         schema: dict[str, Any],
         pydantic_model: type[BaseModel] | None,
         model: str,
@@ -278,10 +283,7 @@ class LLMMap:
         """Process a single item with retry logic."""
         import os
 
-        from jinja2 import Environment as _Env
-
-        env = _Env()
-        prompt = env.from_string(template_str).render(item=item)
+        prompt = compiled_template.render(item=item)
 
         if os.environ.get("MNESIS_MOCK_LLM") == "1":
             async with semaphore:
@@ -293,7 +295,9 @@ class LLMMap:
         for attempt in range(1, max_retries + 2):
             async with semaphore:
                 try:
-                    full_prompt = prompt + (f"\n\n{retry_guidance}" if last_error else "")
+                    # Only append retry_guidance on parse/schema failures — not transient errors.
+                    is_parse_failure = last_error_kind in {"validation", "schema_error"}
+                    full_prompt = prompt + f"\n\n{retry_guidance}" if is_parse_failure else prompt
                     response_text = await asyncio.wait_for(
                         self._call_llm(
                             model=model,
@@ -407,26 +411,7 @@ class LLMMap:
 
         try:
             jsonschema.validate(data, schema)
-        except jsonschema.ValidationError:
+        except (jsonschema.ValidationError, jsonschema.SchemaError):
             return None, "schema_error"
 
         return data, None
-
-
-def _require_item_variable(template_str: str) -> None:
-    """
-    Raise ValueError if the Jinja2 template does not reference the ``item`` variable.
-
-    Uses Jinja2 AST parsing instead of regex for correctness with complex expressions
-    like ``{{ item['key'] }}`` and ``{{ item | upper }}``.
-    """
-    from jinja2 import Environment, meta
-
-    env = Environment()
-    ast = env.parse(template_str)
-    variables = meta.find_undeclared_variables(ast)
-    if "item" not in variables:
-        raise ValueError(
-            "prompt_template must reference {{ item }} — "
-            "the template does not use the 'item' variable"
-        )

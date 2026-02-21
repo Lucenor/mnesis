@@ -7,11 +7,13 @@ from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 import structlog
-from pydantic import BaseModel
+from jinja2 import Environment as _JinjaEnv
+from pydantic import BaseModel, Field
 
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, OperatorConfig
 from mnesis.models.message import TokenUsage
+from mnesis.operators.template_utils import require_item_variable
 from mnesis.store.pool import StorePool
 
 
@@ -24,8 +26,8 @@ class AgentMapResult(BaseModel):
     success: bool
     error: str | None = None
     error_kind: Literal["timeout", "validation", "llm_error", "schema_error"] | None = None
-    token_usage: TokenUsage = TokenUsage()
-    intermediate_outputs: list[str] = []
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    intermediate_outputs: list[str] = Field(default_factory=list)
 
 
 class AgentMapBatch(BaseModel):
@@ -82,8 +84,8 @@ class AgenticMap:
         self,
         inputs: list[Any],
         agent_prompt_template: str,
-        model: str | None = None,
         *,
+        model: str | None = None,
         concurrency: int | None = None,
         read_only: bool = True,
         tools: list[Any] | None = None,
@@ -113,8 +115,8 @@ class AgenticMap:
             tools: Optional tool definitions for sub-sessions.
             max_turns: Maximum turns per sub-session before stopping.
             continuation_message: Message sent as the user turn after turn 0.
-                Empty string (default) means no additional user message is sent —
-                the agent continues from its own last response.
+                If an empty string (default), the sub-session runs only the
+                initial turn and then stops, regardless of ``max_turns``.
 
             [Advanced] The following parameters are implementation plumbing and
             are not needed for typical use:
@@ -146,9 +148,10 @@ class AgenticMap:
             raise ValueError("model must be provided either to run() or to AgenticMap.__init__()")
 
         # Validate template references 'item' via Jinja2 AST (not fragile regex).
-        from mnesis.operators.llm_map import _require_item_variable
+        require_item_variable(agent_prompt_template)
 
-        _require_item_variable(agent_prompt_template)
+        # Compile template once; each sub-agent task renders it with its own item.
+        compiled_template = _JinjaEnv().from_string(agent_prompt_template)
 
         max_conc = concurrency or self._config.agentic_map_concurrency
 
@@ -168,7 +171,7 @@ class AgenticMap:
             asyncio.create_task(
                 self._run_sub_agent(
                     item=item,
-                    template_str=agent_prompt_template,
+                    compiled_template=compiled_template,
                     model=resolved_model,
                     parent_session_id=parent_session_id,
                     tools=tools,
@@ -205,8 +208,8 @@ class AgenticMap:
         self,
         inputs: list[Any],
         agent_prompt_template: str,
-        model: str | None = None,
         *,
+        model: str | None = None,
         concurrency: int | None = None,
         read_only: bool = True,
         tools: list[Any] | None = None,
@@ -262,7 +265,7 @@ class AgenticMap:
         self,
         *,
         item: Any,
-        template_str: str,
+        compiled_template: Any,
         model: str,
         parent_session_id: str | None,
         tools: list[Any] | None,
@@ -276,12 +279,9 @@ class AgenticMap:
     ) -> AgentMapResult:
         """Run a single sub-agent session to completion."""
         async with semaphore:
-            from jinja2 import Environment
-
             from mnesis.session import MnesisSession
 
-            env = Environment()
-            prompt = env.from_string(template_str).render(item=item)
+            prompt = compiled_template.render(item=item)
             session: MnesisSession | None = None
 
             try:
