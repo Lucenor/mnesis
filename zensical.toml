@@ -1,0 +1,87 @@
+[project]
+site_name = "mnesis"
+site_description = "Lossless Context Management for long-horizon LLM agents"
+site_url = "https://mnesis.lucenor.tech"
+repo_url = "https://github.com/Lucenor/mnesis"
+repo_name = "Lucenor/mnesis"
+edit_uri = "edit/main/docs/"
+
+nav = [
+  {"Home" = "index.md"},
+  {"Getting Started" = [
+    {"Installation & Quick Start" = "getting-started.md"},
+    {"Providers" = "providers.md"},
+    {"BYO-LLM" = "byo-llm.md"},
+  ]},
+  {"Concepts" = "concepts.md"},
+  {"Configuration" = "configuration.md"},
+  {"Examples" = "examples.md"},
+  {"API Reference" = "api/"},
+  {"Changelog" = "changelog.md"},
+]
+
+[project.theme]
+variant = "modern"
+logo = "images/logo_icon.png"
+favicon = "images/logo_icon.png"
+features = [
+  "navigation.tabs",
+  "navigation.sections",
+  "navigation.expand",
+  "navigation.top",
+  "search.highlight",
+  "search.share",
+  "content.code.copy",
+  "content.code.annotate",
+]
+
+[project.theme.palette]
+scheme = "slate"
+primary = "deep purple"
+accent = "deep purple"
+
+[project.plugins.search]
+
+[project.plugins.gen-files]
+scripts = ["docs/gen_ref_pages.py"]
+
+[project.plugins.literate-nav]
+nav_file = "SUMMARY.md"
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+show_source = false
+show_root_heading = true
+show_root_full_path = false
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+members_order = "source"
+merge_init_into_class = true
+separate_signature = true
+show_signature_annotations = true
+
+[project.markdown_extensions.admonition]
+
+[project.markdown_extensions.pymdownx.details]
+
+[project.markdown_extensions.pymdownx.superfences]
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+
+[project.markdown_extensions.pymdownx.inlinehilite]
+
+[project.markdown_extensions.pymdownx.snippets]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+
+[project.markdown_extensions.attr_list]
+
+[project.markdown_extensions.md_in_html]
+
+[project.markdown_extensions.toc]
+permalink = true
