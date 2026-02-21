@@ -363,8 +363,13 @@ class MnesisSession:
         Args:
             message: User message text or list of MessagePart objects.
             tools: Optional list of tool definitions (litellm format dicts).
-            on_part: Optional callback invoked for each streamed MessagePart.
-            system_prompt: Override the session system prompt for this turn.
+            on_part: Optional callback invoked for each streamed ``MessagePart``.
+                During streaming, ``on_part`` receives :class:`TextPart` chunks
+                only. :class:`ToolPart` objects are delivered when calling
+                :meth:`record` directly with pre-built parts.
+            system_prompt: Override the session system prompt for this turn only.
+                Note: not all providers support per-turn system prompt overrides —
+                check your provider's documentation before relying on this.
 
         Returns:
             TurnResult with the assistant's text, token usage, and status.
@@ -789,12 +794,35 @@ class MnesisSession:
         """
         Return the full message history for this session.
 
-        Includes summary messages produced by compaction.
+        The returned list includes **all** stored rows:
+
+        - Regular user and assistant turns.
+        - Compaction summary messages (``m.is_summary == True``).
+        - Messages whose parts contain :class:`~mnesis.models.message.CompactionMarkerPart`
+          tombstones (tool outputs pruned by the compaction engine).
+
+        To get only the conversational turns, use :meth:`conversation_messages`
+        or filter manually with ``[m for m in msgs if not m.is_summary]``.
 
         Returns:
             List of MessageWithParts in chronological order.
         """
         return await self._store.get_messages_with_parts(self._session_id)
+
+    async def conversation_messages(self) -> list[MessageWithParts]:
+        """
+        Return only the conversational turns, excluding compaction summaries.
+
+        Convenience wrapper around :meth:`messages` that filters out summary
+        messages produced by the compaction engine (``is_summary == True``).
+        Tombstoned tool outputs within regular messages are still included —
+        only top-level summary rows are removed.
+
+        Returns:
+            List of non-summary MessageWithParts in chronological order.
+        """
+        all_msgs = await self._store.get_messages_with_parts(self._session_id)
+        return [m for m in all_msgs if not m.is_summary]
 
     async def context_for_next_turn(
         self,
@@ -859,8 +887,13 @@ class MnesisSession:
         """
         Clean up session resources.
 
-        Cancels any in-flight background compaction task, closes the database
-        connection, and publishes SESSION_CLOSED.
+        If background compaction is in progress, ``close()`` waits for it to
+        finish before releasing the database connection. This guarantees that
+        no in-flight write is interrupted and that the compaction summary is
+        fully persisted before the DB handle is closed.
+
+        Publishes :attr:`~mnesis.events.bus.MnesisEvent.SESSION_CLOSED` after
+        cleanup.
         """
         await self._compaction_engine.wait_for_pending()
         self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
