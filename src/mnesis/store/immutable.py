@@ -255,8 +255,8 @@ class ImmutableStore:
         ]:
             try:
                 await conn.execute(col_ddl)
-            except Exception:
-                pass  # Column already exists — safe to ignore
+            except aiosqlite.OperationalError:
+                pass  # Column already exists — "duplicate column name" is safe to ignore
         await conn.commit()
 
         self._conn = conn

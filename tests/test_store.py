@@ -435,8 +435,6 @@ class TestDAGPersistence:
 
     async def test_get_latest_node_ignores_superseded(self, session_id, store, dag_store):
         """get_latest_node returns the most recent non-superseded node."""
-        import asyncio
-
         from mnesis.models.summary import SummaryNode
         from mnesis.session import make_id
 
@@ -524,8 +522,6 @@ class TestDAGPersistence:
         self, session_id, store, dag_store
     ):
         """get_latest_node falls back to older node when latest is in _superseded_ids."""
-        import asyncio
-
         from mnesis.models.summary import SummaryNode
         from mnesis.session import make_id
 
@@ -786,8 +782,6 @@ class TestDAGPersistence:
         self, session_id, store, dag_store
     ):
         """get_coverage_gaps returns a span for messages added after the latest summary."""
-        import asyncio
-
         from mnesis.models.summary import SummaryNode
         from mnesis.session import make_id
 
@@ -850,8 +844,6 @@ class TestDAGPersistence:
         self, session_id, store, dag_store
     ):
         """Directly inject into _superseded_ids to trigger backwards scan in get_latest_node."""
-        import asyncio
-
         from mnesis.models.summary import SummaryNode
         from mnesis.session import make_id
 

@@ -364,13 +364,13 @@ class SummaryDAGStore:
                     content = d.get("text", content)
                     if raw.token_estimate:
                         token_count = raw.token_estimate
-                except Exception:
+                except Exception:  # malformed part JSON — keep row defaults
                     pass
             elif raw.part_type == "compaction":
                 try:
                     d = json.loads(raw.content)
                     compaction_level = d.get("level", compaction_level)
-                except Exception:
+                except Exception:  # malformed part JSON — keep row defaults
                     pass
 
         # Find the message for model/provider metadata
