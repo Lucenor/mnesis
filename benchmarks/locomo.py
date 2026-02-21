@@ -540,9 +540,7 @@ def plot_summary(
         ax0.axis("off")
     else:
         cats = sorted(CATEGORY_NAMES)
-        deltas = [
-            mnesis_by_cat.get(c, 0.0) - baseline_by_cat.get(c, 0.0) for c in cats
-        ]
+        deltas = [mnesis_by_cat.get(c, 0.0) - baseline_by_cat.get(c, 0.0) for c in cats]
         bar_colors = ["#2ca02c" if d >= -0.02 else "#d62728" for d in deltas]
         x = np.arange(len(cats))
         bars = ax0.bar(x, deltas, color=bar_colors, alpha=0.85, width=0.5)

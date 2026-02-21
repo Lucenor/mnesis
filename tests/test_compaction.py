@@ -192,7 +192,11 @@ class TestCompactionEngine:
         from mnesis.events.bus import MnesisEvent
 
         engine = CompactionEngine(
-            store, dag_store, estimator, event_bus, config,
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
             id_generator=lambda p: f"{p}_event_test",
             session_model="nonexistent-model-xyz",
         )
