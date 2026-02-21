@@ -538,13 +538,16 @@ class TestSessionOpen:
 
         MnesisSession.close = tracking_close  # type: ignore[method-assign]
         try:
-            with pytest.raises(ValueError, match="boom"):
+            async def _body_raises() -> None:
                 async with MnesisSession.open(
                     model="anthropic/claude-opus-4-6",
                     db_path=str(tmp_path / "test.db"),
                 ) as session:
                     assert session.id.startswith("sess_")
                     raise ValueError("boom")
+
+            with pytest.raises(ValueError, match="boom"):
+                await _body_raises()
             assert len(closed_sessions) == 1
             assert closed_sessions[0].startswith("sess_")
         finally:
