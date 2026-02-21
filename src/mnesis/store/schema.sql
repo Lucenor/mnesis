@@ -151,6 +151,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_context_items_session_pos
 
 CREATE INDEX IF NOT EXISTS idx_context_items_session
     ON context_items(session_id);
+
+-- Covering index for DELETE … WHERE session_id=? AND item_id IN (…)
+-- used by swap_context_items() during compaction.
+CREATE INDEX IF NOT EXISTS idx_context_items_session_item
+    ON context_items(session_id, item_id);
+
 -- idx_summary_nodes_active is created in ImmutableStore.initialize() after the
 -- Phase 3 ALTER TABLE migration so that it is safe for existing databases where
 -- the superseded column may not yet exist when executescript() runs.

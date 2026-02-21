@@ -107,25 +107,56 @@ class ContextBuilder:
         context_items = await self._store.get_context_items(session_id)
 
         if not context_items:
+            # Backward-compatibility: on a database that was upgraded from a
+            # pre-context_items schema, the table exists but has no rows for
+            # sessions whose messages were written before the migration.
+            # Fall back to the full session scan so those sessions still work.
+            all_msgs_fallback = await self._store.get_messages_with_parts(session_id)
+            non_summary_fallback = [m for m in all_msgs_fallback if not m.is_summary]
+            if not non_summary_fallback:
+                return BuiltContext(
+                    messages=[],
+                    system_prompt=system_prompt,
+                    token_estimate=system_tokens,
+                    budget=budget,
+                    has_summary=False,
+                    oldest_included_message_id=None,
+                    summary_token_count=0,
+                )
+            # Treat all non-summary messages as the context snapshot, newest→oldest.
+            includable_fb: list[MessageWithParts] = []
+            tokens_used_fb = 0
+            for msg_with_parts in reversed(non_summary_fallback):
+                msg_tokens = self._estimator.estimate_message(msg_with_parts, model)
+                if tokens_used_fb + msg_tokens > available:
+                    break
+                includable_fb.append(msg_with_parts)
+                tokens_used_fb += msg_tokens
+            includable_fb.reverse()
+            llm_messages_fb = [self._convert_message(m) for m in includable_fb]
             return BuiltContext(
-                messages=[],
+                messages=llm_messages_fb,
                 system_prompt=system_prompt,
-                token_estimate=system_tokens,
+                token_estimate=system_tokens + tokens_used_fb,
                 budget=budget,
                 has_summary=False,
-                oldest_included_message_id=None,
+                oldest_included_message_id=includable_fb[0].id if includable_fb else None,
                 summary_token_count=0,
             )
 
         # Step 3: Separate summaries from messages and compute summary tokens
         # to reserve budget space.
+        # Load each summary node once and cache it to avoid repeated round-trips
+        # (get_node_by_id internally calls get_messages for the full session,
+        # so deduplication matters for sessions with multiple summaries).
         has_summary = any(item_type == "summary" for item_type, _ in context_items)
+        summary_cache: dict[str, Any] = {}
         summary_token_count = 0
         if has_summary:
-            # Load summary nodes to get their token counts.
             for item_type, item_id in context_items:
-                if item_type == "summary":
+                if item_type == "summary" and item_id not in summary_cache:
                     node = await self._dag_store.get_node_by_id(item_id)
+                    summary_cache[item_id] = node  # store None on miss to skip later
                     if node is not None:
                         summary_token_count += node.token_count
             available -= summary_token_count
@@ -135,12 +166,21 @@ class ContextBuilder:
         # the candidate set comes from the DB rather than a backward scan).
         message_ids_ordered = [iid for t, iid in context_items if t == "message"]
 
-        # Load all candidate messages with their parts avoiding N+1 queries.
+        # Fetch only the required messages by ID — O(k) where k is the number
+        # of context items, not O(n) in the total session length.
         candidate_messages: list[MessageWithParts] = []
         if message_ids_ordered:
-            all_msgs = await self._store.get_messages_with_parts(session_id)
-            id_to_msg = {m.id: m for m in all_msgs if not m.is_summary}
-            candidate_messages = [id_to_msg[mid] for mid in message_ids_ordered if mid in id_to_msg]
+            candidate_messages = await self._store.get_messages_with_parts_by_ids(
+                message_ids_ordered
+            )
+            if len(candidate_messages) < len(message_ids_ordered):
+                fetched_ids = {m.id for m in candidate_messages}
+                missing = [mid for mid in message_ids_ordered if mid not in fetched_ids]
+                self._logger.warning(
+                    "context_items_referenced_missing_messages",
+                    session_id=session_id,
+                    missing_message_ids=missing,
+                )
 
         # Walk newest→oldest, include as many messages as fit.
         includable: list[MessageWithParts] = []
@@ -162,10 +202,11 @@ class ContextBuilder:
         # Step 5: Convert to LLM message format
         llm_messages: list[LLMMessage] = []
 
-        # 5a: Inject summary nodes in position order (before raw messages)
+        # 5a: Inject summary nodes in position order (before raw messages),
+        # reusing the cache populated in Step 3.
         for item_type, item_id in context_items:
             if item_type == "summary":
-                node = await self._dag_store.get_node_by_id(item_id)
+                node = summary_cache.get(item_id)
                 if node is not None:
                     llm_messages.append(LLMMessage(role="assistant", content=node.content))
 

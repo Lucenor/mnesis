@@ -351,6 +351,63 @@ class TestContextItems:
 
         assert before == after
 
+    async def test_swap_with_stale_ids_is_noop(self, session_id, store):
+        """swap_context_items with IDs not in context_items is a no-op (no IntegrityError)."""
+        msg = make_message(session_id, role="user", msg_id="msg_stale_001")
+        await store.append_message(msg)
+
+        before = await store.get_context_items(session_id)
+        # "nonexistent_id" is not in context_items — should not raise or mutate.
+        await store.swap_context_items(session_id, ["nonexistent_id"], "sum_stale_001")
+        after = await store.get_context_items(session_id)
+
+        assert before == after
+
+    async def test_builder_fallback_when_context_items_empty(
+        self, session_id, store, dag_store, builder, model_info, small_config
+    ):
+        """
+        Upgrade/backfill scenario: context_items table exists but is empty for
+        a session whose messages were written before the Phase-3 migration.
+
+        ContextBuilder must fall back to a full-session scan and still return
+        the correct messages rather than an empty context.
+        """
+        # Write messages directly to the messages table, bypassing the normal
+        # append_message path, to simulate the pre-migration state where
+        # context_items was not yet populated.
+        conn = store._conn_or_raise()
+
+        for i in range(3):
+            msg_id = f"msg_legacy_{i:03d}"
+            await conn.execute(
+                """
+                INSERT INTO messages
+                    (id, session_id, role, created_at, is_summary)
+                VALUES (?, ?, 'user', ?, 0)
+                """,
+                (msg_id, session_id, 1_000_000 + i),
+            )
+            part_content = json.dumps({"type": "text", "text": f"legacy message {i}"})
+            await conn.execute(
+                """
+                INSERT INTO message_parts
+                    (id, message_id, session_id, part_type, part_index, content)
+                VALUES (?, ?, ?, 'text', 0, ?)
+                """,
+                (f"part_legacy_{i:03d}", msg_id, session_id, part_content),
+            )
+        await conn.commit()
+
+        # Verify context_items is indeed empty for this session.
+        items = await store.get_context_items(session_id)
+        assert items == [], "Test pre-condition: context_items must be empty"
+
+        # ContextBuilder should fall back and return the 3 legacy messages.
+        ctx = await builder.build(session_id, model_info, "System.", small_config)
+        assert len(ctx.messages) == 3
+        assert ctx.has_summary is False
+
 
 class TestContextBudget:
     def test_usable_calculation(self):
