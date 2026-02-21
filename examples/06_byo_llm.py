@@ -47,14 +47,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 _CANNED_RESPONSES = [
     "Photosynthesis is the process by which plants convert sunlight, water, "
-    "and CO2 into glucose and oxygen.",
+    + "and CO2 into glucose and oxygen.",
     "The light-dependent reactions occur in the thylakoid membranes and produce ATP and NADPH.",
     "The Calvin cycle (light-independent reactions) takes place in the stroma "
-    "and fixes CO2 into sugar.",
+    + "and fixes CO2 into sugar.",
     "Chlorophyll a and b are the primary pigments; "
-    "they absorb red and blue light most efficiently.",
+    + "they absorb red and blue light most efficiently.",
     "Without photosynthesis, virtually all life on Earth would cease - "
-    "it is the base of most food chains.",
+    + "it is the base of most food chains.",
 ]
 
 

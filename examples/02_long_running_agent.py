@@ -70,7 +70,7 @@ async def main() -> None:
         # Simulate a long coding task
         tasks = [
             "We're refactoring a monolithic Python codebase. "
-            "Start by outlining the main challenges.",
+            + "Start by outlining the main challenges.",
             "What's the best strategy for breaking up a large models.py file?",
             "How should we handle circular imports during the refactor?",
             "Describe the testing strategy for the refactored modules.",
