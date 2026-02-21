@@ -641,29 +641,31 @@ class TestDAGSupersession:
         assert any(n.id == "node_sup_a" for n in before)
         assert any(n.id == "node_sup_b" for n in before)
 
-        dag_store.mark_superseded(["node_sup_a"])
+        await dag_store.mark_superseded(["node_sup_a"])
 
         after = await dag_store.get_active_nodes(session_id)
         assert not any(n.id == "node_sup_a" for n in after)
         # node_sup_b is still active
         assert any(n.id == "node_sup_b" for n in after)
 
-    def test_mark_superseded_multiple_calls_accumulate(self, store, dag_store):
+    async def test_mark_superseded_multiple_calls_accumulate(self, store, dag_store):
         """mark_superseded accumulates across multiple calls."""
-        dag_store.mark_superseded(["n1", "n2"])
-        dag_store.mark_superseded(["n3"])
+        await dag_store.mark_superseded(["n1", "n2"])
+        await dag_store.mark_superseded(["n3"])
         assert dag_store._superseded_ids == {"n1", "n2", "n3"}
 
-    def test_mark_superseded_idempotent(self, store, dag_store):
+    async def test_mark_superseded_idempotent(self, store, dag_store):
         """Marking the same node superseded twice is safe."""
-        dag_store.mark_superseded(["n1"])
-        dag_store.mark_superseded(["n1"])
+        await dag_store.mark_superseded(["n1"])
+        await dag_store.mark_superseded(["n1"])
         assert dag_store._superseded_ids == {"n1"}
 
     async def test_condensation_marks_parents_superseded(
         self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
     ):
         """After run_compaction, parent nodes consumed by condensation are superseded."""
+        import json
+
         monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
 
         from mnesis.models.config import CompactionConfig, StoreConfig
@@ -685,6 +687,11 @@ class TestDAGSupersession:
             session_model="anthropic/claude-haiku-4-5",
         )
 
+        # Messages need substantial text so the transcript passed to level1/level2
+        # is larger than the mock LLM's output (convergence check requires
+        # summary_tokens < input_tokens to accept a candidate).
+        long_text = "The agent is working on a complex multi-step task. " * 6  # ~306 chars
+
         # Create first batch of messages and compact to create a leaf node.
         for i in range(6):
             msg = make_message(
@@ -693,7 +700,10 @@ class TestDAGSupersession:
                 msg_id=f"msg_sup_a_{i:03d}",
             )
             await store.append_message(msg)
-            part = make_raw_part(msg.id, session_id, part_id=f"part_sup_a_{i:03d}")
+            raw_content = json.dumps({"type": "text", "text": long_text})
+            part = make_raw_part(
+                msg.id, session_id, part_id=f"part_sup_a_{i:03d}", content=raw_content
+            )
             await store.append_part(part)
 
         await engine.run_compaction(session_id)
@@ -706,12 +716,16 @@ class TestDAGSupersession:
                 msg_id=f"msg_sup_b_{i:03d}",
             )
             await store.append_message(msg)
-            part = make_raw_part(msg.id, session_id, part_id=f"part_sup_b_{i:03d}")
+            raw_content = json.dumps({"type": "text", "text": long_text})
+            part = make_raw_part(
+                msg.id, session_id, part_id=f"part_sup_b_{i:03d}", content=raw_content
+            )
             await store.append_part(part)
 
         # Force tokens_after > budget.usable so condensation loop runs.
         # Patch estimate_message to return huge values so initial summarisation
-        # produces a tokens_after well over budget, triggering condensation.
+        # (which covers only a partial slice of messages) leaves a residual token
+        # count above the budget, triggering the condensation loop.
         original_estimate_msg = estimator.estimate_message
 
         def inflated_estimate_msg(msg):  # type: ignore[no-untyped-def]

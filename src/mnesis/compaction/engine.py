@@ -482,7 +482,7 @@ class CompactionEngine:
                 )
                 # Mark consumed nodes as superseded so get_active_nodes()
                 # excludes them in subsequent rounds.
-                self._dag_store.mark_superseded(cond.parent_node_ids)
+                await self._dag_store.mark_superseded(cond.parent_node_ids)
 
                 last_summary_msg_id = condensed_msg_id
                 last_summary_level = cond.compaction_level

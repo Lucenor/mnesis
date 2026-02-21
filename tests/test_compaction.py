@@ -142,6 +142,65 @@ class TestCompactionLevels:
         assert result.compaction_level == 2
         assert result.text == summary_text
 
+    async def test_level1_escalates_on_no_convergence(self, estimator, budget):
+        """Level 1 returns None when summary tokens >= input tokens (no compression benefit)."""
+        # Build a very short input that the LLM will "expand" — simulating no convergence.
+        # 4 short messages so _messages_to_summarise finds something, then mock LLM returns
+        # a large output larger than the tiny transcript.
+        short_messages: list[MessageWithParts] = []
+        roles = ["user", "assistant"]
+        for i in range(4):
+            from tests.conftest import make_message
+
+            msg = make_message("sess_conv1", role=roles[i % 2], msg_id=f"msg_conv1_{i:03d}")
+            parts = [TextPart(text=f"Hi {i}")]  # Very short content
+            short_messages.append(MessageWithParts(message=msg, parts=parts))
+
+        # The transcript of these tiny messages will be ~20 tokens; return a large summary
+        large_summary = "word " * 200  # ~200 tokens — bigger than input transcript
+
+        async def expanding_llm(**kwargs):
+            return large_summary
+
+        result = await level1_summarise(
+            short_messages, "test-model", budget, estimator, expanding_llm
+        )
+        assert result is None
+
+    async def test_level2_escalates_on_no_convergence(self, estimator, budget):
+        """Level 2 returns None when summary tokens >= input tokens (no compression benefit)."""
+        short_messages: list[MessageWithParts] = []
+        roles = ["user", "assistant"]
+        for i in range(4):
+            from tests.conftest import make_message
+
+            msg = make_message("sess_conv2", role=roles[i % 2], msg_id=f"msg_conv2_{i:03d}")
+            parts = [TextPart(text=f"Hi {i}")]  # Very short content
+            short_messages.append(MessageWithParts(message=msg, parts=parts))
+
+        large_summary = "word " * 200  # ~200 tokens — bigger than input transcript
+
+        async def expanding_llm(**kwargs):
+            return large_summary
+
+        result = await level2_summarise(
+            short_messages, "test-model", budget, estimator, expanding_llm
+        )
+        assert result is None
+
+    async def test_level1_does_not_escalate_when_summary_compresses(self, estimator, budget):
+        """Level 1 returns a candidate when summary is genuinely smaller than input."""
+        messages = _make_messages_with_parts("sess_conv3", 6)
+        # Each message has ~200+ chars; total input transcript >> this short summary
+        compact_summary = "GOAL: done."
+
+        async def compressing_llm(**kwargs):
+            return compact_summary
+
+        result = await level1_summarise(messages, "test-model", budget, estimator, compressing_llm)
+        assert result is not None
+        assert result.compaction_level == 1
+
     def test_level3_breaks_when_budget_exhausted(self, estimator):
         """Level 3 breaks early when messages don't fit in the token budget."""
         # usable = 100 - 10 - 10 = 80, target = 68
@@ -309,7 +368,13 @@ class TestCompactionEngine:
         causing AuthenticationError in CI/test environments before falling back to
         level 3.  With the fix, MNESIS_MOCK_LLM=1 short-circuits to a mock summary
         and the engine reports level_used=1.
+
+        Messages must have substantial text content so the transcript passed to the
+        LLM is larger than the mock summary output (convergence check requires
+        summary_tokens < input_tokens to accept a candidate).
         """
+        import json
+
         monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
 
         engine = CompactionEngine(
@@ -320,13 +385,18 @@ class TestCompactionEngine:
             config,
             session_model="anthropic/claude-haiku-4-5",
         )
-        # level1_summarise requires >= 4 messages to have anything to summarise
+        # Each message carries ~300 chars of text so the transcript of the
+        # summarised slice (2+ messages) exceeds the mock LLM's fixed output (~400 chars).
+        long_text = "The agent is working on a complex multi-step task. " * 6  # ~306 chars
         for i in range(6):
             msg = make_message(
                 session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_ml1_{i:03d}"
             )
             await store.append_message(msg)
-            part = make_raw_part(msg.id, session_id, part_id=f"part_ml1_{i:03d}")
+            raw_content = json.dumps({"type": "text", "text": long_text})
+            part = make_raw_part(
+                msg.id, session_id, part_id=f"part_ml1_{i:03d}", content=raw_content
+            )
             await store.append_part(part)
 
         result = await engine.run_compaction(session_id)
