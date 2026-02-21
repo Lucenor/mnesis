@@ -538,6 +538,7 @@ class TestSessionOpen:
 
         MnesisSession.close = tracking_close  # type: ignore[method-assign]
         try:
+
             async def _body_raises() -> None:
                 async with MnesisSession.open(
                     model="anthropic/claude-opus-4-6",
