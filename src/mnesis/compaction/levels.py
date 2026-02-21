@@ -215,7 +215,7 @@ async def level2_summarise(
         summary_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=min(budget.reserved_output_tokens, 4000),
+            max_tokens=min(budget.compaction_buffer, 4000),
         )
     except Exception as exc:
         logger.warning("level2_llm_failed", error=str(exc))
