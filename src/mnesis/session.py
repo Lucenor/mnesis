@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
@@ -53,15 +54,40 @@ class MnesisSession:
 
     Usage::
 
-        # As context manager (recommended)
-        async with await MnesisSession.create(model="anthropic/claude-opus-4-6") as session:
+        # Preferred: open() returns an async context manager directly
+        async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
             result = await session.send("Hello!")
             print(result.text)
 
-        # Manual lifecycle
+        # Alternative: create() + async with (equivalent, for explicit lifecycle)
+        async with await MnesisSession.create(model="anthropic/claude-opus-4-6") as session:
+            result = await session.send("Hello!")
+
+        # Manual lifecycle (no context manager)
         session = await MnesisSession.create(model="anthropic/claude-opus-4-6")
         result = await session.send("Hello!")
         await session.close()
+
+    **BYO-LLM (bring-your-own LLM client)**
+
+    If you manage LLM calls yourself (Anthropic SDK, OpenAI SDK, Gemini, etc.)
+    and only want Mnesis for memory management, use :meth:`record` together
+    with :meth:`context_for_next_turn`::
+
+        session = await MnesisSession.create(model="anthropic/claude-opus-4-6")
+
+        # Get the compaction-aware context window for your LLM call
+        messages = await session.context_for_next_turn()
+        response = your_client.chat(messages=messages, system=your_system_prompt)
+
+        # Persist the completed turn so Mnesis tracks tokens and compaction
+        await session.record(
+            user_message="Explain quantum entanglement.",
+            assistant_response=response.text,
+            tokens=TokenUsage(input=response.usage.input, output=response.usage.output),
+        )
+
+    See ``docs/byo-llm.md`` and ``examples/06_byo_llm.py`` for a full walkthrough.
     """
 
     def __init__(
@@ -194,6 +220,58 @@ class MnesisSession:
             "session_created", session_id=session_id, model=model, agent=agent
         )
         return session
+
+    @classmethod
+    @asynccontextmanager
+    async def open(
+        cls,
+        *,
+        model: str,
+        agent: str = "default",
+        parent_id: str | None = None,
+        config: MnesisConfig | None = None,
+        system_prompt: str = "You are a helpful assistant.",
+        db_path: str | None = None,
+        pool: StorePool | None = None,
+    ) -> AsyncGenerator[MnesisSession, None]:
+        """
+        Create a new session and use it as an async context manager.
+
+        This is the preferred idiom for most callers — it avoids the
+        ``await ... async with`` double-ceremony of :meth:`create`::
+
+            async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
+                result = await session.send("Hello!")
+
+        All parameters are identical to :meth:`create`. The session is
+        automatically closed (pending compaction awaited, DB connection
+        released) when the ``async with`` block exits, even on exception.
+
+        Args:
+            model: LLM model string in litellm format.
+            agent: Agent role name for multi-agent setups.
+            parent_id: Parent session ID for sub-sessions (AgenticMap).
+            config: Mnesis configuration. Defaults to ``MnesisConfig()``.
+            system_prompt: System prompt for all turns in this session.
+            db_path: Override database path.
+            pool: Optional shared connection pool (see :meth:`create`).
+
+        Yields:
+            An initialized MnesisSession.
+        """
+        session = await cls.create(
+            model=model,
+            agent=agent,
+            parent_id=parent_id,
+            config=config,
+            system_prompt=system_prompt,
+            db_path=db_path,
+            pool=pool,
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
 
     @classmethod
     async def load(
@@ -718,6 +796,52 @@ class MnesisSession:
         """
         return await self._store.get_messages_with_parts(self._session_id)
 
+    async def context_for_next_turn(
+        self,
+        system_prompt: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Return the compaction-aware context window for the next LLM call.
+
+        Intended for **BYO-LLM** callers who manage their own LLM client but
+        want Mnesis to handle context assembly and compaction.  The returned
+        list is in the format expected by most chat completion APIs
+        (``[{"role": "user"|"assistant", "content": "..."}, ...]``).
+
+        Summaries injected by the compaction engine are included as assistant
+        messages at the correct position, so the context is always accurate
+        even after one or more compaction cycles.
+
+        After calling your LLM, persist the completed turn with
+        :meth:`record` so Mnesis can track token usage and trigger compaction
+        when needed.
+
+        Args:
+            system_prompt: Override the session system prompt for this turn.
+                Defaults to the system prompt set at :meth:`create` / :meth:`load`.
+
+        Returns:
+            Ordered list of ``{"role": str, "content": str | list}`` dicts
+            ready to pass to any chat completion API.
+
+        Example::
+
+            messages = await session.context_for_next_turn()
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "system", "content": my_system_prompt}, *messages],
+            )
+            await session.record(
+                user_message=my_user_text,
+                assistant_response=response.choices[0].message.content,
+            )
+        """
+        sys = system_prompt or self._system_prompt
+        context = await self._context_builder.build(
+            self._session_id, self._model_info, sys, self._config
+        )
+        return [{"role": m.role, "content": m.content} for m in context.messages]
+
     async def compact(self) -> CompactionResult:
         """
         Manually trigger synchronous compaction.
@@ -763,6 +887,11 @@ class MnesisSession:
     def token_usage(self) -> TokenUsage:
         """Cumulative token usage across all turns in this session."""
         return self._cumulative_tokens
+
+    @property
+    def compaction_in_progress(self) -> bool:
+        """``True`` while a background compaction task is running."""
+        return self._compaction_engine._pending_task is not None
 
     @property
     def event_bus(self) -> EventBus:

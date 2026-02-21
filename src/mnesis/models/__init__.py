@@ -12,6 +12,7 @@ from mnesis.models.config import (
 from mnesis.models.message import (
     CompactionResult,
     FileRefPart,
+    FinishReason,
     MessagePart,
     MessageWithParts,
     RecordResult,
@@ -27,6 +28,7 @@ __all__ = [
     "CompactionResult",
     "FileConfig",
     "FileRefPart",
+    "FinishReason",
     "MessagePart",
     "MessageSpan",
     "MessageWithParts",

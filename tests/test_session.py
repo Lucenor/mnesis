@@ -484,24 +484,129 @@ class TestPublicAPIContracts:
 
         assert issubclass(SessionNotFoundError, MnesisStoreError)
 
-    def test_turn_result_finish_reason_literal_annotation(self):
-        """C-3: TurnResult.finish_reason must carry a Literal type annotation."""
+    def test_turn_result_finish_reason_enum_annotation(self):
+        """M-8: TurnResult.finish_reason must use FinishReason | str, not plain str."""
         from typing import Union, get_args, get_origin, get_type_hints
 
-        from mnesis.models.message import TurnResult
+        from mnesis.models.message import FinishReason, TurnResult
 
         hints = get_type_hints(TurnResult)
         fr_type = hints["finish_reason"]
-        # The annotation is `Literal[...] | str` which is a Union in 3.12+
-        # Verify that at least one arm contains a Literal with "error".
+        # Annotation is `FinishReason | str` — a Union in Python 3.12+
         origin = get_origin(fr_type)
         assert origin is Union, f"Expected Union, got {origin}"
         args = get_args(fr_type)
-        from typing import Literal
+        assert FinishReason in args, f"FinishReason not in Union args: {args}"
+        # Verify enum members carry the expected string values
+        assert FinishReason.ERROR == "error"
+        assert FinishReason.STOP == "stop"
+        assert FinishReason.MAX_TOKENS == "max_tokens"
 
-        literal_args = []
-        for arg in args:
-            if get_origin(arg) is Literal:
-                literal_args.extend(get_args(arg))
-        assert "error" in literal_args, f"'error' not found in Literal args: {literal_args}"
-        assert "stop" in literal_args
+    def test_finish_reason_exported_from_top_level(self):
+        """M-8: FinishReason must be importable from the top-level mnesis package."""
+        from mnesis import FinishReason
+
+        assert FinishReason.STOP == "stop"
+        assert issubclass(FinishReason, str)
+
+
+class TestSessionOpen:
+    """Tests for M-1: MnesisSession.open() async context manager factory."""
+
+    async def test_open_yields_session_and_closes(self, tmp_path):
+        """open() yields a working session and closes it on exit."""
+        from mnesis import MnesisSession
+
+        async with MnesisSession.open(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            assert session.id.startswith("sess_")
+
+    async def test_open_closes_on_exception(self, tmp_path):
+        """open() calls close() even when the body raises."""
+        from mnesis import MnesisSession
+
+        closed_sessions: list[str] = []
+        original_close = MnesisSession.close
+
+        async def tracking_close(self):  # type: ignore[override]
+            closed_sessions.append(self.id)
+            await original_close(self)
+
+        MnesisSession.close = tracking_close  # type: ignore[method-assign]
+        try:
+            with pytest.raises(ValueError, match="boom"):
+                async with MnesisSession.open(
+                    model="anthropic/claude-opus-4-6",
+                    db_path=str(tmp_path / "test.db"),
+                ) as session:
+                    sid = session.id
+                    raise ValueError("boom")
+            assert sid in closed_sessions
+        finally:
+            MnesisSession.close = original_close  # type: ignore[method-assign]
+
+
+class TestContextForNextTurn:
+    """Tests for M-7: session.context_for_next_turn()."""
+
+    async def test_returns_list_of_role_content_dicts(self, tmp_path):
+        """context_for_next_turn() returns a list[dict] with role/content keys."""
+        from mnesis import MnesisSession
+
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        )
+        try:
+            # Empty context — no messages yet
+            ctx = await session.context_for_next_turn()
+            assert isinstance(ctx, list)
+
+            # After recording a turn, messages appear in context
+            await session.record(
+                user_message="Hello",
+                assistant_response="Hi there",
+            )
+            ctx = await session.context_for_next_turn()
+            assert len(ctx) >= 1
+            for item in ctx:
+                assert "role" in item
+                assert "content" in item
+                assert item["role"] in ("user", "assistant")
+        finally:
+            await session.close()
+
+    async def test_system_prompt_override(self, tmp_path):
+        """context_for_next_turn() accepts an optional system_prompt override."""
+        from mnesis import MnesisSession
+
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            system_prompt="Default prompt.",
+            db_path=str(tmp_path / "test.db"),
+        )
+        try:
+            # Should not raise regardless of override value
+            ctx = await session.context_for_next_turn(system_prompt="Override prompt.")
+            assert isinstance(ctx, list)
+        finally:
+            await session.close()
+
+
+class TestCompactionInProgress:
+    """Tests for L-9: session.compaction_in_progress property."""
+
+    async def test_compaction_in_progress_false_at_start(self, tmp_path):
+        """compaction_in_progress is False when no compaction task is running."""
+        from mnesis import MnesisSession
+
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        )
+        try:
+            assert session.compaction_in_progress is False
+        finally:
+            await session.close()
