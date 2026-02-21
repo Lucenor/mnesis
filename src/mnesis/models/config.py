@@ -49,6 +49,30 @@ class CompactionConfig(BaseModel):
         "None = use the built-in agentic prompt.",
     )
 
+    soft_threshold_fraction: float = Field(
+        default=0.6,
+        ge=0.1,
+        le=0.95,
+        description=(
+            "Fraction of the usable context window at which background compaction is "
+            "triggered early (soft threshold). Must be less than 1.0 so compaction "
+            "starts before the hard limit is reached."
+        ),
+    )
+
+    max_compaction_rounds: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description=(
+            "Maximum number of summarise + condense cycles to run when the context "
+            "is still over the hard threshold after an initial compaction pass."
+        ),
+    )
+
+    condensation_enabled: bool = True
+    """Whether to attempt condensation of accumulated summary nodes after summarisation."""
+
     @model_validator(mode="after")
     def validate_prune_thresholds(self) -> CompactionConfig:
         if self.prune_minimum_tokens >= self.prune_protect_tokens:
