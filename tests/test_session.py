@@ -543,9 +543,10 @@ class TestSessionOpen:
                     model="anthropic/claude-opus-4-6",
                     db_path=str(tmp_path / "test.db"),
                 ) as session:
-                    sid = session.id
+                    assert session.id.startswith("sess_")
                     raise ValueError("boom")
-            assert sid in closed_sessions
+            assert len(closed_sessions) == 1
+            assert closed_sessions[0].startswith("sess_")
         finally:
             MnesisSession.close = original_close  # type: ignore[method-assign]
 
