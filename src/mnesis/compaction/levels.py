@@ -440,9 +440,13 @@ def level3_deterministic(
     # level 3 is that we never lose file pointers even when prose is discarded.
     all_file_ids = extract_file_ids_from_messages(messages)
 
-    target = int(budget.usable * 0.85)
     header = "[CONTEXT TRUNCATED — DETERMINISTIC FALLBACK]\n\n## Kept Messages\n\n"
     header_tokens = estimator.estimate(header)
+    # Reserve space for the file IDs footer upfront so it never overflows.
+    footer_tokens = (
+        estimator.estimate(append_file_ids_footer("", all_file_ids)) if all_file_ids else 0
+    )
+    target = int(budget.usable * 0.85) - footer_tokens
 
     kept: list[MessageWithParts] = []
     tokens_used = header_tokens
@@ -660,7 +664,10 @@ def condense_level3_deterministic(
     header = fallback_header + ids_header
     header_tokens = estimator.estimate(header)
 
-    available = _CONDENSE_LEVEL3_MAX_TOKENS - header_tokens
+    # Reserve space for the file IDs footer before building content so it
+    # never gets pushed past _CONDENSE_LEVEL3_MAX_TOKENS.
+    footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
+    available = _CONDENSE_LEVEL3_MAX_TOKENS - header_tokens - footer_tokens
     if available < 0:
         available = 0
 

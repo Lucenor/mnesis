@@ -119,7 +119,7 @@ def append_file_ids_footer(text: str, file_ids: list[str]) -> str:
     footer = _FILE_IDS_FOOTER_TEMPLATE.format(ids=ids_str)
 
     # Strip any existing footer before appending the authoritative one.
-    existing_footer_re = re.compile(r"\n\n\[LCM File IDs:.*?\]", re.DOTALL)
+    existing_footer_re = re.compile(r"\n*\[LCM File IDs:[^\]]*\]\s*$", re.MULTILINE)
     text = existing_footer_re.sub("", text)
 
     return text + footer

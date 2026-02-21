@@ -303,10 +303,16 @@ class MnesisSession:
             MnesisEvent.MESSAGE_CREATED, {"message_id": user_msg_id, "role": "user"}
         )
 
-        # Hard threshold check: if a background compaction is in-flight AND the
-        # context is already over the hard limit, block until it completes.
-        # This prevents an over-limit context from reaching the LLM.
+        # Hard threshold check: if the context is over the hard limit, ensure
+        # compaction is triggered (if not already in flight) and then block
+        # until it completes.  This prevents an over-limit context reaching the LLM.
         if self._compaction_engine.is_hard_overflow(self._cumulative_tokens, self._model_info):
+            if not self._compaction_engine._pending_task:
+                self._compaction_engine.check_and_trigger(
+                    self._session_id,
+                    self._cumulative_tokens,
+                    self._model_info,
+                )
             await self._compaction_engine.wait_for_pending()
 
         # Build context
