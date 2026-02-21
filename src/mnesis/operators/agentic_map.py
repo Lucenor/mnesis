@@ -94,7 +94,7 @@ class AgenticMap:
             tools: Optional tool definitions for sub-sessions.
             max_turns: Maximum turns per sub-session before stopping.
             agent: Agent role for sub-sessions.
-            lcm_config: Mnesis config for sub-sessions. Defaults to MnesisConfig.default().
+            lcm_config: Mnesis config for sub-sessions. Defaults to ``MnesisConfig()``.
             db_path: Override database path (useful for testing).
             pool: Shared ``StorePool`` so all sub-sessions use one connection.
                 If omitted a fresh pool is created and closed automatically
