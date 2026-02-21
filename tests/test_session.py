@@ -486,15 +486,17 @@ class TestPublicAPIContracts:
 
     def test_turn_result_finish_reason_enum_annotation(self):
         """M-8: TurnResult.finish_reason must use FinishReason | str, not plain str."""
+        import types
         from typing import Union, get_args, get_origin, get_type_hints
 
         from mnesis.models.message import FinishReason, TurnResult
 
         hints = get_type_hints(TurnResult)
         fr_type = hints["finish_reason"]
-        # Annotation is `FinishReason | str` — a Union in Python 3.12+
+        # `FinishReason | str` uses the PEP 604 union syntax; get_origin returns
+        # types.UnionType on Python 3.10-3.13 and typing.Union on older versions.
         origin = get_origin(fr_type)
-        assert origin is Union, f"Expected Union, got {origin}"
+        assert origin in (Union, types.UnionType), f"Expected Union, got {origin}"
         args = get_args(fr_type)
         assert FinishReason in args, f"FinishReason not in Union args: {args}"
         # Verify enum members carry the expected string values
