@@ -3,14 +3,13 @@
 All configuration is done through `MnesisConfig`, which groups settings into sub-configs. Every field has a sensible default — you only need to override what you want to change.
 
 ```python
-from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig, SessionConfig, StoreConfig, OperatorConfig
+from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig, StoreConfig, OperatorConfig
 
 config = MnesisConfig(
     compaction=CompactionConfig(...),
     file=FileConfig(...),
     store=StoreConfig(...),
     operators=OperatorConfig(...),
-    session=SessionConfig(doom_loop_threshold=3),
 )
 
 session = await MnesisSession.create(model="openai/gpt-4o", config=config)
@@ -32,6 +31,9 @@ Controls when and how context compaction fires.
 | `compaction_model` | `None` | Model for summarisation. `None` = use session model |
 | `level2_enabled` | `True` | Attempt Level 2 compression before falling back to Level 3 |
 | `compaction_prompt` | `None` | Custom prompt string for Level 1/2 LLM summarisation. `None` = use the built-in agentic prompt |
+| `soft_threshold_fraction` | `0.6` | Fraction of usable context at which background compaction triggers (before hard threshold). Advanced. |
+| `max_compaction_rounds` | `10` | Cap on summarise+condense cycles in multi-round loop. Advanced. |
+| `condensation_enabled` | `True` | Whether to attempt condensation of accumulated summary nodes. Advanced. |
 
 ### Tuning for large models
 
@@ -62,8 +64,8 @@ Controls how large files are handled.
 | Field | Default | Description |
 |---|---|---|
 | `inline_threshold` | `10_000` | Files estimated above this token count are stored as `FileRefPart` objects |
-| `storage_dir` | `None` | Directory for external file storage. Defaults to `~/.mnesis/files/` |
-| `exploration_summary_model` | `None` | Model for LLM-based file summaries. `None` = deterministic only |
+| `storage_dir` | `~/.mnesis/files/` | Directory for external file storage. Defaults to `~/.mnesis/files/` |
+| `exploration_summary_model` | `None` | Reserved for future LLM-based structural summaries (AST, key lists, headings). Currently ignored — structural exploration summaries are generated deterministically only. |
 
 ---
 
