@@ -284,6 +284,7 @@ async def level1_summarise(
     file_ids = extract_file_ids_from_messages(to_summarise)
 
     transcript = _build_messages_text(to_summarise)
+    input_token_count = estimator.estimate(transcript)
     prompt = compaction_prompt if compaction_prompt is not None else LEVEL1_PROMPT
     prompt_messages = [
         {
@@ -311,6 +312,16 @@ async def level1_summarise(
             "level1_summary_too_large",
             token_count=token_count,
             usable=budget.usable,
+        )
+        return None
+
+    # Convergence check: if the summary is as large or larger than the input,
+    # the LLM failed to compress — escalate to the next level.
+    if token_count >= input_token_count:
+        logger.info(
+            "level1_no_convergence",
+            summary_tokens=token_count,
+            input_tokens=input_token_count,
         )
         return None
 
@@ -372,6 +383,7 @@ async def level2_summarise(
             role = "U" if msg.role == "user" else "A"
             transcript_parts.append(f"[{role}]: {text}")
     transcript = "\n".join(transcript_parts)
+    input_token_count = estimator.estimate(transcript)
 
     prompt = compaction_prompt if compaction_prompt is not None else LEVEL2_PROMPT
     prompt_messages = [
@@ -400,6 +412,16 @@ async def level2_summarise(
             "level2_summary_too_large",
             token_count=token_count,
             usable=budget.usable,
+        )
+        return None
+
+    # Convergence check: if the summary is as large or larger than the input,
+    # the LLM failed to compress — escalate to the next level.
+    if token_count >= input_token_count:
+        logger.info(
+            "level2_no_convergence",
+            summary_tokens=token_count,
+            input_tokens=input_token_count,
         )
         return None
 
