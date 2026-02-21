@@ -349,7 +349,8 @@ class TestLLMMap:
 
         semaphore = _asyncio.Semaphore(1)
         _tmpl = _JinjaEnv().from_string("Process: {{ item }}")
-        result = await llm_map._process_item(
+        # First call exercises the non-mock path; result is not checked (real LLM absent).
+        await llm_map._process_item(
             item="test",
             compiled_template=_tmpl,
             schema=OutputSchema.model_json_schema(),
@@ -362,7 +363,6 @@ class TestLLMMap:
             timeout=30.0,
             retry_guidance="retry",
         )
-        # This will fail validation since _call_llm is not mocked — but tests the non-mock path
         # We mock _call_llm to return valid data
         llm_map._call_llm = fake_call_llm  # type: ignore
         result = await llm_map._process_item(
