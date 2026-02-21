@@ -244,6 +244,21 @@ class ImmutableStore:
         await conn.executescript(schema)
         await conn.commit()
 
+        # Phase 3 migration: add DAG columns to summary_nodes for existing databases.
+        # CREATE TABLE IF NOT EXISTS is a no-op for pre-existing tables, so we must
+        # ALTER TABLE to add new columns.  Each ADD COLUMN is wrapped in try/except
+        # because SQLite raises OperationalError if the column already exists.
+        for col_ddl in [
+            "ALTER TABLE summary_nodes ADD COLUMN kind TEXT NOT NULL DEFAULT 'leaf'",
+            "ALTER TABLE summary_nodes ADD COLUMN parent_node_ids TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE summary_nodes ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0",
+        ]:
+            try:
+                await conn.execute(col_ddl)
+            except Exception:
+                pass  # Column already exists — safe to ignore
+        await conn.commit()
+
         self._conn = conn
         self._logger.info("store_initialized", db_path=self._db_path)
 
