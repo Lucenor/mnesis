@@ -6,7 +6,6 @@ repo_name: Lucenor/mnesis
 edit_uri: edit/main/docs/
 
 theme:
-  name: material
   variant: modern
   palette:
     scheme: slate

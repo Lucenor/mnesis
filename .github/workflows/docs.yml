@@ -45,7 +45,7 @@ jobs:
         run: uv sync --group docs
 
       - name: Build docs
-        run: uv run mkdocs build
+        run: uv run zensical build
 
       - name: Upload pages artifact
         if: github.event_name != 'pull_request'
