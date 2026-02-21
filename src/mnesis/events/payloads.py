@@ -21,7 +21,7 @@ Usage example::
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 # ── Session lifecycle ─────────────────────────────────────────────────────────
 
@@ -136,12 +136,18 @@ class DoomLoopDetectedPayload(TypedDict):
 
 
 class MapStartedPayload(TypedDict):
-    """Payload for :attr:`MnesisEvent.MAP_STARTED` (operator bus only)."""
+    """Payload for :attr:`MnesisEvent.MAP_STARTED` (operator bus only).
+
+    ``model`` is present only for :class:`~mnesis.operators.LLMMap`.
+    ``type`` is present only for :class:`~mnesis.operators.AgenticMap` (value: ``"agentic"``).
+    """
 
     total: int
     """Total number of items to process."""
-    model: str
-    """LLM model string. Present for LLMMap; may be absent for AgenticMap."""
+    model: NotRequired[str]
+    """LLM model string. Present for LLMMap; absent for AgenticMap."""
+    type: NotRequired[str]
+    """Operator type string. Present for AgenticMap (``"agentic"``); absent for LLMMap."""
 
 
 class MapItemCompletedPayload(TypedDict):
@@ -156,9 +162,13 @@ class MapItemCompletedPayload(TypedDict):
 
 
 class MapCompletedPayload(TypedDict):
-    """Payload for :attr:`MnesisEvent.MAP_COMPLETED` (operator bus only)."""
+    """Payload for :attr:`MnesisEvent.MAP_COMPLETED` (operator bus only).
+
+    ``completed`` is present only for :class:`~mnesis.operators.LLMMap`.
+    :class:`~mnesis.operators.AgenticMap` publishes only ``total``.
+    """
 
     total: int
     """Total number of items processed."""
-    completed: int
-    """Number of items that completed (should equal ``total`` barring cancellation)."""
+    completed: NotRequired[int]
+    """Number of items that completed. Present for LLMMap; absent for AgenticMap."""

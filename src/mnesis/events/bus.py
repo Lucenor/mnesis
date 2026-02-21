@@ -74,31 +74,25 @@ class MnesisEvent(StrEnum):
 
     # Session lifecycle
     SESSION_CREATED = "session.created"
-    SESSION_UPDATED = "session.updated"
-    """Reserved — not yet published."""
+    SESSION_UPDATED = "session.updated"  # Reserved — not yet published.
     SESSION_CLOSED = "session.closed"
-    SESSION_DELETED = "session.deleted"
-    """Reserved — not yet published."""
+    SESSION_DELETED = "session.deleted"  # Reserved — not yet published.
 
     # Message lifecycle
     MESSAGE_CREATED = "message.created"
-    MESSAGE_UPDATED = "message.updated"
-    """Reserved — not yet published."""
+    MESSAGE_UPDATED = "message.updated"  # Reserved — not yet published.
 
-    # Streaming part events (granular, high-frequency; reserved)
+    # Streaming part events (granular, high-frequency; reserved — not yet published)
     PART_CREATED = "part.created"
-    """Reserved — not yet published."""
     PART_UPDATED = "part.updated"
-    """Reserved — not yet published."""
 
     # Compaction lifecycle
     COMPACTION_TRIGGERED = "compaction.triggered"
     COMPACTION_COMPLETED = "compaction.completed"
     COMPACTION_FAILED = "compaction.failed"
 
-    # Pruning (reserved)
+    # Pruning (reserved — not yet published)
     PRUNE_COMPLETED = "prune.completed"
-    """Reserved — not yet published."""
 
     # Safety
     DOOM_LOOP_DETECTED = "doom_loop.detected"
