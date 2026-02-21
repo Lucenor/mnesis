@@ -3,9 +3,33 @@
 from __future__ import annotations
 
 import time
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
+
+# ── FinishReason ───────────────────────────────────────────────────────────────
+
+
+class FinishReason(StrEnum):
+    """
+    Why the LLM stopped generating.
+
+    String enum so ``result.finish_reason == "stop"`` comparisons work
+    without importing the enum.
+
+    **Important — ``FinishReason.ERROR``**: when ``finish_reason`` is
+    ``FinishReason.ERROR`` (or ``"error"``), the LLM call failed.
+    ``TurnResult.text`` contains an error description, *not* a model response.
+    Always check ``finish_reason`` before processing ``text``.
+    """
+
+    STOP = "stop"
+    MAX_TOKENS = "max_tokens"
+    TOOL_CALLS = "tool_calls"
+    LENGTH = "length"
+    ERROR = "error"
+
 
 # ── Part Models ────────────────────────────────────────────────────────────────
 
@@ -292,18 +316,20 @@ class TurnResult(BaseModel):
 
     message_id: str
     text: str
-    finish_reason: Literal["stop", "max_tokens", "tool_calls", "length", "error"] | str
+    finish_reason: FinishReason | str
     """
-    Why the LLM stopped generating. Known values:
+    Why the LLM stopped generating.
 
-    - ``"stop"`` — natural end of response.
-    - ``"max_tokens"`` / ``"length"`` — output token limit reached.
-    - ``"tool_calls"`` — the model requested tool execution.
-    - ``"error"`` — **the LLM call failed**; ``text`` contains the error
-      description, not a model response. Do not pass this text to the model
-      as if it were a real reply.
+    Type is ``FinishReason | str``: known values are the ``FinishReason`` enum
+    members; providers may return additional string values.
 
-    Providers may return additional values; the ``| str`` allows for these.
+    - ``FinishReason.STOP`` / ``"stop"`` — natural end of response.
+    - ``FinishReason.MAX_TOKENS`` / ``"max_tokens"`` — output token limit reached.
+    - ``FinishReason.LENGTH`` / ``"length"`` — alias used by some providers.
+    - ``FinishReason.TOOL_CALLS`` / ``"tool_calls"`` — model requested tool execution.
+    - ``FinishReason.ERROR`` / ``"error"`` — **the LLM call failed**; ``text``
+      contains the error description, not a model response. Do not pass this
+      text to the model as if it were a real reply.
     """
     tokens: TokenUsage
     cost: float
