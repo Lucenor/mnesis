@@ -1,0 +1,5 @@
+/* Override header background to dark navy so the purple logo is visible */
+.md-header,
+.md-tabs {
+  background-color: #1a1a2e !important;
+}
