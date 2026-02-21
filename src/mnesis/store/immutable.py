@@ -1033,7 +1033,7 @@ class ImmutableStore:
         # system_prompt column added in Wave 1 migration; guard for pre-migration DBs.
         try:
             system_prompt: str = row["system_prompt"] or ""
-        except IndexError:
+        except KeyError:
             system_prompt = ""
         return Session(
             id=row["id"],

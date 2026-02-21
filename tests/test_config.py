@@ -74,6 +74,11 @@ class TestAdvancedLabels:
         assert info.description is not None
         assert "[Advanced]" in info.description
 
+    def test_condensation_enabled_description_has_advanced_prefix(self) -> None:
+        info = CompactionConfig.model_fields["condensation_enabled"]
+        assert info.description is not None
+        assert "[Advanced]" in info.description
+
 
 class TestStoreConfigDbPathExpansion:
     """M-6 / L-3: db_path accepts str | Path, expands ~ eagerly."""
@@ -169,13 +174,24 @@ class TestModelInfoGptFoAdded:
 class TestDualDbPathRaisesValueError:
     """M-6: supplying both db_path and config.store.db_path raises ValueError."""
 
-    async def test_create_raises_on_dual_db_path(self, tmp_path: pytest.TempdirFactory) -> None:
+    async def test_create_raises_on_dual_db_path(self, tmp_path: Path) -> None:
         from mnesis import MnesisConfig, MnesisSession, StoreConfig
 
         cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "a.db")))
         with pytest.raises(ValueError, match="db_path"):
             await MnesisSession.create(
                 model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "b.db"),
+            )
+
+    async def test_load_raises_on_dual_db_path(self, tmp_path: Path) -> None:
+        from mnesis import MnesisConfig, MnesisSession, StoreConfig
+
+        cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "a.db")))
+        with pytest.raises(ValueError, match="db_path"):
+            await MnesisSession.load(
+                session_id="dummy-id",
                 config=cfg,
                 db_path=str(tmp_path / "b.db"),
             )

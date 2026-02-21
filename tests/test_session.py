@@ -473,10 +473,10 @@ class TestPublicAPIContracts:
 
     def test_session_not_found_error_in_all(self):
         """H-1: Both exceptions must appear in mnesis.__all__."""
-        import mnesis
+        from mnesis import __all__ as mnesis_all
 
-        assert "SessionNotFoundError" in mnesis.__all__
-        assert "MnesisStoreError" in mnesis.__all__
+        assert "SessionNotFoundError" in mnesis_all
+        assert "MnesisStoreError" in mnesis_all
 
     def test_session_not_found_error_is_mnesis_store_error_subclass(self):
         """SessionNotFoundError must be a subclass of MnesisStoreError for catch-hierarchy."""

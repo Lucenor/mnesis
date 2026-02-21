@@ -90,9 +90,13 @@ class CompactionConfig(BaseModel):
         ),
     )
 
-    condensation_enabled: bool = True
-    """[Advanced] Whether to attempt condensation of accumulated summary nodes after
-    summarisation."""
+    condensation_enabled: bool = Field(
+        default=True,
+        description=(
+            "[Advanced] Whether to attempt condensation of accumulated summary nodes after"
+            " summarisation."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_prune_thresholds(self) -> CompactionConfig:
