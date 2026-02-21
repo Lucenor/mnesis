@@ -70,6 +70,66 @@ class TestLLMMap:
 
         assert set(result_inputs) == set(inputs)
 
+    async def test_output_schema_non_basemodel_type_raises(self, op_config):
+        """Passing a non-BaseModel type as output_schema raises TypeError."""
+        llm_map = LLMMap(op_config)
+        with pytest.raises(TypeError, match="BaseModel subclass"):
+            async for _ in llm_map.run(
+                inputs=["test"],
+                prompt_template="Process: {{ item }}",
+                output_schema=dict,  # type: ignore[arg-type]
+                model="test-model",
+            ):
+                pass
+
+    async def test_output_schema_unsupported_value_raises(self, op_config):
+        """Passing a non-type, non-dict value (e.g. a list) raises TypeError."""
+        llm_map = LLMMap(op_config)
+        with pytest.raises(TypeError, match="BaseModel subclass or a dict JSON Schema"):
+            async for _ in llm_map.run(
+                inputs=["test"],
+                prompt_template="Process: {{ item }}",
+                output_schema=["not", "a", "schema"],  # type: ignore[arg-type]
+                model="test-model",
+            ):
+                pass
+
+    async def test_output_schema_pydantic_model_accepted(self, op_config):
+        """A valid BaseModel subclass is accepted without error."""
+        llm_map = LLMMap(op_config)
+        results = []
+        async for result in llm_map.run(
+            inputs=["test"],
+            prompt_template="Process: {{ item }}",
+            output_schema=OutputSchema,
+            model="test-model",
+        ):
+            results.append(result)
+        assert len(results) == 1
+
+    async def test_output_schema_dict_missing_jsonschema_raises(self, op_config, monkeypatch):
+        """Passing a dict schema raises ImportError when jsonschema is not installed."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def mock_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "jsonschema":
+                raise ImportError("No module named 'jsonschema'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", mock_import)
+
+        llm_map = LLMMap(op_config)
+        with pytest.raises(ImportError, match="pip install jsonschema"):
+            async for _ in llm_map.run(
+                inputs=["test"],
+                prompt_template="Process: {{ item }}",
+                output_schema={"type": "object"},
+                model="test-model",
+            ):
+                pass
+
     async def test_concurrency_limit_respected(self, op_config):
         """At most N concurrent calls are made at once."""
         active: list[int] = []
@@ -112,6 +172,7 @@ class TestAgenticMap:
             inputs=inputs,
             agent_prompt_template="Complete this task: {{ item }}",
             model="anthropic/claude-opus-4-6",
+            read_only=False,
             db_path=str(tmp_path / "agentic_test.db"),
             max_turns=2,
         ):
@@ -132,6 +193,7 @@ class TestAgenticMap:
                 inputs=["test"],
                 agent_prompt_template="No item placeholder",
                 model="test-model",
+                read_only=False,
             ):
                 pass
 
@@ -146,6 +208,7 @@ class TestAgenticMap:
             inputs=inputs,
             agent_prompt_template="Process: {{ item }}",
             model="anthropic/claude-opus-4-6",
+            read_only=False,
             db_path=str(tmp_path / "agentic_inputs.db"),
             max_turns=1,
         ):
@@ -163,6 +226,7 @@ class TestAgenticMap:
             inputs=["hello world"],
             agent_prompt_template="Greet: {{ item }}",
             model="anthropic/claude-opus-4-6",
+            read_only=False,
             db_path=str(tmp_path / "agentic_output.db"),
             max_turns=1,
         ):
@@ -171,3 +235,38 @@ class TestAgenticMap:
         assert len(results) == 1
         assert results[0].success is True
         assert len(results[0].output_text) > 0
+
+    async def test_read_only_true_raises_not_implemented(self, op_config):
+        """read_only=True raises NotImplementedError immediately (not silently ignored)."""
+        from mnesis.operators.agentic_map import AgenticMap
+
+        agentic_map = AgenticMap(op_config)
+        with pytest.raises(NotImplementedError, match="read_only"):
+            async for _ in agentic_map.run(
+                inputs=["test"],
+                agent_prompt_template="Process: {{ item }}",
+                model="test-model",
+                read_only=True,
+            ):
+                pass
+
+    async def test_read_only_false_does_not_raise_not_implemented(self, tmp_path, op_config):
+        """read_only=False is accepted — no NotImplementedError is raised."""
+        from mnesis.operators.agentic_map import AgenticMap
+
+        agentic_map = AgenticMap(op_config)
+        results = []
+        # If NotImplementedError were raised it would propagate out of the generator.
+        # We only verify the run() generator starts without that error.
+        async for result in agentic_map.run(
+            inputs=["item"],
+            agent_prompt_template="Process: {{ item }}",
+            model="anthropic/claude-opus-4-6",
+            read_only=False,
+            db_path=str(tmp_path / "read_only_false.db"),
+            max_turns=1,
+        ):
+            results.append(result)
+
+        # One result per input regardless of sub-session outcome.
+        assert len(results) == 1
