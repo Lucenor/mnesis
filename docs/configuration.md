@@ -31,6 +31,9 @@ Controls when and how context compaction fires.
 | `compaction_model` | `None` | Model for summarisation. `None` = use session model |
 | `level2_enabled` | `True` | Attempt Level 2 compression before falling back to Level 3 |
 | `compaction_prompt` | `None` | Custom prompt string for Level 1/2 LLM summarisation. `None` = use the built-in agentic prompt |
+| `soft_threshold_fraction` | `0.6` | Fraction of usable context at which background compaction triggers (before hard threshold). Advanced. |
+| `max_compaction_rounds` | `10` | Cap on summarise+condense cycles in multi-round loop. Advanced. |
+| `condensation_enabled` | `True` | Whether to attempt condensation of accumulated summary nodes. Advanced. |
 
 ### Tuning for large models
 
@@ -62,7 +65,7 @@ Controls how large files are handled.
 |---|---|---|
 | `inline_threshold` | `10_000` | Files estimated above this token count are stored as `FileRefPart` objects |
 | `storage_dir` | `~/.mnesis/files/` | Directory for external file storage. Defaults to `~/.mnesis/files/` |
-| `exploration_summary_model` | `None` | Model for LLM-based file summaries. `None` = deterministic only |
+| `exploration_summary_model` | `None` | Model for LLM-based structural summaries (AST, key lists, headings). `None` = deterministic-only mode (no LLM cost). |
 
 ---
 

@@ -369,8 +369,9 @@ class MnesisSession:
             tools: Optional list of tool definitions (litellm format dicts).
             on_part: Optional callback invoked for each streamed ``MessagePart``.
                 During streaming, ``on_part`` receives :class:`TextPart` chunks
-                only. :class:`ToolPart` objects are delivered when calling
-                :meth:`record` directly with pre-built parts.
+                only. Note: :class:`ToolPart` objects are never delivered via
+                ``on_part`` during ``send()``; they are only available when
+                passing pre-built parts to :meth:`record`.
             system_prompt: Override the session system prompt for this turn only.
                 Note: not all providers support per-turn system prompt overrides —
                 check your provider's documentation before relying on this.
