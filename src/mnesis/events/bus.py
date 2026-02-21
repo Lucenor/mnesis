@@ -167,6 +167,7 @@ class EventBus:
         try:
             handlers.remove(handler)
         except ValueError:
+            # Handler not registered for this event — silent no-op by design.
             pass
 
     def unsubscribe_all(self, handler: Handler) -> None:
@@ -183,10 +184,12 @@ class EventBus:
             try:
                 handlers.remove(handler)
             except ValueError:
+                # Handler not registered for this event type — silent no-op by design.
                 pass
         try:
             self._global_handlers.remove(handler)
         except ValueError:
+            # Handler not in global list — silent no-op by design.
             pass
 
     def publish(self, event: MnesisEvent, payload: dict[str, Any]) -> None:
