@@ -13,34 +13,99 @@ Handler = Callable[["MnesisEvent", dict[str, Any]], None | Awaitable[None]]
 
 
 class MnesisEvent(StrEnum):
-    """All event types published by Mnesis components."""
+    """All event types published by Mnesis components.
+
+    Typed payload definitions for each event live in
+    :mod:`mnesis.events.payloads`. Import them for static type checking::
+
+        from mnesis.events.payloads import CompactionCompletedPayload
+
+    **Payload schemas by event:**
+
+    ``SESSION_CREATED``
+        :class:`~mnesis.events.payloads.SessionCreatedPayload` —
+        ``session_id: str``, ``model: str``
+
+    ``SESSION_CLOSED``
+        :class:`~mnesis.events.payloads.SessionClosedPayload` —
+        ``session_id: str``
+
+    ``SESSION_UPDATED``, ``SESSION_DELETED``
+        *Reserved — not yet published.*
+
+    ``MESSAGE_CREATED``
+        :class:`~mnesis.events.payloads.MessageCreatedPayload` —
+        ``message_id: str``, ``role: str`` (``"user"`` or ``"assistant"``)
+
+    ``MESSAGE_UPDATED``, ``PART_CREATED``, ``PART_UPDATED``
+        *Reserved — not yet published.*
+
+    ``COMPACTION_TRIGGERED``
+        :class:`~mnesis.events.payloads.CompactionTriggeredPayload` —
+        ``session_id: str``, ``tokens: int``
+
+    ``COMPACTION_COMPLETED``
+        :class:`~mnesis.events.payloads.CompactionCompletedPayload` —
+        all fields from :class:`~mnesis.models.message.CompactionResult`
+        serialized via ``model_dump()``.
+
+    ``COMPACTION_FAILED``
+        :class:`~mnesis.events.payloads.CompactionFailedPayload` —
+        ``session_id: str``, ``error: str``
+
+    ``PRUNE_COMPLETED``
+        *Reserved — not yet published.*
+
+    ``DOOM_LOOP_DETECTED``
+        :class:`~mnesis.events.payloads.DoomLoopDetectedPayload` —
+        ``session_id: str``, ``tool: str``
+
+    ``MAP_STARTED``, ``MAP_ITEM_COMPLETED``, ``MAP_COMPLETED``
+        :class:`~mnesis.events.payloads.MapStartedPayload`,
+        :class:`~mnesis.events.payloads.MapItemCompletedPayload`,
+        :class:`~mnesis.events.payloads.MapCompletedPayload`.
+
+        **Important:** These events fire on the *operator's own EventBus*,
+        not the session bus. Subscribe via the session bus only if you
+        injected it into the operator at construction time::
+
+            llm_map = LLMMap(config.operators, event_bus=session.event_bus)
+    """
 
     # Session lifecycle
     SESSION_CREATED = "session.created"
     SESSION_UPDATED = "session.updated"
+    """Reserved — not yet published."""
     SESSION_CLOSED = "session.closed"
     SESSION_DELETED = "session.deleted"
+    """Reserved — not yet published."""
 
     # Message lifecycle
     MESSAGE_CREATED = "message.created"
     MESSAGE_UPDATED = "message.updated"
+    """Reserved — not yet published."""
 
-    # Streaming part events (granular, high-frequency)
+    # Streaming part events (granular, high-frequency; reserved)
     PART_CREATED = "part.created"
+    """Reserved — not yet published."""
     PART_UPDATED = "part.updated"
+    """Reserved — not yet published."""
 
     # Compaction lifecycle
     COMPACTION_TRIGGERED = "compaction.triggered"
     COMPACTION_COMPLETED = "compaction.completed"
     COMPACTION_FAILED = "compaction.failed"
 
-    # Pruning
+    # Pruning (reserved)
     PRUNE_COMPLETED = "prune.completed"
+    """Reserved — not yet published."""
 
     # Safety
     DOOM_LOOP_DETECTED = "doom_loop.detected"
 
-    # Operator events
+    # Operator events — fire on the operator's EventBus, not the session bus.
+    # Inject the session bus via LLMMap(config, event_bus=session.event_bus)
+    # or AgenticMap(config, event_bus=session.event_bus) to receive them.
     MAP_STARTED = "map.started"
     MAP_ITEM_COMPLETED = "map.item_completed"
     MAP_COMPLETED = "map.completed"
