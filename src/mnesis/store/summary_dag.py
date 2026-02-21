@@ -81,6 +81,13 @@ class SummaryDAGStore:
         """
         rows = await self._query_summary_nodes(session_id, superseded=False)
         if not rows:
+            # Backwards-compatibility fallback: pre-Phase-3 databases have no
+            # summary_nodes rows at all.  Check whether any row (including
+            # superseded) exists before falling back — an empty active set is
+            # valid when all nodes have been superseded in a Phase-3 database.
+            has_any = await self._session_has_any_summary_nodes(session_id)
+            if not has_any:
+                return await self._get_active_nodes_from_messages(session_id)
             return []
 
         all_messages = await self._store.get_messages(session_id)
@@ -107,13 +114,20 @@ class SummaryDAGStore:
         Returns:
             The latest active SummaryNode, or None.
         """
-        rows = await self._query_summary_nodes(session_id, superseded=False)
-        if not rows:
+        latest_row = await self._query_latest_summary_node(session_id)
+        if latest_row is None:
+            # No active rows.  Fall back to message reconstruction only for
+            # pre-Phase-3 databases (where summary_nodes has no rows at all).
+            has_any = await self._session_has_any_summary_nodes(session_id)
+            if not has_any:
+                nodes = await self._get_active_nodes_from_messages(session_id)
+                return nodes[-1] if nodes else None
             return None
-        # rows are ordered by created_at ASC; take the last
-        latest_row = rows[-1]
         if latest_row["id"] in self._superseded_ids:
-            # Scan backwards to find the most recent non-superseded node
+            # The latest persisted row was superseded in-memory this session but
+            # not yet flushed — scan backwards through all rows to find the most
+            # recent non-superseded node.
+            rows = await self._query_summary_nodes(session_id, superseded=False)
             for row in reversed(rows):
                 if row["id"] not in self._superseded_ids:
                     latest_row = row
@@ -325,6 +339,48 @@ class SummaryDAGStore:
             (session_id, int(superseded)),
         ) as cursor:
             return list(await cursor.fetchall())
+
+    async def _query_latest_summary_node(self, session_id: str) -> aiosqlite.Row | None:
+        """Return the single most-recently-created active summary_nodes row, or None.
+
+        O(1) query — fetches exactly one row via ORDER BY created_at DESC LIMIT 1.
+        """
+        conn = self._store._conn_or_raise()
+        async with conn.execute(
+            """
+            SELECT * FROM summary_nodes
+            WHERE session_id=? AND superseded=0
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ) as cursor:
+            return await cursor.fetchone()
+
+    async def _session_has_any_summary_nodes(self, session_id: str) -> bool:
+        """Return True if summary_nodes has any row (active or superseded) for the session."""
+        conn = self._store._conn_or_raise()
+        async with conn.execute(
+            "SELECT 1 FROM summary_nodes WHERE session_id=? LIMIT 1",
+            (session_id,),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def _get_active_nodes_from_messages(self, session_id: str) -> list[SummaryNode]:
+        """Reconstruct active SummaryNodes from is_summary messages.
+
+        Backwards-compatibility path for pre-Phase-3 databases where
+        summary_nodes has no rows for the session.  Mirrors the logic in
+        get_node_by_id()'s fallback branch.
+        """
+        all_messages = await self._store.get_messages(session_id)
+        summary_messages = [m for m in all_messages if m.is_summary]
+        nodes: list[SummaryNode] = []
+        for idx, msg in enumerate(summary_messages):
+            node = await self._build_node_from_message(msg, all_messages, idx)
+            if node is not None:
+                nodes.append(node)
+        return nodes
 
     async def _get_summary_node_row(self, node_id: str) -> aiosqlite.Row | None:
         """Fetch a single summary_nodes row by ID, or None."""

@@ -127,5 +127,6 @@ CREATE INDEX IF NOT EXISTS idx_summary_nodes_session
 CREATE INDEX IF NOT EXISTS idx_summary_nodes_span
     ON summary_nodes(session_id, span_start_message_id, span_end_message_id);
 
-CREATE INDEX IF NOT EXISTS idx_summary_nodes_active
-    ON summary_nodes(session_id, superseded);
+-- idx_summary_nodes_active is created in ImmutableStore.initialize() after the
+-- Phase 3 ALTER TABLE migration so that it is safe for existing databases where
+-- the superseded column may not yet exist when executescript() runs.

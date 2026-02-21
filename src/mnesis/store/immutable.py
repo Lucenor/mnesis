@@ -257,6 +257,12 @@ class ImmutableStore:
                 await conn.execute(col_ddl)
             except aiosqlite.OperationalError:
                 pass  # Column already exists — "duplicate column name" is safe to ignore
+        # Create the superseded index after the migration so that the column is
+        # guaranteed to exist for both fresh and pre-Phase-3 databases.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_summary_nodes_active"
+            " ON summary_nodes(session_id, superseded)"
+        )
         await conn.commit()
 
         self._conn = conn
