@@ -88,7 +88,7 @@ sequenceDiagram
     Caller->>Session: send("message")
     Session->>Session: normalize to TextPart list
     Session->>Store: append_message(user_msg)
-    Store->>Store: INSERT INTO messages; INSERT INTO context_items
+    Store->>Store: INSERT INTO messages + context_items
     Session->>Store: append_part(raw_part) for each user part
     Store->>Store: INSERT INTO message_parts
 
@@ -298,8 +298,8 @@ stateDiagram-v2
     SoftTrigger --> Compacting : create_task scheduled
     Compacting --> Idle : CompactionResult produced
 
-    Idle --> HardBlock : tokens above hard threshold at send()
-    HardBlock --> Blocking : await wait_for_pending()
+    Idle --> HardBlock : tokens above hard threshold at send
+    HardBlock --> Blocking : await wait_for_pending
     Blocking --> Idle : compaction completes
 
     Compacting --> CompactFailed : unhandled exception

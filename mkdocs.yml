@@ -8,6 +8,9 @@ edit_uri: edit/main/docs/
 extra_css:
   - stylesheets/extra.css
 
+extra_javascript:
+  - javascripts/mermaid-init.js
+
 theme:
   name: material
   palette:
