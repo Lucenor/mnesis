@@ -110,7 +110,7 @@ class LLMMap:
                 raise TypeError(
                     f"output_schema must be a BaseModel subclass, got {output_schema!r}"
                 )
-        else:
+        elif isinstance(output_schema, dict):
             # dict path — jsonschema is an optional dependency; fail fast with a helpful message.
             try:
                 import jsonschema as _jsonschema  # noqa: F401
@@ -119,6 +119,11 @@ class LLMMap:
                     "jsonschema is required when passing output_schema as a dict. "
                     "Install it with: pip install jsonschema"
                 ) from exc
+        else:
+            raise TypeError(
+                "output_schema must be a BaseModel subclass or a dict JSON Schema, "
+                f"got {output_schema!r}"
+            )
 
         if not re.search(r"\{\{[^}]*\bitem\b[^}]*\}\}", prompt_template):
             raise ValueError("prompt_template must contain {{ item }}")

@@ -49,6 +49,7 @@ class AgenticMap:
             inputs=repositories,
             agent_prompt_template="Analyze this repository and report quality issues:\\n{{ item }}",
             model="anthropic/claude-opus-4-6",
+            read_only=False,
             max_turns=20,
         ):
             print(f"Repo: {result.input}\\nFindings: {result.output_text[:200]}")
