@@ -30,7 +30,7 @@ Thanks for your interest in contributing. This document covers how to set up a d
 
 3. Install the project with dev dependencies:
    ```bash
-   uv sync --dev
+   uv sync --group dev
    ```
 
 That's it — no other system dependencies required for development.
