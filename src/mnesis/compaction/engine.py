@@ -393,17 +393,25 @@ class CompactionEngine:
         )
         await self._dag_store.insert_node(leaf_node, id_generator=lambda: self._id_gen("part"))
 
-        last_summary_msg_id = leaf_msg_id
-        last_summary_level = candidate.compaction_level
-        last_messages_covered = candidate.messages_covered
-        last_summary_tokens = candidate.token_count
-
-        # Estimate tokens after initial summarisation.
+        # Atomic context swap: remove compacted messages, insert summary item.
         span_end_msg = next(
             (m for m in non_summary if m.id == candidate.span_end_message_id),
             non_summary[-1],
         )
         span_end_idx = non_summary.index(span_end_msg)
+        span_start_msg = next(
+            (m for m in non_summary if m.id == candidate.span_start_message_id),
+            non_summary[0],
+        )
+        span_start_idx = non_summary.index(span_start_msg)
+        compacted_ids = [m.id for m in non_summary[span_start_idx : span_end_idx + 1]]
+        await self._store.swap_context_items(session_id, compacted_ids, leaf_msg_id)
+
+        last_summary_msg_id = leaf_msg_id
+        last_summary_level = candidate.compaction_level
+        last_messages_covered = candidate.messages_covered
+        last_summary_tokens = candidate.token_count
+
         tokens_after = (
             tokens_before
             - sum(self._estimator.estimate_message(m) for m in non_summary[: span_end_idx + 1])
@@ -465,6 +473,12 @@ class CompactionEngine:
                 )
                 await self._dag_store.insert_node(
                     condensed_node, id_generator=lambda: self._id_gen("part")
+                )
+                # Atomically swap the superseded summary context_items for the
+                # new condensed node.  parent_node_ids are the summary message
+                # IDs that are being replaced.
+                await self._store.swap_context_items(
+                    session_id, cond.parent_node_ids, condensed_msg_id
                 )
                 # Mark consumed nodes as superseded so get_active_nodes()
                 # excludes them in subsequent rounds.
