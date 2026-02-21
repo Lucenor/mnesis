@@ -577,3 +577,112 @@ class TestCompactionEngine:
             await engine._run_compaction_inner(
                 session_id, abort=abort, model_override="anthropic/claude-haiku-4-5"
             )
+
+
+class TestConvergenceEscalation:
+    """Direct unit tests for the convergence check in level1_summarise / level2_summarise.
+
+    The convergence check (levels.py ~line 320 / ~line 420) discards a summary when
+    its token count >= the input transcript token count, signalling that the LLM
+    failed to compress the content.  These tests exercise that path in isolation.
+    """
+
+    def _make_short_messages(self, session_id: str) -> list[MessageWithParts]:
+        """Six messages with minimal text so the transcript is only ~20 tokens.
+
+        _messages_to_summarise requires at least 3 user turns to leave a non-empty
+        slice; 6 messages alternating user/assistant yields exactly 3 user turns,
+        so the function returns the first 2 messages for summarisation rather than
+        the empty list it returns when there are only 2 user turns.
+        """
+        roles = ["user", "assistant", "user", "assistant", "user", "assistant"]
+        messages: list[MessageWithParts] = []
+        for i, role in enumerate(roles):
+            msg = make_message(session_id, role=role, msg_id=f"msg_conv_{session_id}_{i:03d}")
+            messages.append(MessageWithParts(message=msg, parts=[TextPart(text=f"Hi {i}")]))
+        return messages
+
+    def _make_long_messages(self, session_id: str) -> list[MessageWithParts]:
+        """Six messages with substantial text (~200 chars each) so the transcript is
+        large enough that a short mock summary is guaranteed to be smaller."""
+        roles = ["user", "assistant"]
+        messages: list[MessageWithParts] = []
+        for i in range(6):
+            msg_id = f"msg_conv_{session_id}_{i:03d}"
+            msg = make_message(session_id, role=roles[i % 2], msg_id=msg_id)
+            text = f"Message {i}: " + "the agent continues working on the task. " * 5
+            messages.append(MessageWithParts(message=msg, parts=[TextPart(text=text)]))
+        return messages
+
+    async def test_level1_escalates_when_summary_not_shorter_than_input(self, estimator, budget):
+        """level1_summarise returns None when LLM output >= input token count.
+
+        Simulates an LLM that expands rather than compresses (e.g. returns verbose
+        boilerplate for a tiny input).  The convergence check must reject the result
+        and return None so the caller can escalate to level 2.
+        """
+        messages = self._make_short_messages("cv_l1_esc")
+        # ~20-token input; mock LLM returns ~200 tokens — no convergence
+        large_output = "word " * 200
+        llm_called = False
+
+        async def expanding_llm(**kwargs: object) -> str:
+            nonlocal llm_called
+            llm_called = True
+            return large_output
+
+        result = await level1_summarise(messages, "test-model", budget, estimator, expanding_llm)
+        assert llm_called, "LLM must be invoked for the convergence check to be exercised"
+        assert result is None
+
+    async def test_level2_escalates_when_summary_not_shorter_than_input(self, estimator, budget):
+        """level2_summarise returns None when LLM output >= input token count.
+
+        Same convergence scenario as level 1 but exercising the level 2 code path
+        (aggressive transcript formatting, different prompt).
+        """
+        messages = self._make_short_messages("cv_l2_esc")
+        large_output = "word " * 200
+        llm_called = False
+
+        async def expanding_llm(**kwargs: object) -> str:
+            nonlocal llm_called
+            llm_called = True
+            return large_output
+
+        result = await level2_summarise(messages, "test-model", budget, estimator, expanding_llm)
+        assert llm_called, "LLM must be invoked for the convergence check to be exercised"
+        assert result is None
+
+    async def test_level1_succeeds_when_summary_is_shorter(self, estimator, budget):
+        """level1_summarise returns a SummaryCandidate when output is shorter than input.
+
+        Uses a large input so the short mock summary is always within budget and
+        has fewer tokens than the transcript, satisfying the convergence check.
+        """
+        messages = self._make_long_messages("cv_l1_ok")
+        compact_output = "GOAL: done. NEXT: nothing."
+
+        async def compressing_llm(**kwargs: object) -> str:
+            return compact_output
+
+        result = await level1_summarise(messages, "test-model", budget, estimator, compressing_llm)
+        assert result is not None
+        assert isinstance(result, SummaryCandidate)
+        assert result.compaction_level == 1
+
+    async def test_level2_succeeds_when_summary_is_shorter(self, estimator, budget):
+        """level2_summarise returns a SummaryCandidate when output is shorter than input.
+
+        Mirrors the level 1 success test but exercises the level 2 code path.
+        """
+        messages = self._make_long_messages("cv_l2_ok")
+        compact_output = "GOAL: done. NEXT: nothing."
+
+        async def compressing_llm(**kwargs: object) -> str:
+            return compact_output
+
+        result = await level2_summarise(messages, "test-model", budget, estimator, compressing_llm)
+        assert result is not None
+        assert isinstance(result, SummaryCandidate)
+        assert result.compaction_level == 2
