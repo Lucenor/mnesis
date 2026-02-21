@@ -247,8 +247,8 @@ class CompactionEngine:
         if task is not None and not task.done():
             try:
                 await task
-            except Exception:
-                pass
+            except Exception as exc:
+                self._logger.exception("background_compaction_failed", error=str(exc))
         self._pending_task = None
 
     # ── Public compaction entry point ───────────────────────────────────────────
