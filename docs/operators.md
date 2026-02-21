@@ -329,9 +329,11 @@ async for result in llm_map.run(inputs=items, ...):
 
 - **Transient errors** — `litellm` exceptions (network, rate limit, etc.).
   Retried with exponential backoff: `min(0.5 * 2^(attempt-1), 8.0)` seconds.
+  This backoff is applied only to non-timeout exceptions.
 
-Timeout failures are **not** retried — a `TimeoutError` consumes one attempt
-and counts toward `max_retries`.
+- **Timeout failures** — `TimeoutError` consumes one attempt and counts toward
+  `max_retries`, but does **not** apply the exponential backoff. Timeout retries
+  proceed immediately on the next attempt.
 
 `AgenticMap` does not implement per-item retries — sub-agent sessions either
 succeed or fail as a whole. Errors are surfaced in `AgentMapResult.error` and
@@ -352,17 +354,22 @@ succeed or fail as a whole. Errors are surfaced in `AgentMapResult.error` and
 
 ## Operator Events
 
-Both operators publish `MAP_STARTED`, `MAP_ITEM_COMPLETED`, and `MAP_COMPLETED`
-events to their `EventBus`. By default, each operator has its own private bus
-(or none at all), so events are not visible to the caller.
+Both operators can publish `MAP_STARTED`, `MAP_ITEM_COMPLETED`, and
+`MAP_COMPLETED` events to an `EventBus` if one is provided. By default,
+`event_bus=None` and no events are emitted — the operator runs normally
+but produces no observable events unless you explicitly supply a bus.
 
 To receive operator events on a session's event bus, inject it at construction
 time:
 
 ```python
-from mnesis import MnesisSession, LLMMap, AgenticMap, MnesisEvent
+from mnesis import MnesisSession, LLMMap, AgenticMap, MnesisConfig, MnesisEvent, OperatorConfig
 
-async with MnesisSession.open(model="anthropic/claude-haiku-3-5") as session:
+config = MnesisConfig(
+    operators=OperatorConfig(llm_map_concurrency=8),
+)
+
+async with MnesisSession.open(model="anthropic/claude-haiku-3-5", config=config) as session:
 
     def on_map_progress(event: MnesisEvent, payload: dict):
         if event == MnesisEvent.MAP_ITEM_COMPLETED:
@@ -378,7 +385,7 @@ async with MnesisSession.open(model="anthropic/claude-haiku-3-5") as session:
     session.subscribe(MnesisEvent.MAP_COMPLETED, on_map_progress)
 
     llm_map = LLMMap(
-        config=session._config.operators,
+        config=config.operators,
         event_bus=session.event_bus,  # inject the session's bus
         model="anthropic/claude-haiku-3-5",
     )
@@ -391,7 +398,7 @@ The same pattern works for `AgenticMap`:
 
 ```python
 agentic_map = AgenticMap(
-    config=session._config.operators,
+    config=config.operators,
     event_bus=session.event_bus,
     model="anthropic/claude-opus-4-6",
 )

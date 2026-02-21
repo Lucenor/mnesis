@@ -143,9 +143,10 @@ sequenceDiagram
 4. Soft-threshold compaction fires *after* the turn completes via
    `asyncio.create_task()`. The current turn is not delayed.
 
-5. The `on_part` streaming callback fires synchronously for sync handlers,
-   asynchronously for async handlers (via `asyncio.iscoroutine` check). Both
-   are supported.
+5. The `on_part` streaming callback is invoked inline for both sync and async
+   handlers. If the callback returns a coroutine (async handler), that coroutine
+   is awaited immediately via an `asyncio.iscoroutine` check. Both handler
+   styles are supported, but slow handlers will delay streaming throughput.
 
 ---
 
@@ -564,8 +565,8 @@ content hash and structural summary are persisted.
 
 Each `MnesisSession` creates its own `EventBus` instance inside `create()`.
 Operators (`LLMMap`, `AgenticMap`) have an optional `event_bus` constructor
-parameter. If not provided, operator events are published to a new private bus
-that no one can subscribe to.
+parameter. If not provided (`event_bus=None`), operator events are not
+published at all — the operator runs normally but emits no events.
 
 To receive operator events on the session bus, inject it at construction:
 
