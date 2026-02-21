@@ -82,6 +82,18 @@ class TestLLMMap:
             ):
                 pass
 
+    async def test_output_schema_unsupported_value_raises(self, op_config):
+        """Passing a non-type, non-dict value (e.g. a list) raises TypeError."""
+        llm_map = LLMMap(op_config)
+        with pytest.raises(TypeError, match="BaseModel subclass or a dict JSON Schema"):
+            async for _ in llm_map.run(
+                inputs=["test"],
+                prompt_template="Process: {{ item }}",
+                output_schema=["not", "a", "schema"],  # type: ignore[arg-type]
+                model="test-model",
+            ):
+                pass
+
     async def test_output_schema_pydantic_model_accepted(self, op_config):
         """A valid BaseModel subclass is accepted without error."""
         llm_map = LLMMap(op_config)
