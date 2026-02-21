@@ -588,12 +588,14 @@ class TestConvergenceEscalation:
     """
 
     def _make_short_messages(self, session_id: str) -> list[MessageWithParts]:
-        """Four messages with minimal text so the transcript is only ~20 tokens.
+        """Six messages with minimal text so the transcript is only ~20 tokens.
 
         _messages_to_summarise requires at least 3 user turns to leave a non-empty
-        slice; 4 messages alternating user/assistant guarantees that.
+        slice; 6 messages alternating user/assistant yields exactly 3 user turns,
+        so the function returns the first 2 messages for summarisation rather than
+        the empty list it returns when there are only 2 user turns.
         """
-        roles = ["user", "assistant", "user", "assistant"]
+        roles = ["user", "assistant", "user", "assistant", "user", "assistant"]
         messages: list[MessageWithParts] = []
         for i, role in enumerate(roles):
             msg = make_message(session_id, role=role, msg_id=f"msg_conv_{session_id}_{i:03d}")
@@ -622,11 +624,15 @@ class TestConvergenceEscalation:
         messages = self._make_short_messages("cv_l1_esc")
         # ~20-token input; mock LLM returns ~200 tokens — no convergence
         large_output = "word " * 200
+        llm_called = False
 
         async def expanding_llm(**kwargs: object) -> str:
+            nonlocal llm_called
+            llm_called = True
             return large_output
 
         result = await level1_summarise(messages, "test-model", budget, estimator, expanding_llm)
+        assert llm_called, "LLM must be invoked for the convergence check to be exercised"
         assert result is None
 
     async def test_level2_escalates_when_summary_not_shorter_than_input(self, estimator, budget):
@@ -637,11 +643,15 @@ class TestConvergenceEscalation:
         """
         messages = self._make_short_messages("cv_l2_esc")
         large_output = "word " * 200
+        llm_called = False
 
         async def expanding_llm(**kwargs: object) -> str:
+            nonlocal llm_called
+            llm_called = True
             return large_output
 
         result = await level2_summarise(messages, "test-model", budget, estimator, expanding_llm)
+        assert llm_called, "LLM must be invoked for the convergence check to be exercised"
         assert result is None
 
     async def test_level1_succeeds_when_summary_is_shorter(self, estimator, budget):
