@@ -108,7 +108,7 @@
 
 ### Changed
 
-- **`mnesis.__all__` reduced from 36 to 22 entries.** Removed internal types that callers
+- **`mnesis.__all__` reduced from 36 to 26 entries.** Removed internal types that callers
   never construct: `ContextBudget`, `SummaryNode`, `CompactionMarkerPart`, `Message`,
   `FileReference`, `LargeFileHandler`, `FileHandleResult`, `PruneResult`, `ModelInfo`,
   `make_id`, and several part types not part of the public contract. All removed names
