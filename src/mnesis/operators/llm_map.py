@@ -67,7 +67,7 @@ class LLMMap:
         self,
         inputs: list[Any],
         prompt_template: str,
-        output_schema: dict[str, Any] | type,
+        output_schema: dict[str, Any] | type[BaseModel],
         model: str,
         *,
         concurrency: int | None = None,
@@ -82,8 +82,10 @@ class LLMMap:
         Args:
             inputs: List of items to process. Each is rendered into ``{{ item }}``.
             prompt_template: Jinja2 template string. Must contain ``{{ item }}``.
-            output_schema: Expected output shape. Pass a Pydantic model class or
-                a JSON Schema dict. Responses are validated and retried on failure.
+            output_schema: Expected output shape. Pass a Pydantic ``BaseModel``
+                subclass or a JSON Schema ``dict``. When a ``dict`` is passed,
+                ``jsonschema`` must be installed (``pip install jsonschema``).
+                Responses are validated and retried on failure.
             model: LLM model string in litellm format.
             concurrency: Override config concurrency limit.
             max_retries: Override config max retries per item.
@@ -96,9 +98,27 @@ class LLMMap:
             Use ``result.input`` to correlate with the original input.
 
         Raises:
+            TypeError: If ``output_schema`` is a type that is not a ``BaseModel`` subclass.
+            ImportError: If ``output_schema`` is a dict and ``jsonschema`` is not installed.
             ValueError: If ``prompt_template`` does not contain ``{{ item }}``.
         """
         import re
+
+        # Validate output_schema eagerly before spawning tasks.
+        if isinstance(output_schema, type):
+            if not issubclass(output_schema, BaseModel):
+                raise TypeError(
+                    f"output_schema must be a BaseModel subclass, got {output_schema!r}"
+                )
+        else:
+            # dict path — jsonschema is an optional dependency; fail fast with a helpful message.
+            try:
+                import jsonschema as _jsonschema  # noqa: F401
+            except ImportError as exc:
+                raise ImportError(
+                    "jsonschema is required when passing output_schema as a dict. "
+                    "Install it with: pip install jsonschema"
+                ) from exc
 
         if not re.search(r"\{\{[^}]*\bitem\b[^}]*\}\}", prompt_template):
             raise ValueError("prompt_template must contain {{ item }}")
@@ -111,7 +131,7 @@ class LLMMap:
             schema_dict = output_schema.model_json_schema()
             pydantic_model: type[BaseModel] | None = output_schema
         else:
-            schema_dict = output_schema  # type: ignore[assignment]
+            schema_dict = output_schema
             pydantic_model = None
 
         semaphore = asyncio.Semaphore(max_conc)
