@@ -235,6 +235,16 @@ class MessageWithParts(BaseModel):
     def is_summary(self) -> bool:
         return self.message.is_summary
 
+    @property
+    def model_id(self) -> str:
+        """The model that produced this message (empty string for user messages)."""
+        return self.message.model_id
+
+    @property
+    def tokens(self) -> TokenUsage | None:
+        """Token usage for this message (None for user messages or before streaming completes)."""
+        return self.message.tokens
+
     def text_content(self) -> str:
         """Concatenate text from all TextPart objects in this message."""
         return "".join(part.text for part in self.parts if isinstance(part, TextPart))
@@ -273,11 +283,28 @@ class TurnResult(BaseModel):
 
     Contains the assistant's text response, token usage, finish reason, and
     indicators for compaction and doom loop detection.
+
+    **Important — ``finish_reason == "error"``**: When ``finish_reason`` is
+    ``"error"``, the LLM call failed and ``text`` contains an error description,
+    *not* an LLM response. Do not treat the text as a model reply in this case.
+    Always check ``finish_reason`` before processing ``text``.
     """
 
     message_id: str
     text: str
-    finish_reason: str
+    finish_reason: Literal["stop", "max_tokens", "tool_calls", "length", "error"] | str
+    """
+    Why the LLM stopped generating. Known values:
+
+    - ``"stop"`` — natural end of response.
+    - ``"max_tokens"`` / ``"length"`` — output token limit reached.
+    - ``"tool_calls"`` — the model requested tool execution.
+    - ``"error"`` — **the LLM call failed**; ``text`` contains the error
+      description, not a model response. Do not pass this text to the model
+      as if it were a real reply.
+
+    Providers may return additional values; the ``| str`` allows for these.
+    """
     tokens: TokenUsage
     cost: float
     compaction_triggered: bool = False
@@ -290,7 +317,7 @@ class CompactionResult(BaseModel):
     The result of a compaction run.
 
     Records which escalation level succeeded, how many messages were compressed,
-    and the token savings achieved.
+    the token savings achieved, and how many tool outputs were pruned.
     """
 
     session_id: str
@@ -302,6 +329,10 @@ class CompactionResult(BaseModel):
     tokens_before: int
     tokens_after: int
     elapsed_ms: float
+    pruned_tool_outputs: int = 0
+    """Number of tool output parts tombstoned by the ToolOutputPruner during this run."""
+    pruned_tokens: int = 0
+    """Tokens reclaimed by pruning tool outputs during this run."""
 
 
 class PruneResult(BaseModel):
