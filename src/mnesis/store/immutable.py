@@ -871,8 +871,10 @@ class ImmutableStore:
 
         This is the core of the O(1) compaction commit: within a single
         transaction, all rows whose ``item_id`` is in ``remove_item_ids`` are
-        deleted and one new ``'summary'`` row is inserted at the position that
-        follows the highest remaining item.
+        deleted and one new ``'summary'`` row is inserted at the minimum
+        position of the removed items (i.e. it occupies the slot of the first
+        item being removed); items outside the compacted span keep their
+        original positions — no shifting required.
 
         Used in two scenarios:
 
