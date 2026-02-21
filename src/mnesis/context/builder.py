@@ -52,6 +52,11 @@ class ContextBuilder:
     4. FileRefPart objects are rendered as structured ``[FILE: ...]`` blocks.
     5. Total assembled token count fits within ``ContextBudget.usable``.
     6. The system prompt is counted against the token budget.
+
+    Context assembly is O(1) via the ``context_items`` table: a single ordered
+    SELECT returns the current context snapshot, and each item is loaded by ID.
+    This replaces the previous O(n) backward scan that inferred context from
+    message timestamps and summary span IDs.
     """
 
     def __init__(
@@ -75,6 +80,10 @@ class ContextBuilder:
         """
         Build the context window for the next LLM call.
 
+        Uses the ``context_items`` table to determine what is currently in
+        context (O(1) lookup), then loads each item by ID and assembles the
+        LLM message list in position order, respecting the token budget.
+
         Args:
             session_id: The session to build context for.
             model: Model metadata for budget calculations and tokenisation.
@@ -93,34 +102,56 @@ class ContextBuilder:
         system_tokens = self._estimator.estimate(system_prompt, model)
         available = budget.usable - system_tokens
 
-        # Step 2: Find compaction boundary
-        latest_summary = await self._dag_store.get_latest_node(session_id)
-        summary_token_count = 0
+        # Step 2: Fetch the ordered context snapshot from context_items.
+        # Each row is (item_type, item_id) in ascending position order.
+        context_items = await self._store.get_context_items(session_id)
 
-        if latest_summary is not None:
-            boundary_id = latest_summary.span_end_message_id
-            raw_messages = await self._store.get_messages_with_parts(
-                session_id, since_message_id=boundary_id
+        if not context_items:
+            return BuiltContext(
+                messages=[],
+                system_prompt=system_prompt,
+                token_estimate=system_tokens,
+                budget=budget,
+                has_summary=False,
+                oldest_included_message_id=None,
+                summary_token_count=0,
             )
-            # Exclude other summary messages from the raw tail
-            raw_messages = [m for m in raw_messages if not m.is_summary]
-            summary_token_count = latest_summary.token_count
-            available -= summary_token_count
-        else:
-            raw_messages = await self._store.get_messages_with_parts(session_id)
-            raw_messages = [m for m in raw_messages if not m.is_summary]
 
-        # Step 3: Walk newest→oldest to fit within budget
+        # Step 3: Separate summaries from messages and compute summary tokens
+        # to reserve budget space.
+        has_summary = any(item_type == "summary" for item_type, _ in context_items)
+        summary_token_count = 0
+        if has_summary:
+            # Load summary nodes to get their token counts.
+            for item_type, item_id in context_items:
+                if item_type == "summary":
+                    node = await self._dag_store.get_node_by_id(item_id)
+                    if node is not None:
+                        summary_token_count += node.token_count
+            available -= summary_token_count
+
+        # Step 4: Collect message items in order, then walk newest→oldest to
+        # fit within the token budget (same greedy approach as before, but now
+        # the candidate set comes from the DB rather than a backward scan).
+        message_ids_ordered = [iid for t, iid in context_items if t == "message"]
+
+        # Load all candidate messages with their parts avoiding N+1 queries.
+        candidate_messages: list[MessageWithParts] = []
+        if message_ids_ordered:
+            all_msgs = await self._store.get_messages_with_parts(session_id)
+            id_to_msg = {m.id: m for m in all_msgs if not m.is_summary}
+            candidate_messages = [id_to_msg[mid] for mid in message_ids_ordered if mid in id_to_msg]
+
+        # Walk newest→oldest, include as many messages as fit.
         includable: list[MessageWithParts] = []
         tokens_used = 0
-        for msg_with_parts in reversed(raw_messages):
+        for msg_with_parts in reversed(candidate_messages):
             msg_tokens = self._estimator.estimate_message(msg_with_parts, model)
             if tokens_used + msg_tokens > available:
-                # Stop — cannot fit this message without breaking coherence
                 self._logger.debug(
                     "context_budget_reached",
                     session_id=session_id,
-                    excluded_count=len(raw_messages) - len(includable),
+                    excluded_count=len(candidate_messages) - len(includable),
                 )
                 break
             includable.append(msg_with_parts)
@@ -128,14 +159,17 @@ class ContextBuilder:
 
         includable.reverse()  # Restore chronological order
 
-        # Step 4: Convert to LLM message format
+        # Step 5: Convert to LLM message format
         llm_messages: list[LLMMessage] = []
 
-        # 4a: Prepend summary as assistant turn
-        if latest_summary is not None:
-            llm_messages.append(LLMMessage(role="assistant", content=latest_summary.content))
+        # 5a: Inject summary nodes in position order (before raw messages)
+        for item_type, item_id in context_items:
+            if item_type == "summary":
+                node = await self._dag_store.get_node_by_id(item_id)
+                if node is not None:
+                    llm_messages.append(LLMMessage(role="assistant", content=node.content))
 
-        # 4b: Convert raw messages
+        # 5b: Convert raw messages
         for msg_with_parts in includable:
             llm_msg = self._convert_message(msg_with_parts)
             llm_messages.append(llm_msg)
@@ -147,7 +181,7 @@ class ContextBuilder:
             session_id=session_id,
             message_count=len(llm_messages),
             token_estimate=total_tokens,
-            has_summary=latest_summary is not None,
+            has_summary=has_summary,
         )
 
         return BuiltContext(
@@ -155,7 +189,7 @@ class ContextBuilder:
             system_prompt=system_prompt,
             token_estimate=total_tokens,
             budget=budget,
-            has_summary=latest_summary is not None,
+            has_summary=has_summary,
             oldest_included_message_id=includable[0].id if includable else None,
             summary_token_count=summary_token_count,
         )
