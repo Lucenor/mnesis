@@ -40,7 +40,7 @@ async def main() -> None:
     # Configure compaction to trigger early (for demo)
     config = MnesisConfig(
         compaction=CompactionConfig(
-            buffer=5_000,
+            compaction_output_budget=5_000,
             auto=True,
         )
     )

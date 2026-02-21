@@ -239,6 +239,8 @@ class MnesisSession:
             )
         model = db_session.model_id
         model_info = ModelInfo.from_model_string(model)
+        if cfg.model_overrides:
+            model_info = model_info.model_copy(update=cfg.model_overrides)
 
         dag_store = SummaryDAGStore(store)
         estimator = TokenEstimator()

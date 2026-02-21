@@ -32,7 +32,7 @@ async def main() -> None:
     # Configure with a smaller compaction buffer for demo purposes
     config = MnesisConfig(
         compaction=CompactionConfig(
-            buffer=10_000,  # Trigger compaction sooner
+            compaction_output_budget=10_000,  # Trigger compaction sooner
             auto=True,
         )
     )
