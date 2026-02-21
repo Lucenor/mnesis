@@ -494,3 +494,420 @@ class TestDAGPersistence:
         assert active[0].token_count == 15
         assert active[0].kind == "leaf"
         assert active[0].parent_node_ids == []
+
+    async def test_get_active_nodes_filters_in_memory_superseded(
+        self, session_id, store, dag_store
+    ):
+        """get_active_nodes skips nodes in the in-memory _superseded_ids set."""
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        node = SummaryNode(
+            id="node_mem_sup_01",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_a",
+            span_end_message_id="sm_b",
+            content="text",
+            token_count=10,
+        )
+        await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        # Supersede in-memory (within same session instance); the DB row is
+        # updated to superseded=1, so get_active_nodes must also skip it.
+        await dag_store.mark_superseded(["node_mem_sup_01"])
+
+        active = await dag_store.get_active_nodes(session_id)
+        assert not any(n.id == "node_mem_sup_01" for n in active)
+
+    async def test_get_latest_node_in_memory_superseded_scans_backwards(
+        self, session_id, store, dag_store
+    ):
+        """get_latest_node falls back to older node when latest is in _superseded_ids."""
+        import asyncio
+
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        node_a = SummaryNode(
+            id="node_scan_a",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_a",
+            span_end_message_id="sm_b",
+            content="older",
+            token_count=10,
+        )
+        await dag_store.insert_node(node_a, id_generator=lambda: make_id("part"))
+
+        await asyncio.sleep(0.01)
+
+        node_b = SummaryNode(
+            id="node_scan_b",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_c",
+            span_end_message_id="sm_d",
+            content="newer",
+            token_count=20,
+        )
+        await dag_store.insert_node(node_b, id_generator=lambda: make_id("part"))
+
+        # Mark newer in-memory; get_latest_node must scan backwards to node_a.
+        await dag_store.mark_superseded(["node_scan_b"])
+
+        latest = await dag_store.get_latest_node(session_id)
+        assert latest is not None
+        assert latest.id == "node_scan_a"
+
+    async def test_get_latest_node_all_in_memory_superseded_returns_none(
+        self, session_id, store, dag_store
+    ):
+        """get_latest_node returns None when all nodes are in _superseded_ids."""
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        node = SummaryNode(
+            id="node_all_sup_01",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_a",
+            span_end_message_id="sm_b",
+            content="text",
+            token_count=10,
+        )
+        await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+        await dag_store.mark_superseded(["node_all_sup_01"])
+
+        # After superseding, the DB row has superseded=1, so the query returns
+        # no rows — get_latest_node returns None via the early-return path.
+        latest = await dag_store.get_latest_node(session_id)
+        assert latest is None
+
+    async def test_get_coverage_gaps_no_non_summary_messages(self, session_id, store, dag_store):
+        """get_coverage_gaps returns empty list when all messages are summaries."""
+        # No non-summary messages added; get_coverage_gaps should return []
+        gaps = await dag_store.get_coverage_gaps(session_id)
+        assert gaps == []
+
+    async def test_get_coverage_gaps_no_gap_after_summary(self, session_id, store, dag_store):
+        """get_coverage_gaps returns [] when no non-summary messages follow the summary."""
+
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        # Insert a non-summary message before the summary
+        msg = make_message(session_id, msg_id="msg_before_sum")
+        await store.append_message(msg)
+
+        # Insert a summary node (which inserts an is_summary=True message)
+        node = SummaryNode(
+            id="node_gap_sum_01",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id=msg.id,
+            span_end_message_id=msg.id,
+            content="summary",
+            token_count=5,
+        )
+        await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        # No non-summary messages added after the summary
+        gaps = await dag_store.get_coverage_gaps(session_id)
+        assert gaps == []
+
+    async def test_get_node_by_id_with_summary_node_row(self, session_id, store, dag_store):
+        """get_node_by_id returns a SummaryNode for a Phase-3 persisted node."""
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        node = SummaryNode(
+            id="node_by_id_01",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_a",
+            span_end_message_id="sm_b",
+            content="content by id",
+            token_count=25,
+        )
+        await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        fetched = await dag_store.get_node_by_id("node_by_id_01")
+        assert fetched is not None
+        assert fetched.id == "node_by_id_01"
+        assert fetched.content == "content by id"
+        assert fetched.kind == "leaf"
+
+    async def test_get_node_by_id_nonexistent_returns_none(self, session_id, store, dag_store):
+        """get_node_by_id returns None for an unknown node ID."""
+        fetched = await dag_store.get_node_by_id("nonexistent_node_id")
+        assert fetched is None
+
+    async def test_get_node_by_id_non_summary_message_returns_none(
+        self, session_id, store, dag_store
+    ):
+        """get_node_by_id returns None when the message exists but is not a summary."""
+        msg = make_message(session_id, msg_id="non_sum_msg_01")
+        await store.append_message(msg)
+
+        fetched = await dag_store.get_node_by_id("non_sum_msg_01")
+        assert fetched is None
+
+    async def test_get_node_by_id_pre_phase3_fallback(self, config, pool):
+        """get_node_by_id falls back to _build_node_from_message for pre-Phase-3 nodes."""
+        import json
+
+        from mnesis.models.message import Message
+        from mnesis.session import make_id
+        from mnesis.store.immutable import ImmutableStore, RawMessagePart
+        from mnesis.store.summary_dag import SummaryDAGStore
+
+        store = ImmutableStore(config.store, pool=pool)
+        await store.initialize()
+        dag = SummaryDAGStore(store)
+
+        sid = "sess_pre_phase3_01"
+        await store.create_session(sid, model_id="gpt-4o")
+
+        # Insert a non-summary message so span reconstruction works
+        non_sum = make_message(sid, msg_id="pre_p3_msg_01")
+        await store.append_message(non_sum)
+
+        # Manually insert a summary message WITHOUT a summary_nodes row
+        # to simulate a pre-Phase-3 node.
+        summary_msg_id = make_id("msg")
+        import time as time_mod
+
+        summary_msg = Message(
+            id=summary_msg_id,
+            session_id=sid,
+            role="assistant",
+            created_at=int(time_mod.time() * 1000) + 1000,
+            is_summary=True,
+        )
+        await store.append_message(summary_msg)
+
+        text_part = RawMessagePart(
+            id=make_id("part"),
+            message_id=summary_msg_id,
+            session_id=sid,
+            part_type="text",
+            content=json.dumps({"type": "text", "text": "legacy summary"}),
+            token_estimate=12,
+        )
+        await store.append_part(text_part)
+
+        # No row inserted into summary_nodes — simulates pre-Phase-3 node.
+        fetched = await dag.get_node_by_id(summary_msg_id)
+        assert fetched is not None
+        assert fetched.content == "legacy summary"
+        assert fetched.parent_node_ids == []
+
+        await store.close()
+
+    async def test_get_node_by_id_pre_phase3_second_summary(self, config, pool):
+        """get_node_by_id fallback for pre-Phase-3 node when it is not the first summary."""
+        import json
+        import time as time_mod
+
+        from mnesis.models.message import Message
+        from mnesis.session import make_id
+        from mnesis.store.immutable import ImmutableStore, RawMessagePart
+        from mnesis.store.summary_dag import SummaryDAGStore
+
+        store = ImmutableStore(config.store, pool=pool)
+        await store.initialize()
+        dag = SummaryDAGStore(store)
+
+        sid = "sess_pre_phase3_02"
+        await store.create_session(sid, model_id="gpt-4o")
+
+        base_ts = int(time_mod.time() * 1000)
+
+        # Insert a non-summary message
+        non_sum = make_message(sid, msg_id="pre_p3_msg_02a")
+        await store.append_message(non_sum)
+
+        # First pre-Phase-3 summary (no summary_nodes row)
+        sum1_id = make_id("msg")
+        sum1 = Message(
+            id=sum1_id,
+            session_id=sid,
+            role="assistant",
+            created_at=base_ts + 100,
+            is_summary=True,
+        )
+        await store.append_message(sum1)
+        await store.append_part(
+            RawMessagePart(
+                id=make_id("part"),
+                message_id=sum1_id,
+                session_id=sid,
+                part_type="text",
+                content=json.dumps({"type": "text", "text": "first summary"}),
+                token_estimate=8,
+            )
+        )
+
+        # Another non-summary message after first summary
+        non_sum2 = make_message(sid, msg_id="pre_p3_msg_02b")
+        await store.append_message(non_sum2)
+
+        # Second pre-Phase-3 summary (no summary_nodes row)
+        sum2_id = make_id("msg")
+        sum2 = Message(
+            id=sum2_id,
+            session_id=sid,
+            role="assistant",
+            created_at=base_ts + 300,
+            is_summary=True,
+        )
+        await store.append_message(sum2)
+        await store.append_part(
+            RawMessagePart(
+                id=make_id("part"),
+                message_id=sum2_id,
+                session_id=sid,
+                part_type="text",
+                content=json.dumps({"type": "text", "text": "second summary"}),
+                token_estimate=9,
+            )
+        )
+
+        # Fetch second summary — summary_index > 0, exercises the else branch
+        fetched = await dag.get_node_by_id(sum2_id)
+        assert fetched is not None
+        assert fetched.content == "second summary"
+        assert fetched.parent_node_ids == []
+
+        await store.close()
+
+    async def test_get_coverage_gaps_with_messages_after_summary(
+        self, session_id, store, dag_store
+    ):
+        """get_coverage_gaps returns a span for messages added after the latest summary."""
+        import asyncio
+
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        # Add a non-summary message before the summary
+        msg_before = make_message(session_id, msg_id="msg_before_cg_01")
+        await store.append_message(msg_before)
+
+        await asyncio.sleep(0.01)
+
+        # Insert a summary node
+        node = SummaryNode(
+            id="node_cg_01",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id=msg_before.id,
+            span_end_message_id=msg_before.id,
+            content="summary",
+            token_count=5,
+        )
+        await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        await asyncio.sleep(0.01)
+
+        # Add a non-summary message AFTER the summary
+        msg_after = make_message(session_id, msg_id="msg_after_cg_01")
+        await store.append_message(msg_after)
+
+        gaps = await dag_store.get_coverage_gaps(session_id)
+        assert len(gaps) == 1
+        assert gaps[0].start_message_id == msg_after.id
+        assert gaps[0].end_message_id == msg_after.id
+        assert gaps[0].message_count == 1
+
+    async def test_get_active_nodes_in_memory_superseded_guard(self, session_id, store, dag_store):
+        """Directly inject into _superseded_ids to cover the in-memory guard on line 91."""
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        node = SummaryNode(
+            id="node_guard_01",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_a",
+            span_end_message_id="sm_b",
+            content="text",
+            token_count=10,
+        )
+        await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        # Inject directly into _superseded_ids without updating the DB.
+        # This simulates the "concurrent write guard" path in get_active_nodes.
+        dag_store._superseded_ids.add("node_guard_01")
+
+        # The node is superseded=0 in DB, so _query_summary_nodes returns it,
+        # but the in-memory check at line 91 skips it.
+        active = await dag_store.get_active_nodes(session_id)
+        assert not any(n.id == "node_guard_01" for n in active)
+
+    async def test_get_latest_node_in_memory_guard_scan_backwards(
+        self, session_id, store, dag_store
+    ):
+        """Directly inject into _superseded_ids to trigger backwards scan in get_latest_node."""
+        import asyncio
+
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        node_a = SummaryNode(
+            id="node_guard_scan_a",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_a",
+            span_end_message_id="sm_b",
+            content="older",
+            token_count=10,
+        )
+        await dag_store.insert_node(node_a, id_generator=lambda: make_id("part"))
+
+        await asyncio.sleep(0.01)
+
+        node_b = SummaryNode(
+            id="node_guard_scan_b",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_c",
+            span_end_message_id="sm_d",
+            content="newer",
+            token_count=20,
+        )
+        await dag_store.insert_node(node_b, id_generator=lambda: make_id("part"))
+
+        # Inject directly — node_b is superseded=0 in DB so query returns it,
+        # but the in-memory check at line 115 triggers the backwards scan.
+        dag_store._superseded_ids.add("node_guard_scan_b")
+
+        latest = await dag_store.get_latest_node(session_id)
+        assert latest is not None
+        assert latest.id == "node_guard_scan_a"
+
+    async def test_get_latest_node_all_in_memory_guard_returns_none(
+        self, session_id, store, dag_store
+    ):
+        """Backwards scan in get_latest_node returns None when all are in _superseded_ids."""
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        node = SummaryNode(
+            id="node_guard_all_a",
+            session_id=session_id,
+            kind="leaf",
+            span_start_message_id="sm_a",
+            span_end_message_id="sm_b",
+            content="text",
+            token_count=10,
+        )
+        await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        # All nodes in _superseded_ids in-memory while DB still has superseded=0.
+        dag_store._superseded_ids.add("node_guard_all_a")
+
+        # Backwards scan exhausts all rows → for-else returns None (line 122).
+        latest = await dag_store.get_latest_node(session_id)
+        assert latest is None
