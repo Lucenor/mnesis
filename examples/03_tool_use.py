@@ -18,10 +18,10 @@ Run without an API key:
 
 import asyncio
 import json
-import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 # Tool definitions (passed to LLM in production)
@@ -78,7 +78,7 @@ def show_tool_call(tool_name: str, args: dict, output: str | None, error: str | 
 
 
 async def main() -> None:
-    from mnesis import MnesisSession, MnesisConfig, CompactionConfig
+    from mnesis import CompactionConfig, MnesisConfig, MnesisSession
     from mnesis.models.message import TextPart, ToolPart, ToolStatus
 
     print("=== Mnesis Tool Use Example ===\n")
@@ -91,8 +91,8 @@ async def main() -> None:
     config = MnesisConfig(
         compaction=CompactionConfig(
             prune=True,
-            prune_protect_tokens=50,   # Demo: only protect the nearest ~50 output tokens
-            prune_minimum_tokens=10,   # Demo: prune even small volumes
+            prune_protect_tokens=50,  # Demo: only protect the nearest ~50 output tokens
+            prune_minimum_tokens=10,  # Demo: prune even small volumes
         )
     )
 
@@ -121,7 +121,10 @@ async def main() -> None:
             user_message="List all files in /tmp.",
             assistant_response=[
                 t1,
-                TextPart(text="Found 7 files in /tmp including database files, a CSV, JSON config, and a log."),
+                TextPart(
+                    text="Found 7 files in /tmp including database files, "
+                    "a CSV, JSON config, and a log."
+                ),
             ],
         )
 
@@ -145,7 +148,10 @@ async def main() -> None:
             user_message="Read /tmp/app.log — I want to see if there are any errors.",
             assistant_response=[
                 t2,
-                TextPart(text="Found one ERROR: database connection timeout at 10:02:30, recovered at 10:03:00."),
+                TextPart(
+                    text="Found one ERROR: database connection timeout at 10:02:30, "
+                    "recovered at 10:03:00."
+                ),
             ],
         )
 
@@ -155,13 +161,16 @@ async def main() -> None:
             tool_name="read_file",
             tool_call_id="call_003",
             input={"path": "/tmp/config.json"},
-            output=json.dumps({
-                "service": "api-gateway",
-                "version": "2.1.0",
-                "database": {"host": "db.internal", "port": 5432, "pool_size": 10},
-                "cache": {"backend": "redis", "ttl": 3600},
-                "log_level": "INFO",
-            }, indent=2),
+            output=json.dumps(
+                {
+                    "service": "api-gateway",
+                    "version": "2.1.0",
+                    "database": {"host": "db.internal", "port": 5432, "pool_size": 10},
+                    "cache": {"backend": "redis", "ttl": 3600},
+                    "log_level": "INFO",
+                },
+                indent=2,
+            ),
             status=ToolStatus(state="completed"),
         )
         show_tool_call(t3.tool_name, t3.input, t3.output, None)

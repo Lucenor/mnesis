@@ -32,7 +32,7 @@ Controls when and how context compaction fires.
 | `prune_minimum_tokens` | `20_000` | Minimum prunable volume required before pruning fires |
 | `compaction_model` | `None` | Model for summarisation. `None` = use session model |
 | `level2_enabled` | `True` | Attempt Level 2 compression before falling back to Level 3 |
-| `plugin_hook` | `None` | Dotted import path to a callable returning a custom compaction prompt |
+| `compaction_prompt` | `None` | Custom prompt string for Level 1/2 LLM summarisation. `None` = use the built-in agentic prompt |
 
 ### Tuning for large models
 
@@ -49,12 +49,9 @@ CompactionConfig(
 ### Custom compaction prompt
 
 ```python
-# myapp/hooks.py
-def custom_prompt(messages: list, config: dict) -> str:
-    return "Summarise this conversation focusing on technical decisions only."
-
-# Configuration
-CompactionConfig(plugin_hook="myapp.hooks.custom_prompt")
+CompactionConfig(
+    compaction_prompt="Summarise this conversation focusing on technical decisions only.",
+)
 ```
 
 ---

@@ -8,6 +8,8 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "benchmarks/**"
+      - "examples/**"
       - "pyproject.toml"
   pull_request:
     branches: [main]
@@ -30,10 +32,10 @@ jobs:
         run: uv sync --dev
 
       - name: Ruff lint
-        run: uv run ruff check src/ tests/
+        run: uv run ruff check src/ tests/ benchmarks/ examples/
 
       - name: Ruff format check
-        run: uv run ruff format --check src/ tests/
+        run: uv run ruff format --check src/ tests/ benchmarks/ examples/
 
   typecheck:
     name: Type Check
@@ -89,3 +91,4 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
           use_oidc: true
+

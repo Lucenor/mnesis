@@ -15,14 +15,15 @@ Run without an API key:
 
 import asyncio
 import json
-import os
 import sys
 import tempfile
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # Sample large Python file content
-LARGE_PYTHON_FILE = '''"""
+LARGE_PYTHON_FILE = (
+    '''"""
 A sample large Python module for demonstration.
 """
 import asyncio
@@ -98,27 +99,32 @@ async def run_pipeline(data: list[Any], config: dict[str, Any]) -> dict[str, Any
         "processed": len(results),
         "results": results[:10],
     }
-''' * 5  # Repeat to make it large
+'''
+    * 5
+)  # Repeat to make it large
 
 
-LARGE_JSON_FILE = json.dumps({
-    "configuration": {
-        "database": {"host": "localhost", "port": 5432, "name": "app_db"},
-        "cache": {"backend": "redis", "ttl": 3600},
-        "auth": {"provider": "jwt", "secret_key": "...", "expiry": 86400},
-        "features": {f"feature_{i}": {"enabled": True, "config": {}} for i in range(50)},
-        "api": {
-            "rate_limits": {"default": 100, "premium": 1000},
-            "endpoints": {f"/api/v{i}": {"methods": ["GET", "POST"]} for i in range(20)},
+LARGE_JSON_FILE = json.dumps(
+    {
+        "configuration": {
+            "database": {"host": "localhost", "port": 5432, "name": "app_db"},
+            "cache": {"backend": "redis", "ttl": 3600},
+            "auth": {"provider": "jwt", "secret_key": "...", "expiry": 86400},
+            "features": {f"feature_{i}": {"enabled": True, "config": {}} for i in range(50)},
+            "api": {
+                "rate_limits": {"default": 100, "premium": 1000},
+                "endpoints": {f"/api/v{i}": {"methods": ["GET", "POST"]} for i in range(20)},
+            },
         },
+        "data": [{"id": i, "name": f"item_{i}", "value": i * 1.5} for i in range(200)],
     },
-    "data": [{"id": i, "name": f"item_{i}", "value": i * 1.5} for i in range(200)],
-}, indent=2)
+    indent=2,
+)
 
 
 async def main() -> None:
-    from mnesis import LargeFileHandler, MnesisSession
-    from mnesis.models.config import FileConfig, StoreConfig, MnesisConfig
+    from mnesis import LargeFileHandler
+    from mnesis.models.config import FileConfig, StoreConfig
     from mnesis.store.immutable import ImmutableStore
     from mnesis.tokens.estimator import TokenEstimator
 
@@ -138,13 +144,11 @@ async def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Write test files
-        py_path = os.path.join(tmpdir, "data_pipeline.py")
-        json_path = os.path.join(tmpdir, "config.json")
+        py_path = Path(tmpdir) / "data_pipeline.py"
+        json_path = Path(tmpdir) / "config.json"
 
-        with open(py_path, "w") as f:
-            f.write(LARGE_PYTHON_FILE)
-        with open(json_path, "w") as f:
-            f.write(LARGE_JSON_FILE)
+        py_path.write_text(LARGE_PYTHON_FILE)
+        json_path.write_text(LARGE_JSON_FILE)
 
         print(f"Python file: {len(LARGE_PYTHON_FILE):,} chars")
         print(f"JSON file: {len(LARGE_JSON_FILE):,} chars\n")
@@ -156,20 +160,22 @@ async def main() -> None:
             print(f"Inline content ({len(py_result.inline_content or ''):,} chars)")
         else:
             ref = py_result.file_ref
-            print(f"File reference created!")
+            print("File reference created!")
             print(f"  Content-ID: {ref.content_id[:20]}...")
             print(f"  File type: {ref.file_type}")
             print(f"  Estimated tokens: {ref.token_count:,}")
-            print(f"  Exploration summary:\n    {ref.exploration_summary.replace(chr(10), chr(10) + '    ')}")
+            indented = ref.exploration_summary.replace("\n", "\n    ")
+            print(f"  Exploration summary:\n    {indented}")
 
         # Process the JSON file
         print("\n--- Processing JSON file ---")
         json_result = await handler.handle_file(json_path)
         if not json_result.is_inline:
             ref = json_result.file_ref
-            print(f"File reference created!")
+            print("File reference created!")
             print(f"  Content-ID: {ref.content_id[:20]}...")
-            print(f"  Exploration summary:\n    {ref.exploration_summary.replace(chr(10), chr(10) + '    ')}")
+            indented = ref.exploration_summary.replace("\n", "\n    ")
+            print(f"  Exploration summary:\n    {indented}")
 
         # Demonstrate cache hit
         print("\n--- Cache Hit Demonstration ---")
@@ -182,8 +188,9 @@ async def main() -> None:
         # Show how it renders in context
         if not py_result.is_inline:
             from mnesis.context.builder import ContextBuilder
+
             rendered = ContextBuilder._render_file_ref(py_result.file_ref)
-            print(f"\n--- Context Window Rendering ---")
+            print("\n--- Context Window Rendering ---")
             print(rendered[:400])
             print("...")
 

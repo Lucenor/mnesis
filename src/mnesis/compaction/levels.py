@@ -109,6 +109,7 @@ async def level1_summarise(
     budget: ContextBudget,
     estimator: TokenEstimator,
     llm_call: Any,
+    compaction_prompt: str | None = None,
 ) -> SummaryCandidate | None:
     """
     Attempt Level 1 (selective) summarisation via LLM.
@@ -129,10 +130,11 @@ async def level1_summarise(
         return None
 
     transcript = _build_messages_text(to_summarise)
+    prompt = compaction_prompt if compaction_prompt is not None else LEVEL1_PROMPT
     prompt_messages = [
         {
             "role": "user",
-            "content": f"{LEVEL1_PROMPT}\n\n<conversation>\n{transcript}\n</conversation>",
+            "content": f"{prompt}\n\n<conversation>\n{transcript}\n</conversation>",
         }
     ]
 
@@ -140,7 +142,7 @@ async def level1_summarise(
         summary_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=budget.compaction_buffer,
+            max_tokens=budget.reserved_output_tokens,
         )
     except Exception as exc:
         logger.warning("level1_llm_failed", error=str(exc))
@@ -171,6 +173,7 @@ async def level2_summarise(
     budget: ContextBudget,
     estimator: TokenEstimator,
     llm_call: Any,
+    compaction_prompt: str | None = None,
 ) -> SummaryCandidate | None:
     """
     Attempt Level 2 (aggressive) summarisation via LLM.
@@ -200,10 +203,11 @@ async def level2_summarise(
             transcript_parts.append(f"[{role}]: {text}")
     transcript = "\n".join(transcript_parts)
 
+    prompt = compaction_prompt if compaction_prompt is not None else LEVEL2_PROMPT
     prompt_messages = [
         {
             "role": "user",
-            "content": f"{LEVEL2_PROMPT}\n\n<conversation>\n{transcript}\n</conversation>",
+            "content": f"{prompt}\n\n<conversation>\n{transcript}\n</conversation>",
         }
     ]
 

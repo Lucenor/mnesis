@@ -14,16 +14,16 @@ Run without an API key:
 """
 
 import asyncio
-import os
 import sys
+from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 async def main() -> None:
-    from mnesis import MnesisSession, MnesisConfig, CompactionConfig, MnesisEvent
-    from mnesis.models.message import TextPart, ToolPart
+    from mnesis import CompactionConfig, MnesisConfig, MnesisEvent, MnesisSession
+    from mnesis.models.message import TextPart
 
     print("=== Mnesis Long-Running Agent Example ===\n")
 
@@ -32,8 +32,10 @@ async def main() -> None:
 
     def on_compaction_completed(event: MnesisEvent, payload: dict[str, Any]) -> None:
         compaction_log.append(payload)
-        print(f"\n  [EVENT] Compaction completed! Level {payload.get('level_used', '?')}, "
-              f"compacted {payload.get('compacted_message_count', '?')} messages.")
+        print(
+            f"\n  [EVENT] Compaction completed! Level {payload.get('level_used', '?')}, "
+            f"compacted {payload.get('compacted_message_count', '?')} messages."
+        )
 
     # Configure compaction to trigger early (for demo)
     config = MnesisConfig(
@@ -59,14 +61,16 @@ async def main() -> None:
     ) as session:
         # Subscribe to compaction events
         session.subscribe(MnesisEvent.COMPACTION_COMPLETED, on_compaction_completed)
-        session.subscribe(MnesisEvent.DOOM_LOOP_DETECTED,
-                          lambda e, p: print("\n  [WARNING] Doom loop detected!"))
+        session.subscribe(
+            MnesisEvent.DOOM_LOOP_DETECTED, lambda e, p: print("\n  [WARNING] Doom loop detected!")
+        )
 
         print(f"Session: {session.id}\n")
 
         # Simulate a long coding task
         tasks = [
-            "We're refactoring a monolithic Python codebase. Start by outlining the main challenges.",
+            "We're refactoring a monolithic Python codebase. "
+            + "Start by outlining the main challenges.",
             "What's the best strategy for breaking up a large models.py file?",
             "How should we handle circular imports during the refactor?",
             "Describe the testing strategy for the refactored modules.",
@@ -90,9 +94,14 @@ async def main() -> None:
         # Manual checkpoint compaction
         print("\n--- Manual Checkpoint Compaction ---")
         compact_result = await session.compact()
-        print(f"Compacted {compact_result.compacted_message_count} messages "
-              f"using Level {compact_result.level_used}")
-        print(f"Tokens before: {compact_result.tokens_before:,}, after: {compact_result.tokens_after:,}")
+        print(
+            f"Compacted {compact_result.compacted_message_count} messages "
+            f"using Level {compact_result.level_used}"
+        )
+        print(
+            f"Tokens before: {compact_result.tokens_before:,}, "
+            f"after: {compact_result.tokens_after:,}"
+        )
 
         # Inspect history
         messages = await session.messages()

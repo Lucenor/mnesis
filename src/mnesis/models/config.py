@@ -43,9 +43,10 @@ class CompactionConfig(BaseModel):
     level2_enabled: bool = True
     """Whether to attempt Level 2 (aggressive) compaction before falling back to Level 3."""
 
-    plugin_hook: str | None = Field(
+    compaction_prompt: str | None = Field(
         default=None,
-        description="Dotted import path to a callable that returns a custom compaction prompt.",
+        description="Custom system prompt for Level 1/2 LLM summarisation. "
+        "None = use the built-in agentic prompt.",
     )
 
     @model_validator(mode="after")

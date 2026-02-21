@@ -14,11 +14,11 @@ Run without an API key:
 """
 
 import asyncio
-import os
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 # Sample documents to process
@@ -41,9 +41,10 @@ REPOSITORIES = [
 
 async def demo_llm_map() -> None:
     """Demonstrate LLMMap for parallel stateless extraction."""
+    from pydantic import BaseModel
+
     from mnesis import LLMMap
     from mnesis.models.config import OperatorConfig
-    from pydantic import BaseModel
 
     print("=" * 50)
     print("LLMMap: Parallel Document Metadata Extraction")
@@ -119,11 +120,10 @@ async def demo_agentic_map(tmp_path: str) -> None:
         ),
         model="anthropic/claude-opus-4-6",
         max_turns=2,
-        db_path=os.path.join(tmp_path, "agentic_map.db"),
+        db_path=str(Path(tmp_path) / "agentic_map.db"),
     ):
         results_collected.append(result)
         repo_name = result.input["name"] if isinstance(result.input, dict) else result.input
-        elapsed = time.time() - start
         status = "SUCCESS" if result.success else "FAILED"
         print(f"  [{status}] {repo_name} (sub-session: {result.session_id[:20]}...)")
         print(f"           Output preview: {result.output_text[:120]}...")
@@ -134,7 +134,7 @@ async def demo_agentic_map(tmp_path: str) -> None:
     print(f"Sub-sessions created: {len(results_collected)}")
     total_tokens = sum(r.token_usage.effective_total() for r in results_collected)
     print(f"Total sub-agent tokens: {total_tokens:,}")
-    print(f"Parent context cost: O(1) — parent only sees final outputs")
+    print("Parent context cost: O(1) — parent only sees final outputs")
 
 
 async def main() -> None:
