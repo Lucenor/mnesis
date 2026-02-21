@@ -17,7 +17,7 @@ import asyncio
 from mnesis import MnesisSession
 
 async def main():
-    async with await MnesisSession.create(
+    async with MnesisSession.open(
         model="anthropic/claude-opus-4-6",
         system_prompt="You are a helpful assistant.",
     ) as session:
@@ -28,7 +28,29 @@ async def main():
 asyncio.run(main())
 ```
 
+`MnesisSession.open()` is the recommended entry point — it creates a session and acts as an async context manager in a single call, automatically closing the session (and awaiting any pending background compaction) when the block exits.
+
 Set `ANTHROPIC_API_KEY` in your environment before running. See [Providers](providers.md) for other LLM providers.
+
+### Manual lifecycle (advanced)
+
+If you need to control the session lifetime explicitly — for example, to share a session across multiple coroutines, or to close it conditionally — use `create()` instead:
+
+```python
+# create() returns the session directly; use it as an async context manager
+# to get automatic cleanup, or call close() manually.
+async with await MnesisSession.create(
+    model="anthropic/claude-opus-4-6",
+    system_prompt="You are a helpful assistant.",
+) as session:
+    result = await session.send("Explain the GIL in Python.")
+    print(result.text)
+
+# Or without a context manager — you are responsible for calling close():
+session = await MnesisSession.create(model="anthropic/claude-opus-4-6")
+result = await session.send("Explain the GIL in Python.")
+await session.close()
+```
 
 ## Try it without an API key
 
@@ -43,7 +65,7 @@ MNESIS_MOCK_LLM=1 uv run python examples/01_basic_session.py
 Sessions automatically persist every message turn, assemble the context window, and trigger compaction when needed — you don't need to manage any of that manually:
 
 ```python
-async with await MnesisSession.create(model="anthropic/claude-opus-4-6") as session:
+async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
     await session.send("My name is Alice.")
     await session.send("What's my name?")   # model still knows: Alice
     await session.send("Write a poem about context management.")

@@ -9,6 +9,7 @@ Thanks for your interest in contributing. This document covers how to set up a d
 - [Running Tests](#running-tests)
 - [Code Style](#code-style)
 - [Project Layout](#project-layout)
+- [Contributing to Documentation](#contributing-to-documentation)
 - [Submitting Changes](#submitting-changes)
 - [Reporting Bugs](#reporting-bugs)
 - [License](#license)
@@ -125,6 +126,51 @@ src/mnesis/
 ```
 
 Tests mirror the source structure under `tests/`.
+
+---
+
+## Contributing to Documentation
+
+Docs are built with [MkDocs](https://www.mkdocs.org/) and published from the `docs/` directory. The API reference pages are auto-generated from source docstrings via [mkdocstrings](https://mkdocstrings.github.io/).
+
+### Setup
+
+Docs dependencies are separate from dev dependencies — install them with:
+
+```bash
+uv sync --group docs
+```
+
+### Preview locally
+
+```bash
+uv run mkdocs serve
+# → open http://127.0.0.1:8000
+```
+
+MkDocs watches for file changes and reloads automatically.
+
+### Where things live
+
+- All documentation pages are Markdown files under `docs/`.
+- Navigation order and page titles are controlled by the `nav:` key in `mkdocs.yml` at the repo root.
+
+### Adding a new page
+
+1. Create a new `.md` file in `docs/` (or a subdirectory).
+2. Add an entry to the `nav:` section of `mkdocs.yml` so it appears in the site navigation.
+3. Preview with `uv run mkdocs serve` to confirm rendering.
+
+### API reference — do not edit directly
+
+The files under `docs/api/` are auto-generated from Python docstrings via `mkdocstrings`. Do **not** edit these files by hand — your changes will be overwritten. To improve the API reference, update the docstring in the corresponding source file instead.
+
+### Style conventions
+
+- **Docstrings**: Google style (`Args:`, `Returns:`, `Raises:`, `Example::`). All public classes and methods must have a docstring.
+- **Callouts**: Use [MkDocs admonitions](https://squidfunk.github.io/mkdocs-material/reference/admonitions/) (`!!! note`, `!!! warning`, etc.) for callout blocks — not raw blockquotes.
+- **Diagrams**: Use [Mermaid](https://mermaid.js.org/) fenced code blocks (` ```mermaid `) for flowcharts and sequence diagrams.
+- **Code examples**: Keep examples minimal and runnable. Prefer `MNESIS_MOCK_LLM=1` patterns so readers can try them without API keys.
 
 ---
 
