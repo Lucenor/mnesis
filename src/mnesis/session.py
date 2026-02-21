@@ -836,7 +836,7 @@ class MnesisSession:
                 assistant_response=response.choices[0].message.content,
             )
         """
-        sys = system_prompt or self._system_prompt
+        sys = self._system_prompt if system_prompt is None else system_prompt
         context = await self._context_builder.build(
             self._session_id, self._model_info, sys, self._config
         )
@@ -891,7 +891,8 @@ class MnesisSession:
     @property
     def compaction_in_progress(self) -> bool:
         """``True`` while a background compaction task is running."""
-        return self._compaction_engine._pending_task is not None
+        task = self._compaction_engine._pending_task
+        return task is not None and not task.done()
 
     @property
     def event_bus(self) -> EventBus:
