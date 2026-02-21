@@ -258,6 +258,10 @@ class MnesisSession:
 
         Yields:
             An initialized MnesisSession.
+
+        Note:
+            To receive operator events (``LLMMap``, ``AgenticMap``), pass
+            ``event_bus=session.event_bus`` when constructing operators.
         """
         session = await cls.create(
             model=model,

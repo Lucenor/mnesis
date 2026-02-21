@@ -3,14 +3,13 @@
 All configuration is done through `MnesisConfig`, which groups settings into sub-configs. Every field has a sensible default — you only need to override what you want to change.
 
 ```python
-from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig, SessionConfig, StoreConfig, OperatorConfig
+from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig, StoreConfig, OperatorConfig
 
 config = MnesisConfig(
     compaction=CompactionConfig(...),
     file=FileConfig(...),
     store=StoreConfig(...),
     operators=OperatorConfig(...),
-    session=SessionConfig(doom_loop_threshold=3),
 )
 
 session = await MnesisSession.create(model="openai/gpt-4o", config=config)
@@ -62,7 +61,7 @@ Controls how large files are handled.
 | Field | Default | Description |
 |---|---|---|
 | `inline_threshold` | `10_000` | Files estimated above this token count are stored as `FileRefPart` objects |
-| `storage_dir` | `None` | Directory for external file storage. Defaults to `~/.mnesis/files/` |
+| `storage_dir` | `~/.mnesis/files/` | Directory for external file storage. Defaults to `~/.mnesis/files/` |
 | `exploration_summary_model` | `None` | Model for LLM-based file summaries. `None` = deterministic only |
 
 ---
