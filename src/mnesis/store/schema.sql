@@ -127,6 +127,36 @@ CREATE INDEX IF NOT EXISTS idx_summary_nodes_session
 CREATE INDEX IF NOT EXISTS idx_summary_nodes_span
     ON summary_nodes(session_id, span_start_message_id, span_end_message_id);
 
+-- ── Context Items (Phase 3 — O(1) context assembly) ──────────────────────────
+--
+-- Tracks exactly what is "currently in context" for each session.
+-- Each row is either a 'message' or a 'summary' that belongs in the assembled
+-- context window. When compaction runs it atomically removes compacted message
+-- rows and inserts the replacement summary row, so context assembly becomes a
+-- single ordered SELECT rather than an O(n) backward scan.
+--
+-- position: monotonically increasing per-session; determines display order.
+
+CREATE TABLE IF NOT EXISTS context_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT    NOT NULL,
+    item_type  TEXT    NOT NULL CHECK(item_type IN ('message', 'summary')),
+    item_id    TEXT    NOT NULL,
+    position   INTEGER NOT NULL,
+    created_at TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_context_items_session_pos
+    ON context_items(session_id, position);
+
+CREATE INDEX IF NOT EXISTS idx_context_items_session
+    ON context_items(session_id);
+
+-- Covering index for DELETE … WHERE session_id=? AND item_id IN (…)
+-- used by swap_context_items() during compaction.
+CREATE INDEX IF NOT EXISTS idx_context_items_session_item
+    ON context_items(session_id, item_id);
+
 -- idx_summary_nodes_active is created in ImmutableStore.initialize() after the
 -- Phase 3 ALTER TABLE migration so that it is safe for existing databases where
 -- the superseded column may not yet exist when executescript() runs.

@@ -420,6 +420,12 @@ class ImmutableStore:
         """
         Append a message to the log.
 
+        For non-summary messages a ``context_items`` row is inserted atomically
+        in the same transaction so that the context-assembly view stays
+        consistent with the message log.  Summary messages are NOT inserted
+        here — the compaction engine inserts their ``context_items`` row
+        separately as part of the atomic context swap.
+
         Args:
             message: The Message to persist. Must have a pre-generated id.
 
@@ -433,6 +439,7 @@ class ImmutableStore:
         conn = self._conn_or_raise()
         tokens = message.tokens or TokenUsage()
         error = message.error
+        now_str = str(int(time.time() * 1000))
         try:
             await conn.execute(
                 """
@@ -466,6 +473,22 @@ class ImmutableStore:
                     message.mode,
                 ),
             )
+            # Track non-summary messages in the context_items view.
+            # Summary items are inserted by the compaction engine atomically
+            # alongside the DELETE of the compacted messages.
+            # The position is computed atomically inside the INSERT via a
+            # correlated subquery so concurrent appends within the same
+            # transaction cannot race on the same MAX(position) value.
+            if not message.is_summary:
+                await conn.execute(
+                    """
+                    INSERT INTO context_items (session_id, item_type, item_id, position, created_at)
+                    SELECT ?, 'message', ?, COALESCE(MAX(position), 0) + 1, ?
+                    FROM context_items
+                    WHERE session_id = ?
+                    """,
+                    (message.session_id, message.id, now_str, message.session_id),
+                )
             await conn.commit()
         except aiosqlite.IntegrityError as exc:
             if "FOREIGN KEY" in str(exc):
@@ -757,6 +780,61 @@ class ImmutableStore:
             for msg in messages
         ]
 
+    async def get_messages_with_parts_by_ids(
+        self,
+        message_ids: list[str],
+    ) -> list[MessageWithParts]:
+        """
+        Fetch a specific set of messages (and their parts) by ID.
+
+        Returns only the requested messages in the same order as ``message_ids``,
+        making context assembly O(k) in the number of context items rather than
+        O(n) in the total session length.
+
+        Args:
+            message_ids: Ordered list of message IDs to fetch.
+
+        Returns:
+            List of MessageWithParts in the order of ``message_ids``.
+        """
+        if not message_ids:
+            return []
+
+        conn = self._conn_or_raise()
+        placeholders = ",".join("?" * len(message_ids))
+        async with conn.execute(
+            f"SELECT * FROM messages WHERE id IN ({placeholders})",
+            message_ids,
+        ) as cursor:
+            msg_rows = await cursor.fetchall()
+
+        if not msg_rows:
+            return []
+
+        msg_by_id = {row["id"]: self._row_to_message(row) for row in msg_rows}
+
+        async with conn.execute(
+            f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
+            " ORDER BY message_id, part_index ASC",
+            message_ids,
+        ) as cursor:
+            part_rows = await cursor.fetchall()
+
+        parts_by_message: dict[str, list[MessagePart]] = {mid: [] for mid in message_ids}
+        for row in part_rows:
+            raw = self._row_to_raw_part(row)
+            typed_part = self._deserialize_part(raw)
+            if typed_part is not None:
+                parts_by_message[raw.message_id].append(typed_part)
+
+        # Return in the caller-specified order, silently skipping missing IDs.
+        result: list[MessageWithParts] = []
+        for mid in message_ids:
+            msg = msg_by_id.get(mid)
+            if msg is not None:
+                result.append(MessageWithParts(message=msg, parts=parts_by_message.get(mid, [])))
+        return result
+
     async def get_last_summary_message(self, session_id: str) -> Message | None:
         """
         Return the most recent message with is_summary=True, or None.
@@ -831,6 +909,96 @@ class ImmutableStore:
         if row is None:
             return None
         return self._row_to_file_reference(row)
+
+    # ── Context Items Methods ──────────────────────────────────────────────────
+
+    async def get_context_items(self, session_id: str) -> list[tuple[str, str]]:
+        """
+        Return the ordered context items for a session.
+
+        Each item is a ``(item_type, item_id)`` pair in ascending position
+        order — the canonical sequence that ``ContextBuilder`` assembles into
+        an LLM message list.
+
+        Args:
+            session_id: The session to query.
+
+        Returns:
+            List of ``(item_type, item_id)`` tuples ordered by position ASC.
+        """
+        conn = self._conn_or_raise()
+        async with conn.execute(
+            "SELECT item_type, item_id FROM context_items"
+            " WHERE session_id = ? ORDER BY position ASC",
+            (session_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [(row["item_type"], row["item_id"]) for row in rows]
+
+    async def swap_context_items(
+        self,
+        session_id: str,
+        remove_item_ids: list[str],
+        summary_id: str,
+    ) -> None:
+        """
+        Atomically replace a set of context items with a single summary row.
+
+        This is the core of the O(1) compaction commit: within a single
+        transaction, all rows whose ``item_id`` is in ``remove_item_ids`` are
+        deleted and one new ``'summary'`` row is inserted at the minimum
+        position of the removed items (i.e. it occupies the slot of the first
+        item being removed); items outside the compacted span keep their
+        original positions — no shifting required.
+
+        Used in two scenarios:
+
+        - **Leaf summarisation**: ``remove_item_ids`` contains the message IDs
+          that were compacted (``item_type='message'``).
+        - **Condensation**: ``remove_item_ids`` contains the parent summary
+          node IDs (``item_type='summary'``) being merged.
+
+        Args:
+            session_id: The session being compacted.
+            remove_item_ids: Context item IDs to remove (any item_type).
+            summary_id: ID of the SummaryNode/condensed node that replaces them.
+        """
+        if not remove_item_ids:
+            return
+
+        conn = self._conn_or_raise()
+        now_str = str(int(time.time() * 1000))
+
+        placeholders = ",".join("?" * len(remove_item_ids))
+        # The summary occupies the position slot of the first item being removed.
+        # Items after the compacted span retain their original positions —
+        # no shifting required because positions are monotonically increasing
+        # but need not be contiguous.
+        async with conn.execute(
+            f"SELECT MIN(position) FROM context_items"
+            f" WHERE session_id = ? AND item_id IN ({placeholders})",
+            (session_id, *remove_item_ids),
+        ) as cursor:
+            row = await cursor.fetchone()
+        # MIN(position) is NULL when none of the remove_item_ids exist in
+        # context_items (e.g. called with stale IDs after a crash-recovery).
+        # In that case the swap is a no-op — we have nothing to remove and
+        # nowhere deterministic to place the summary row.
+        summary_pos: int | None = row[0] if row else None
+        if summary_pos is None:
+            # No matching rows — nothing to remove, skip the insert too.
+            return
+
+        await conn.execute(
+            f"DELETE FROM context_items WHERE session_id = ? AND item_id IN ({placeholders})",
+            (session_id, *remove_item_ids),
+        )
+        await conn.execute(
+            "INSERT INTO context_items (session_id, item_type, item_id, position, created_at)"
+            " VALUES (?, 'summary', ?, ?, ?)",
+            (session_id, summary_id, summary_pos, now_str),
+        )
+        await conn.commit()
 
     # ── Private Helpers ────────────────────────────────────────────────────────
 
