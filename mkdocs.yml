@@ -9,7 +9,8 @@ extra_css:
   - stylesheets/extra.css
 
 extra_javascript:
-  - javascripts/mermaid-init.js
+  - https://cdn.jsdelivr.net/npm/panzoom@9/dist/panzoom.min.js
+  - javascripts/panzoom-diagrams.js
 
 theme:
   name: material
@@ -49,6 +50,11 @@ theme:
 plugins:
   - search:
       lang: en
+  - mermaid2:
+      arguments:
+        theme: default
+        securityLevel: loose
+        startOnLoad: false
   - gen-files:
       scripts:
         - docs/gen_ref_pages.py
@@ -94,7 +100,7 @@ markdown_extensions:
       custom_fences:
         - name: mermaid
           class: mermaid
-          format: !!python/name:pymdownx.superfences.fence_code_format
+          format: !!python/name:mermaid2.fence_mermaid_custom
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
