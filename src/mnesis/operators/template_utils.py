@@ -8,12 +8,16 @@ def require_item_variable(template_str: str) -> None:
     Raise ValueError if the Jinja2 template does not reference the ``item`` variable.
 
     Uses Jinja2 AST parsing instead of regex for correctness with complex expressions
-    like ``{{ item['key'] }}`` and ``{{ item | upper }}``.
+    like ``{{ item['key'] }}`` and ``{{ item | upper }}``. Invalid template syntax
+    is also reported as ``ValueError``.
     """
-    from jinja2 import Environment, meta
+    from jinja2 import Environment, TemplateSyntaxError, meta
 
     env = Environment()
-    ast = env.parse(template_str)
+    try:
+        ast = env.parse(template_str)
+    except TemplateSyntaxError as exc:
+        raise ValueError(f"Invalid Jinja2 template syntax: {exc}") from exc
     variables = meta.find_undeclared_variables(ast)
     if "item" not in variables:
         raise ValueError(

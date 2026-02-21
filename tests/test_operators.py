@@ -58,6 +58,18 @@ class TestLLMMap:
             ):
                 pass
 
+    async def test_invalid_jinja2_syntax_raises_value_error(self, op_config):
+        """Invalid Jinja2 syntax in the template raises ValueError (not TemplateSyntaxError)."""
+        llm_map = LLMMap(op_config)
+        with pytest.raises(ValueError, match="Invalid Jinja2 template syntax"):
+            async for _ in llm_map.run(
+                inputs=["test"],
+                prompt_template="{{ item | ",  # unclosed filter — invalid syntax
+                output_schema={},
+                model="test-model",
+            ):
+                pass
+
     async def test_template_with_filter_accepted(self, op_config):
         """Jinja2 templates with filters ({{ item | upper }}) are accepted."""
         llm_map = LLMMap(op_config)
