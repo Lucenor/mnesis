@@ -4,13 +4,13 @@
 
 Every significant operation in Mnesis publishes an event to an in-process `EventBus`. The bus enables external monitoring — compaction progress, message creation, doom loop detection, operator fan-out — without polling or modifying core logic.
 
-Each `MnesisSession` owns its own `EventBus` instance. Operators (`LLMMap`, `AgenticMap`) create their own bus by default; inject the session bus at construction time to unify all events on one subscriber.
+Each `MnesisSession` owns its own `EventBus` instance. Operators (`LLMMap`, `AgenticMap`) do not create a bus by default: they only emit `MAP_*` events when an `EventBus` is explicitly passed (for example, by injecting the session bus at construction time to unify all events on one subscriber).
 
 **Key properties of the bus:**
 
-- Sync handlers are called inline within `publish()`, in registration order.
-- Async handlers are scheduled as background tasks (`asyncio.create_task`), non-blocking.
-- Handler exceptions are logged and swallowed — they never propagate to the publisher.
+- Sync handlers are called inline within `publish()`. For a given event, handlers registered with `subscribe()` run first (in their registration order), followed by handlers registered with `subscribe_all()` (also in their registration order).
+- Async handlers are scheduled as background tasks (`asyncio.create_task`), non-blocking; they follow the same per-event-then-global ordering as sync handlers.
+- Sync handler exceptions are logged and swallowed — they never propagate to the publisher. Async handler exceptions follow normal `asyncio` task semantics and are not caught or logged by the `EventBus`.
 - `unsubscribe()` is a silent no-op if the handler is not registered.
 
 ---
@@ -37,8 +37,8 @@ async def main() -> None:
             f"tokens {payload['tokens_before']} → {payload['tokens_after']}"
         )
 
-    session.event_bus.subscribe(MnesisEvent.MESSAGE_CREATED, on_message)
-    session.event_bus.subscribe(MnesisEvent.COMPACTION_COMPLETED, on_compaction)
+    session.event_bus.subscribe(MnesisEvent.MESSAGE_CREATED, on_message)  # type: ignore[arg-type]
+    session.event_bus.subscribe(MnesisEvent.COMPACTION_COMPLETED, on_compaction)  # type: ignore[arg-type]
 
     async with session:
         result = await session.send("Hello, world!")
@@ -269,12 +269,12 @@ async def main() -> None:
 
     # ── register handlers ─────────────────────────────────────────────────────
 
-    session.event_bus.subscribe(MnesisEvent.SESSION_CREATED, on_session_created)
-    session.event_bus.subscribe(MnesisEvent.MESSAGE_CREATED, on_message)
-    session.event_bus.subscribe(MnesisEvent.COMPACTION_COMPLETED, on_compaction)
-    session.event_bus.subscribe(MnesisEvent.DOOM_LOOP_DETECTED, on_doom_loop)
-    session.event_bus.subscribe(MnesisEvent.MAP_ITEM_COMPLETED, on_map_item)
-    session.event_bus.subscribe(MnesisEvent.MAP_COMPLETED, on_map_done)
+    session.event_bus.subscribe(MnesisEvent.SESSION_CREATED, on_session_created)  # type: ignore[arg-type]
+    session.event_bus.subscribe(MnesisEvent.MESSAGE_CREATED, on_message)  # type: ignore[arg-type]
+    session.event_bus.subscribe(MnesisEvent.COMPACTION_COMPLETED, on_compaction)  # type: ignore[arg-type]
+    session.event_bus.subscribe(MnesisEvent.DOOM_LOOP_DETECTED, on_doom_loop)  # type: ignore[arg-type]
+    session.event_bus.subscribe(MnesisEvent.MAP_ITEM_COMPLETED, on_map_item)  # type: ignore[arg-type]
+    session.event_bus.subscribe(MnesisEvent.MAP_COMPLETED, on_map_done)  # type: ignore[arg-type]
 
     # ── run session ───────────────────────────────────────────────────────────
 
