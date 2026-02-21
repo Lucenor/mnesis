@@ -5,11 +5,11 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import structlog
+from pydantic import BaseModel, model_validator
 
 from mnesis.models.config import FileConfig
 from mnesis.models.message import FileRefPart
@@ -59,18 +59,37 @@ _EXTENSION_MAP: dict[str, FileType] = {
 }
 
 
-@dataclass
-class FileHandleResult:
-    """Result of processing a file through the LargeFileHandler."""
+class FileHandleResult(BaseModel):
+    """Result of processing a file through the LargeFileHandler.
+
+    Exactly one of ``inline_content`` or ``file_ref`` is set:
+
+    - ``inline_content`` is present when the file fits within the inline
+      token threshold and its text is safe to embed directly in context.
+    - ``file_ref`` is present when the file exceeds the threshold; a
+      ``FileRefPart`` carries the content hash and an exploration summary.
+
+    Use :attr:`is_inline` to branch without inspecting both fields.
+    """
 
     path: str
+    """Original file path as provided by the caller."""
     inline_content: str | None = None
     """Present when the file fits within the inline threshold."""
     file_ref: FileRefPart | None = None
     """Present when the file exceeds the inline threshold."""
 
+    @model_validator(mode="after")
+    def _exactly_one_output(self) -> FileHandleResult:
+        if self.inline_content is None and self.file_ref is None:
+            raise ValueError("FileHandleResult must have either inline_content or file_ref")
+        if self.inline_content is not None and self.file_ref is not None:
+            raise ValueError("FileHandleResult cannot have both inline_content and file_ref")
+        return self
+
     @property
     def is_inline(self) -> bool:
+        """Return True when the file was inlined rather than stored externally."""
         return self.inline_content is not None
 
 
@@ -87,14 +106,23 @@ class LargeFileHandler:
     - Changed files get a new hash and trigger a fresh exploration summary.
     - Large file content is never stored directly in the ImmutableStore.
 
-    Example::
+    **Construction:** prefer the :meth:`from_session` factory to avoid
+    constructing internal objects directly::
 
-        handler = LargeFileHandler(store, estimator, FileConfig())
-        result = await handler.handle_file("/path/to/large.py")
-        if result.is_inline:
-            print(result.inline_content)
-        else:
-            print(result.file_ref.exploration_summary)
+        async with await MnesisSession.create(model="...") as session:
+            handler = LargeFileHandler.from_session(session)
+            result = await handler.handle_file("/path/to/large.py")
+            if result.is_inline:
+                print(result.inline_content)
+            else:
+                print(result.file_ref.exploration_summary)
+
+    If you need a standalone handler (e.g. for pre-processing files before
+    starting a session) use the primary constructor directly::
+
+        store = ImmutableStore(StoreConfig())
+        await store.initialize()
+        handler = LargeFileHandler(store, TokenEstimator(), FileConfig())
     """
 
     def __init__(
@@ -107,6 +135,34 @@ class LargeFileHandler:
         self._estimator = estimator
         self._config = config
         self._logger = structlog.get_logger("mnesis.files")
+
+    @classmethod
+    def from_session(cls, session: object) -> LargeFileHandler:
+        """
+        Construct a LargeFileHandler from an existing MnesisSession.
+
+        This is the recommended factory when a session is already open.
+        It reuses the session's store connection, token estimator, and file
+        config so no additional setup is needed.
+
+        Args:
+            session: An open :class:`~mnesis.session.MnesisSession` instance.
+
+        Returns:
+            A :class:`LargeFileHandler` ready to process files.
+
+        Example::
+
+            async with await MnesisSession.create(model="...") as session:
+                handler = LargeFileHandler.from_session(session)
+                result = await handler.handle_file("/path/to/file.py")
+        """
+        # Use duck-typing to avoid a circular import with mnesis.session.
+        return cls(
+            store=session._store,  # type: ignore[attr-defined]
+            estimator=session._estimator,  # type: ignore[attr-defined]
+            config=session._config.file,  # type: ignore[attr-defined]
+        )
 
     async def handle_file(
         self,
