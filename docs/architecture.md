@@ -82,6 +82,7 @@ sequenceDiagram
     participant Store as ImmutableStore
     participant Engine as CompactionEngine
     participant Builder as ContextBuilder
+    participant SDS as SummaryDAGStore
     participant LLM
 
     Caller->>Session: send("message")
@@ -293,16 +294,16 @@ is an extreme edge case handled by the multi-round condensation loop.
 stateDiagram-v2
     [*] --> Idle : session created
 
-    Idle --> SoftTrigger : cumulative_tokens >= soft_threshold
-    SoftTrigger --> Compacting : asyncio.create_task(run_compaction)
+    Idle --> SoftTrigger : tokens above soft threshold
+    SoftTrigger --> Compacting : create_task scheduled
     Compacting --> Idle : CompactionResult produced
 
-    Idle --> HardBlock : cumulative_tokens >= hard_threshold before send()
+    Idle --> HardBlock : tokens above hard threshold at send()
     HardBlock --> Blocking : await wait_for_pending()
     Blocking --> Idle : compaction completes
 
     Compacting --> CompactFailed : unhandled exception
-    CompactFailed --> Idle : COMPACTION_FAILED published; stub CompactionResult returned
+    CompactFailed --> Idle : COMPACTION_FAILED published, stub result returned
 ```
 
 ### Thresholds
