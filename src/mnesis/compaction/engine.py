@@ -137,7 +137,8 @@ class CompactionEngine:
 
     def _usable_tokens(self, model: ModelInfo) -> int:
         """Return the hard-limit usable token count for *model*."""
-        return model.context_limit - model.max_output_tokens - self._config.compaction.buffer
+        budget = self._config.compaction.compaction_output_budget
+        return model.context_limit - model.max_output_tokens - budget
 
     def is_soft_overflow(self, tokens: TokenUsage, model: ModelInfo) -> bool:
         """
@@ -317,7 +318,7 @@ class CompactionEngine:
         start_ms = time.time() * 1000
 
         # Step 1: Run pruner first to reduce input size
-        await self._pruner.prune(session_id)
+        prune_result = await self._pruner.prune(session_id)
 
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
@@ -336,6 +337,8 @@ class CompactionEngine:
                 tokens_before=0,
                 tokens_after=0,
                 elapsed_ms=time.time() * 1000 - start_ms,
+                pruned_tool_outputs=prune_result.pruned_count,
+                pruned_tokens=prune_result.pruned_tokens,
             )
 
         tokens_before = sum(self._estimator.estimate_message(m) for m in non_summary)
@@ -357,7 +360,7 @@ class CompactionEngine:
         budget = ContextBudget(
             model_context_limit=200_000,
             reserved_output_tokens=8_192,
-            compaction_buffer=self._config.compaction.buffer,
+            compaction_buffer=self._config.compaction.compaction_output_budget,
         )
 
         llm_call = _make_llm_call(compaction_model)
@@ -507,6 +510,8 @@ class CompactionEngine:
             tokens_before=tokens_before,
             tokens_after=tokens_after,
             elapsed_ms=elapsed_ms,
+            pruned_tool_outputs=prune_result.pruned_count,
+            pruned_tokens=prune_result.pruned_tokens,
         )
 
         self._logger.info(

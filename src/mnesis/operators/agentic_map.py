@@ -123,7 +123,7 @@ class AgenticMap:
 
             parent_session_id: Optional parent session ID for lineage tracking.
             agent: Agent role for sub-sessions.
-            lcm_config: Mnesis config for sub-sessions.
+            lcm_config: Mnesis config for sub-sessions. Defaults to ``MnesisConfig()``.
             db_path: Override database path (useful for testing).
             pool: Shared ``StorePool`` so all sub-sessions use one connection.
                 If omitted a fresh pool is created and closed automatically

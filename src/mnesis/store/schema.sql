@@ -7,16 +7,17 @@ PRAGMA synchronous = NORMAL;
 -- ── Sessions ──────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id          TEXT PRIMARY KEY,
-    parent_id   TEXT REFERENCES sessions(id),
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    model_id    TEXT NOT NULL DEFAULT '',
-    provider_id TEXT NOT NULL DEFAULT '',
-    agent       TEXT NOT NULL DEFAULT 'default',
-    title       TEXT,
-    is_active   INTEGER NOT NULL DEFAULT 1,
-    metadata    TEXT
+    id            TEXT PRIMARY KEY,
+    parent_id     TEXT REFERENCES sessions(id),
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    model_id      TEXT NOT NULL DEFAULT '',
+    provider_id   TEXT NOT NULL DEFAULT '',
+    agent         TEXT NOT NULL DEFAULT 'default',
+    title         TEXT,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    metadata      TEXT,
+    system_prompt TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_parent_id
