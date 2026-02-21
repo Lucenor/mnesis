@@ -204,8 +204,27 @@ class TestIsOverflow:
         tokens = TokenUsage(total=999_999)
         assert engine.is_overflow(tokens, model) is False
 
-    def test_overflow_true_at_threshold(self, estimator, event_bus, store, dag_store, config):
-        """is_overflow returns True when tokens reach the usable threshold."""
+    def test_overflow_true_at_soft_threshold(self, estimator, event_bus, store, dag_store, config):
+        """is_overflow (soft threshold) fires at soft_threshold_fraction * usable."""
+        engine = CompactionEngine(
+            store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_id"
+        )
+        model = ModelInfo(
+            model_id="test-model",
+            context_limit=100_000,
+            max_output_tokens=4_000,
+        )
+        # usable = 100_000 - 4_000 - 20_000 = 76_000
+        # soft_limit = 76_000 * 0.6 = 45_600
+        tokens_below_soft = TokenUsage(total=45_599)
+        tokens_above_soft = TokenUsage(total=45_601)
+        assert engine.is_overflow(tokens_below_soft, model) is False
+        assert engine.is_overflow(tokens_above_soft, model) is True
+
+    def test_hard_overflow_at_usable_threshold(
+        self, estimator, event_bus, store, dag_store, config
+    ):
+        """is_hard_overflow fires at the full usable budget (hard threshold)."""
         engine = CompactionEngine(
             store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_id"
         )
@@ -217,8 +236,8 @@ class TestIsOverflow:
         # usable = 100_000 - 4_000 - 20_000 = 76_000
         tokens_ok = TokenUsage(total=75_999)
         tokens_overflow = TokenUsage(total=76_001)
-        assert engine.is_overflow(tokens_ok, model) is False
-        assert engine.is_overflow(tokens_overflow, model) is True
+        assert engine.is_hard_overflow(tokens_ok, model) is False
+        assert engine.is_hard_overflow(tokens_overflow, model) is True
 
 
 class TestCompactionEngine:
@@ -341,7 +360,8 @@ class TestCompactionEngine:
             id_generator=lambda p: f"{p}_trigger",
             session_model="anthropic/claude-haiku-4-5",
         )
-        # usable = 100_000 - 4_000 - 20_000 = 76_000; overflow at 80_000
+        # usable = 100_000 - 4_000 - 20_000 = 76_000
+        # soft_limit = 76_000 * 0.6 = 45_600; 80_000 is well above soft threshold
         model = ModelInfo(model_id="test-model", context_limit=100_000, max_output_tokens=4_000)
         tokens = TokenUsage(total=80_000)
         result = engine.check_and_trigger(session_id, tokens, model)

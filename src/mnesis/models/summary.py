@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -15,8 +16,11 @@ class SummaryNode(BaseModel):
     ``is_summary=True`` in the ImmutableStore. The SummaryDAGStore adapts
     those messages into this model.
 
-    In Phase 2 a dedicated ``summary_nodes`` table will support multi-level
-    DAG structures for hierarchical summarisation.
+    Two kinds exist:
+
+    - ``"leaf"`` — produced by summarising raw messages directly.
+    - ``"condensed"`` — produced by condensing one or more existing summary
+      nodes; ``parent_node_ids`` records all consumed node IDs.
     """
 
     id: str
@@ -24,6 +28,8 @@ class SummaryNode(BaseModel):
     session_id: str
     level: int = 0
     """DAG depth: 0 = covers raw messages directly, 1+ = covers other nodes."""
+    kind: Literal["leaf", "condensed"] = "leaf"
+    """'leaf' = summarised from raw messages; 'condensed' = merged from summary nodes."""
     span_start_message_id: str
     """ID of the first message in the summarized span."""
     span_end_message_id: str
@@ -33,7 +39,9 @@ class SummaryNode(BaseModel):
     token_count: int
     created_at: int = Field(default_factory=lambda: int(time.time() * 1000))
     parent_node_id: str | None = None
-    """ID of the parent SummaryNode in a multi-level DAG (Phase 2)."""
+    """ID of the parent SummaryNode in a multi-level DAG (kept for backwards compat)."""
+    parent_node_ids: list[str] = Field(default_factory=list)
+    """All parent SummaryNode IDs consumed by this condensation (populated for 'condensed')."""
     model_id: str = ""
     provider_id: str = ""
     compaction_level: int = 1
