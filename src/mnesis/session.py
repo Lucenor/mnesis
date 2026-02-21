@@ -159,6 +159,7 @@ class MnesisSession:
             event_bus,
             cfg,
             id_generator=make_id,
+            session_model=model,
         )
 
         session = cls(
@@ -227,6 +228,7 @@ class MnesisSession:
             event_bus,
             cfg,
             id_generator=make_id,
+            session_model=model,
         )
 
         return cls(

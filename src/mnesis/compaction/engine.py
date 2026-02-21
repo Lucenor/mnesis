@@ -83,12 +83,14 @@ class CompactionEngine:
         event_bus: EventBus,
         config: MnesisConfig,
         id_generator: Any = None,
+        session_model: str | None = None,
     ) -> None:
         self._store = store
         self._dag_store = dag_store
         self._estimator = token_estimator
         self._event_bus = event_bus
         self._config = config
+        self._session_model = session_model
         self._pruner = ToolOutputPrunerAsync(store, token_estimator, config)
         self._id_gen = id_generator or _default_id_generator
         self._logger = structlog.get_logger("mnesis.compaction")
@@ -253,12 +255,15 @@ class CompactionEngine:
 
         tokens_before = sum(self._estimator.estimate_message(m) for m in non_summary)
 
-        # Determine compaction model
+        # Determine compaction model: explicit override → config → session model
         compaction_model = (
-            model_override
-            or self._config.compaction.compaction_model
-            or "anthropic/claude-haiku-3-5"
+            model_override or self._config.compaction.compaction_model or self._session_model
         )
+        if not compaction_model:
+            raise ValueError(
+                "No compaction model available. Set compaction.compaction_model in "
+                "MnesisConfig or pass a model when creating the session."
+            )
 
         # Compute a generous budget for the summary
         budget = ContextBudget(
@@ -274,8 +279,14 @@ class CompactionEngine:
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
 
+        compaction_prompt = self._config.compaction.compaction_prompt
         candidate = await level1_summarise(
-            non_summary, compaction_model, budget, self._estimator, llm_call
+            non_summary,
+            compaction_model,
+            budget,
+            self._estimator,
+            llm_call,
+            compaction_prompt=compaction_prompt,
         )
 
         # Step 3: Level 2 (if Level 1 failed and level2 is enabled)
@@ -283,7 +294,12 @@ class CompactionEngine:
             if abort and abort.is_set():
                 raise asyncio.CancelledError("Compaction aborted")
             candidate = await level2_summarise(
-                non_summary, compaction_model, budget, self._estimator, llm_call
+                non_summary,
+                compaction_model,
+                budget,
+                self._estimator,
+                llm_call,
+                compaction_prompt=compaction_prompt,
             )
 
         # Step 4: Level 3 (deterministic fallback — always succeeds)

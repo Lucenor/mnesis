@@ -17,22 +17,22 @@ Run with a real LLM (set your API key first):
 """
 
 import asyncio
-import os
 import sys
+from pathlib import Path
 
 # Add project root to path when running directly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 async def main() -> None:
-    from mnesis import MnesisSession, MnesisConfig, CompactionConfig
+    from mnesis import CompactionConfig, MnesisConfig, MnesisSession
 
     print("=== Mnesis Basic Session Example ===\n")
 
     # Configure with a smaller compaction buffer for demo purposes
     config = MnesisConfig(
         compaction=CompactionConfig(
-            buffer=10_000,        # Trigger compaction sooner
+            buffer=10_000,  # Trigger compaction sooner
             auto=True,
         )
     )
