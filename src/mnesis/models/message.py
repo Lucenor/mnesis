@@ -237,7 +237,7 @@ class MessageWithParts(BaseModel):
 
     @property
     def model_id(self) -> str:
-        """The model that produced this message (empty string for user messages)."""
+        """The model that produced or is associated with this message."""
         return self.message.model_id
 
     @property
