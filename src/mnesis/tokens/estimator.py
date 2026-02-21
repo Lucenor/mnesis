@@ -27,11 +27,16 @@ class TokenEstimator:
       (file references, summary nodes). Use ``estimate_cached()`` for this.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, heuristic_only: bool = False) -> None:
+        """
+        Args:
+            heuristic_only: When ``True``, always use the character-based
+                heuristic and skip tiktoken entirely. Useful for testing,
+                benchmarking, or environments where tiktoken is not installed.
+        """
         self._encoder_cache: dict[str, Any] = {}
         self._count_cache: dict[str, int] = {}
-        self._force_heuristic: bool = False
-        """Set to True in tests to skip tiktoken import."""
+        self._force_heuristic: bool = heuristic_only
 
     def estimate(self, text: str, model: ModelInfo | None = None) -> int:
         """

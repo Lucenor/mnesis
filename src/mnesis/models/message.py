@@ -333,6 +333,7 @@ class TurnResult(BaseModel):
     """
     tokens: TokenUsage
     cost: float
+    """Estimated USD cost of this turn. **Always ``0.0`` — not yet implemented.**"""
     compaction_triggered: bool = False
     compaction_result: CompactionResult | None = None
     doom_loop_detected: bool = False

@@ -617,3 +617,131 @@ class TestCompactionInProgress:
             assert session.compaction_in_progress is False
         finally:
             await session.close()
+
+
+class TestConversationMessages:
+    """Tests for L-8: session.conversation_messages() convenience method."""
+
+    async def test_conversation_messages_excludes_summaries(self, tmp_path):
+        """conversation_messages() must exclude is_summary messages."""
+        from mnesis import MnesisSession
+
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        )
+        try:
+            await session.record(user_message="Hello", assistant_response="Hi")
+            await session.record(user_message="How are you?", assistant_response="Good")
+
+            all_msgs = await session.messages()
+            conv_msgs = await session.conversation_messages()
+
+            # All conversation messages are non-summary
+            assert all(not m.is_summary for m in conv_msgs)
+            # conversation_messages is a subset of messages()
+            conv_ids = {m.id for m in conv_msgs}
+            all_ids = {m.id for m in all_msgs}
+            assert conv_ids <= all_ids
+            # With no compaction triggered, all messages are conversational
+            assert len(conv_msgs) == len([m for m in all_msgs if not m.is_summary])
+        finally:
+            await session.close()
+
+
+class TestEventBusUnsubscribeAll:
+    """Tests for L-13: EventBus.unsubscribe_all()."""
+
+    def test_unsubscribe_all_removes_from_specific_events(self):
+        """unsubscribe_all removes handler from per-event registrations."""
+        from mnesis.events.bus import EventBus, MnesisEvent
+
+        bus = EventBus()
+        calls: list[str] = []
+
+        def handler(event, payload):
+            calls.append("called")
+
+        bus.subscribe(MnesisEvent.SESSION_CREATED, handler)
+        bus.subscribe(MnesisEvent.SESSION_CLOSED, handler)
+        bus.unsubscribe_all(handler)
+
+        bus.publish(MnesisEvent.SESSION_CREATED, {})
+        bus.publish(MnesisEvent.SESSION_CLOSED, {})
+        assert calls == []
+
+    def test_unsubscribe_all_removes_from_global_handlers(self):
+        """unsubscribe_all removes handler from subscribe_all registrations."""
+        from mnesis.events.bus import EventBus, MnesisEvent
+
+        bus = EventBus()
+        calls: list[str] = []
+
+        def handler(event, payload):
+            calls.append("called")
+
+        bus.subscribe_all(handler)
+        bus.unsubscribe_all(handler)
+        bus.publish(MnesisEvent.SESSION_CREATED, {})
+        assert calls == []
+
+    def test_unsubscribe_all_is_silent_noop_when_not_registered(self):
+        """unsubscribe_all is a no-op when handler is not registered anywhere."""
+        from mnesis.events.bus import EventBus
+
+        bus = EventBus()
+
+        def handler(event, payload):
+            pass
+
+        # Should not raise
+        bus.unsubscribe_all(handler)
+
+    def test_unsubscribe_noop_documented(self):
+        """unsubscribe is silent no-op when handler not registered."""
+        from mnesis.events.bus import EventBus, MnesisEvent
+
+        bus = EventBus()
+
+        def handler(event, payload):
+            pass
+
+        # Not registered — should not raise
+        bus.unsubscribe(MnesisEvent.SESSION_CREATED, handler)
+
+
+class TestTokenEstimatorHeuristicOnly:
+    """Tests for L-15: TokenEstimator(heuristic_only=True) constructor param."""
+
+    def test_heuristic_only_skips_tiktoken(self):
+        """heuristic_only=True uses character-based estimate regardless of model."""
+        from mnesis.models.config import ModelInfo
+        from mnesis.tokens.estimator import TokenEstimator
+
+        estimator = TokenEstimator(heuristic_only=True)
+        # cl100k_base encoding would normally trigger tiktoken; heuristic_only skips it
+        model = ModelInfo(
+            model_id="gpt-4o",
+            provider_id="openai",
+            encoding="cl100k_base",
+            context_limit=128000,
+            max_output_tokens=4096,
+        )
+        text = "hello world"
+        result = estimator.estimate(text, model)
+        # Heuristic: len // 4, minimum 1
+        assert result == max(1, len(text) // 4)
+
+    def test_heuristic_only_false_by_default(self):
+        """Default constructor does not force heuristic mode."""
+        from mnesis.tokens.estimator import TokenEstimator
+
+        estimator = TokenEstimator()
+        assert estimator._force_heuristic is False
+
+    def test_heuristic_only_true(self):
+        """heuristic_only=True sets _force_heuristic."""
+        from mnesis.tokens.estimator import TokenEstimator
+
+        estimator = TokenEstimator(heuristic_only=True)
+        assert estimator._force_heuristic is True
