@@ -664,6 +664,8 @@ class TestDAGSupersession:
         self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
     ):
         """After run_compaction, parent nodes consumed by condensation are superseded."""
+        import json
+
         monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
 
         from mnesis.models.config import CompactionConfig, StoreConfig
@@ -685,6 +687,11 @@ class TestDAGSupersession:
             session_model="anthropic/claude-haiku-4-5",
         )
 
+        # Messages need substantial text so the transcript passed to level1/level2
+        # is larger than the mock LLM's output (convergence check requires
+        # summary_tokens < input_tokens to accept a candidate).
+        long_text = "The agent is working on a complex multi-step task. " * 6  # ~306 chars
+
         # Create first batch of messages and compact to create a leaf node.
         for i in range(6):
             msg = make_message(
@@ -693,7 +700,10 @@ class TestDAGSupersession:
                 msg_id=f"msg_sup_a_{i:03d}",
             )
             await store.append_message(msg)
-            part = make_raw_part(msg.id, session_id, part_id=f"part_sup_a_{i:03d}")
+            raw_content = json.dumps({"type": "text", "text": long_text})
+            part = make_raw_part(
+                msg.id, session_id, part_id=f"part_sup_a_{i:03d}", content=raw_content
+            )
             await store.append_part(part)
 
         await engine.run_compaction(session_id)
@@ -706,12 +716,16 @@ class TestDAGSupersession:
                 msg_id=f"msg_sup_b_{i:03d}",
             )
             await store.append_message(msg)
-            part = make_raw_part(msg.id, session_id, part_id=f"part_sup_b_{i:03d}")
+            raw_content = json.dumps({"type": "text", "text": long_text})
+            part = make_raw_part(
+                msg.id, session_id, part_id=f"part_sup_b_{i:03d}", content=raw_content
+            )
             await store.append_part(part)
 
         # Force tokens_after > budget.usable so condensation loop runs.
         # Patch estimate_message to return huge values so initial summarisation
-        # produces a tokens_after well over budget, triggering condensation.
+        # (which covers only a partial slice of messages) leaves a residual token
+        # count above the budget, triggering the condensation loop.
         original_estimate_msg = estimator.estimate_message
 
         def inflated_estimate_msg(msg):  # type: ignore[no-untyped-def]
