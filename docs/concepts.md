@@ -22,13 +22,23 @@ When cumulative token usage crosses the threshold, the `CompactionEngine` escala
 | **2** | Aggressive compression: drop reasoning, maximum conciseness | LLM error or still too large → escalate |
 | **3** | Deterministic truncation | Never fails — always fits |
 
-Level 3 is the unconditional safety net. Compaction runs **asynchronously** and never blocks a turn.
+Level 3 is the unconditional safety net. At the soft threshold, compaction runs **asynchronously** in the background without blocking the current turn.
+
+!!! info "Soft vs. hard threshold"
+    Compaction has two thresholds: a **soft threshold** (default 60% of usable context, `soft_threshold_fraction`) that triggers background compaction without blocking the current turn, and a **hard threshold** (100%) that blocks `send()` until compaction completes. Both are configurable via `CompactionConfig`.
 
 ## Tool Output Pruning
 
-Tool outputs tend to dominate context usage in agentic sessions. The `ToolOutputPruner` scans backward through history and **tombstones** completed tool outputs that fall outside a configurable protect window (default: last 40K tokens).
+Tool outputs tend to dominate context usage in agentic sessions. The `ToolOutputPruner` scans backward through history and **tombstones** completed tool outputs that fall outside a configurable protect window.
 
-Tombstoned outputs are replaced with compact string markers like `"[Tool 'tool_name' output compacted at timestamp]"` in the Active Context, preserving the reference while reclaiming token space. The full output is still in the immutable store and can be retrieved at any time.
+Key parameters:
+
+- **`prune_protect_tokens`** (default: 40K) — token window from the end of history that is never pruned. Tool outputs within this window are always kept verbatim.
+- **`prune_minimum_tokens`** (default: 20K) — minimum prunable volume required before pruning fires. If total prunable tokens are at or below this threshold, the pass is skipped entirely.
+- The **most recent user turn** is always protected, regardless of token position.
+- Certain tool names (e.g. `skill`) are **never pruned**, even if they fall outside the protect window.
+
+In the Active Context, tombstoned tool outputs are rendered as compact tombstone strings (for example, `"[Tool 'X' output compacted at ...]"`), preserving the reference while reclaiming token space. The full output is still in the immutable store and can be retrieved at any time.
 
 ## Large File References
 
@@ -37,6 +47,8 @@ Files exceeding the inline threshold (default: 10K tokens) are stored externally
 - Detected MIME type / language
 - Structural exploration summary (AST outline for Python, schema keys for JSON/YAML, headings for Markdown)
 - Token count
+
+A future version may support optional LLM-based summaries via `FileConfig.exploration_summary_model`; this setting is currently reserved and not yet wired into `LargeFileHandler`.
 
 The file is never re-read or re-inlined unless the model explicitly requests it — keeping large files from consuming the context budget on every turn.
 
