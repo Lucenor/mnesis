@@ -5,7 +5,7 @@ Primary entry point::
 
     from mnesis import MnesisSession, MnesisConfig
 
-    async with await MnesisSession.create(model="anthropic/claude-opus-4-6") as session:
+    async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
         result = await session.send("Hello!")
         print(result.text)
 """

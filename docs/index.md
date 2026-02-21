@@ -107,7 +107,7 @@ import asyncio
 from mnesis import MnesisSession
 
 async def main():
-    async with await MnesisSession.create(
+    async with MnesisSession.open(
         model="anthropic/claude-opus-4-6",
         system_prompt="You are a helpful assistant.",
     ) as session:

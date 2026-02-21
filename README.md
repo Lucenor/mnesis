@@ -75,7 +75,7 @@ import asyncio
 from mnesis import MnesisSession
 
 async def main():
-    async with await MnesisSession.create(
+    async with MnesisSession.open(
         model="anthropic/claude-opus-4-6",
         system_prompt="You are a helpful assistant.",
     ) as session:
@@ -84,6 +84,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+`MnesisSession.open()` is the recommended entry point — it creates the session and acts as an async context manager in a single call. For manual lifecycle control, use `await MnesisSession.create(...)` instead (returns the session directly; call `await session.close()` when done, or use it as an async context manager with `async with await MnesisSession.create(...)`).
 
 No API key needed to try it — set `MNESIS_MOCK_LLM=1` and run any of the [examples](#examples).
 
@@ -159,7 +161,7 @@ Files exceeding the inline threshold (default 10K tokens) are stored externally 
 ## Configuration
 
 ```python
-from mnesis import MnesisConfig, CompactionConfig, FileConfig, SessionConfig
+from mnesis import MnesisConfig, CompactionConfig, FileConfig, SessionConfig, StoreConfig, OperatorConfig
 
 config = MnesisConfig(
     compaction=CompactionConfig(
