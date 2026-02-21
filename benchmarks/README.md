@@ -140,7 +140,7 @@ All files are written to `benchmarks/results/` (or `--output-dir`).
 
 | File | When produced | Description |
 |------|--------------|-------------|
-| `locomo_f1_by_category.png` | Full QA mode only | Grouped bar chart: F1 per question category, baseline vs mnesis. Human baseline shown as a dashed line. |
+| `locomo_f1_by_category.png` | Full QA mode only | Grouped bar chart: F1 per question category, baseline vs mnesis. |
 | `locomo_token_usage.png` | Always | Token count before and after compaction per conversation, with percentage reduction labels. |
 | `locomo_summary.png` | Always | 2×2 dashboard: overall F1, category F1, token usage, and a compaction summary table. F1 panels show N/A in `--metrics-only` mode. |
 | `locomo_results.json` | Always | Raw per-question results, per-category F1, token statistics, and compaction metadata. |

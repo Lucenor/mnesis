@@ -702,6 +702,7 @@ examples:
         type=int,
         default=1,
         metavar="N",
+        choices=range(1, 11),
         help="Conversations to evaluate, 1-10 (default: 1)",
     )
     p.add_argument(
