@@ -21,9 +21,21 @@ Two conditions are compared for each conversation:
 | **Baseline** | Full conversation history kept in context; no compaction |
 | **Mnesis** | Full history injected via `session.record()`, then `session.compact()` called before QA |
 
-The primary metric is **token-level F1** (SQuAD-style partial match), broken down by
-question category. The difference in F1 between conditions shows the quality cost (or gain)
-of compaction.
+**Primary metrics** — what actually matters:
+
+| Metric | What it tells you |
+|--------|-------------------|
+| **Token reduction %** | How much context budget compaction recovers (`--metrics-only` mode) |
+| **F1 delta (Δ)** | How much information is preserved after compaction (requires LLM API key) |
+
+A delta close to **0.00** with a token reduction above **70%** is the target: compaction
+recovered significant context budget while retaining the facts needed to answer questions.
+
+**Why absolute F1 values look low:** LOCOMO questions frequently require exact dates or
+numeric answers ("7 May 2023", "10 years ago"), but conversations express these as relative
+references ("yesterday", "ten years ago"). Token-level matching scores these 0 even when the
+model's answer is semantically correct. Both baseline and mnesis are equally affected, so
+**the delta between them is the meaningful signal** — not the absolute values.
 
 Token usage before and after compaction is always measured, even without an LLM API key.
 
@@ -139,14 +151,24 @@ subsequent runs.
 
 ### Interpreting results
 
+**The two numbers that matter:**
+
+1. **Token reduction %** — higher is better. Measures how much context budget compaction
+   reclaims. 70–95% is typical for long LOCOMO conversations.
+2. **F1 delta (Δ)** — closer to 0.00 is better. Measures information preserved after
+   compaction. A delta of –0.05 means mnesis answers are nearly as accurate as uncompacted
+   context despite the large token savings.
+
 | Observation | Likely meaning |
 |-------------|----------------|
-| Small F1 gap between baseline and mnesis | Compaction is lossless for this workload |
-| Large F1 drop after compaction | Key facts are being over-aggressively summarised; consider tuning `prune_protect_tokens` |
-| Token reduction > 50% | Compaction is effective at recovering context budget |
-| Compaction level 1 | Mnesis used LLM-based structured summarisation (highest quality) |
-| Compaction level 3 | Fell back to deterministic truncation — check your API key and model string |
-| High F1 on Single-Hop, low on Temporal | Normal pattern; temporal reasoning is the hardest category for all models |
+| **Δ near 0.00, reduction > 70%** | Compaction is working well — facts preserved, budget recovered |
+| **Δ worse than –0.10** | Key facts are being lost; try a domain-specific `compaction_prompt` or reduce `buffer` |
+| **Δ positive** | Compaction improved answers (possible — baseline noise from relative time references) |
+| **Token reduction < 50%** | Conversation may already be short enough that compaction is not needed |
+| **Compaction level 1** | LLM-based structured summarisation used (highest quality) |
+| **Compaction level 3** | Fell back to deterministic truncation — check your API key and model string |
+| **Low absolute F1 in both columns** | Expected; LOCOMO has many relative-time questions that score 0 even when semantically correct |
+| **High F1 on Single-Hop, low on Temporal** | Normal — temporal reasoning is the hardest category for all models |
 
 ---
 

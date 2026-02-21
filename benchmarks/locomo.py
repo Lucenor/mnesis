@@ -386,7 +386,8 @@ def plot_f1_by_category(
     """
     Grouped bar chart: token-level F1 per question category, baseline vs mnesis.
 
-    A dashed line marks the human F1 baseline from the paper (87.9%).
+    Δ annotations above each bar pair show the compaction quality signal.
+    Absolute F1 values are reference only; the delta is the meaningful metric.
     """
     cats = sorted(CATEGORY_NAMES)
     labels = [CATEGORY_NAMES[c] for c in cats]
@@ -413,22 +414,31 @@ def plot_f1_by_category(
         color=COLORS["mnesis"],
         alpha=0.85,
     )
-    ax.axhline(
-        HUMAN_F1,
-        color=COLORS["human"],
-        linestyle="--",
-        linewidth=1.5,
-        label=f"Human baseline ({HUMAN_F1:.1%})",
-    )
     _annotate_bars(ax, bars_b)
     _annotate_bars(ax, bars_m)
 
+    # Annotate each category with the delta — this is the primary signal
+    for i, (bv, mv) in enumerate(zip(b_vals, m_vals, strict=False)):
+        delta = mv - bv
+        color = "#2ca02c" if delta >= -0.02 else "#d62728"
+        top = max(bv, mv) + 0.06
+        ax.text(
+            x[i],
+            top,
+            f"Δ {delta:+.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color=color,
+        )
+
     ax.set_xlabel("Question Category")
-    ax.set_ylabel("Token-level F1")
-    ax.set_title("LOCOMO: QA Accuracy by Category — Baseline vs. Mnesis Compaction")
+    ax.set_ylabel("Token-level F1  (absolute values are reference only — see Δ)")
+    ax.set_title("LOCOMO: F1 by Category — Baseline vs. Mnesis  (Δ = compaction quality signal)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
-    ax.set_ylim(0, 1.15)
+    ax.set_ylim(0, 1.2)
     ax.legend(loc="upper right")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
@@ -510,47 +520,89 @@ def plot_summary(
     metrics_only: bool,
 ) -> None:
     """
-    2x2 dashboard combining all benchmark metrics into a single figure:
+    2x2 dashboard combining all benchmark metrics into a single figure.
 
-    - Top-left:  Overall F1, baseline vs mnesis vs human
-    - Top-right: F1 by question category
-    - Bottom-left:  Token usage before / after compaction
+    Layout (primary metrics first):
+    - Top-left:  F1 delta by category (compaction quality signal, N/A in metrics-only)
+    - Top-right: Token usage before / after compaction (always shown)
+    - Bottom-left:  Absolute F1 baseline vs mnesis (reference, N/A in metrics-only)
     - Bottom-right: Compaction summary table
     """
     fig = plt.figure(figsize=(14, 10))
     gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.38)
 
-    na_kw = {"transform": None, "ha": "center", "va": "center", "fontsize": 12, "color": "gray"}
+    na_kw = {"ha": "center", "va": "center", "fontsize": 12, "color": "gray"}
 
-    # ── top-left: Overall F1 ──────────────────────────────────────────
+    # ── top-left: F1 delta by category (PRIMARY quality signal) ──────
     ax0 = fig.add_subplot(gs[0, 0])
     if metrics_only:
-        ax0.text(0.5, 0.5, "N/A\n(run without --metrics-only)", **na_kw)
+        ax0.text(0.5, 0.5, "N/A\n(run without --metrics-only)", transform=ax0.transAxes, **na_kw)
         ax0.axis("off")
     else:
-        bars = ax0.bar(
-            ["Baseline", "Mnesis", "Human"],
-            [b_overall, m_overall, HUMAN_F1],
-            color=[COLORS["baseline"], COLORS["mnesis"], COLORS["human"]],
-            alpha=0.85,
-            width=0.5,
-        )
-        _annotate_bars(ax0, bars)
-        ax0.set_ylim(0, 1.15)
-        ax0.set_ylabel("Token-level F1")
+        cats = sorted(CATEGORY_NAMES)
+        deltas = [
+            mnesis_by_cat.get(c, 0.0) - baseline_by_cat.get(c, 0.0) for c in cats
+        ]
+        bar_colors = ["#2ca02c" if d >= -0.02 else "#d62728" for d in deltas]
+        x = np.arange(len(cats))
+        bars = ax0.bar(x, deltas, color=bar_colors, alpha=0.85, width=0.5)
+        for bar, d in zip(bars, deltas, strict=False):
+            ax0.text(
+                bar.get_x() + bar.get_width() / 2,
+                d + (0.005 if d >= 0 else -0.015),
+                f"{d:+.2f}",
+                ha="center",
+                va="bottom" if d >= 0 else "top",
+                fontsize=9,
+                fontweight="bold",
+            )
+        ax0.axhline(0, color="black", linewidth=0.8, linestyle="-")
+        ax0.set_xticks(x)
+        ax0.set_xticklabels([CATEGORY_NAMES[c][:6] for c in cats], fontsize=8)
+        ax0.set_ylabel("F1 delta (Δ)  — closer to 0 is better")
+        overall_delta = m_overall - b_overall
+        ax0.set_title(f"F1 Delta by Category  (overall Δ {overall_delta:+.3f})")
         ax0.grid(axis="y", alpha=0.3)
-    ax0.set_title("Overall F1")
 
-    # ── top-right: F1 by category ─────────────────────────────────────
+    # ── top-right: Token usage (PRIMARY compaction metric, always shown) ──
     ax1 = fig.add_subplot(gs[0, 1])
+    if token_data:
+        n = len(token_data)
+        x = np.arange(n)
+        w = 0.35
+        before = [d["baseline"]["tokens_before_compaction"] for d in token_data]
+        after = [d["mnesis"]["tokens_after_compaction"] for d in token_data]
+        reductions = [d["mnesis"]["token_reduction_pct"] for d in token_data]
+        ax1.bar(x - w / 2, before, w, color=COLORS["baseline"], alpha=0.85, label="Before")
+        ax1.bar(x + w / 2, after, w, color=COLORS["mnesis"], alpha=0.85, label="After")
+        for i, (a, r) in enumerate(zip(after, reductions, strict=False)):
+            ax1.annotate(
+                f"-{r:.0f}%",
+                xy=(x[i] + w / 2, a),
+                xytext=(0, 5),
+                textcoords="offset points",
+                ha="center",
+                fontsize=9,
+                color=COLORS["reduction"],
+                fontweight="bold",
+            )
+        ax1.set_xticks(x)
+        ax1.set_xticklabels([f"Conv {i + 1}" for i in range(n)], fontsize=8)
+        ax1.set_ylabel("Token Count")
+        ax1.legend(fontsize=8)
+        ax1.grid(axis="y", alpha=0.3)
+    ax1.set_title("Tokens Before / After Compaction  (primary metric)")
+
+    # ── bottom-left: Absolute F1 reference ───────────────────────────
+    ax2 = fig.add_subplot(gs[1, 0])
     if metrics_only:
-        ax1.text(0.5, 0.5, "N/A\n(run without --metrics-only)", **na_kw)
-        ax1.axis("off")
+        ax2.text(0.5, 0.5, "N/A\n(run without --metrics-only)", transform=ax2.transAxes, **na_kw)
+        ax2.axis("off")
     else:
         cats = sorted(CATEGORY_NAMES)
         x = np.arange(len(cats))
         w = 0.35
-        ax1.bar(
+        ax2.bar(
             x - w / 2,
             [baseline_by_cat.get(c, 0) for c in cats],
             w,
@@ -558,7 +610,7 @@ def plot_summary(
             alpha=0.85,
             label="Baseline",
         )
-        ax1.bar(
+        ax2.bar(
             x + w / 2,
             [mnesis_by_cat.get(c, 0) for c in cats],
             w,
@@ -566,47 +618,36 @@ def plot_summary(
             alpha=0.85,
             label="Mnesis",
         )
-        ax1.axhline(HUMAN_F1, color=COLORS["human"], linestyle="--", linewidth=1)
-        ax1.set_xticks(x)
-        ax1.set_xticklabels([CATEGORY_NAMES[c][:6] for c in cats], fontsize=8)
-        ax1.set_ylim(0, 1.15)
-        ax1.set_ylabel("F1")
-        ax1.legend(fontsize=8)
-        ax1.grid(axis="y", alpha=0.3)
-    ax1.set_title("F1 by Category")
-
-    # ── bottom-left: Token usage ──────────────────────────────────────
-    ax2 = fig.add_subplot(gs[1, 0])
-    if token_data:
-        n = len(token_data)
-        x = np.arange(n)
-        w = 0.35
-        before = [d["baseline"]["tokens_before_compaction"] for d in token_data]
-        after = [d["mnesis"]["tokens_after_compaction"] for d in token_data]
-        ax2.bar(x - w / 2, before, w, color=COLORS["baseline"], alpha=0.85, label="Before")
-        ax2.bar(x + w / 2, after, w, color=COLORS["mnesis"], alpha=0.85, label="After")
         ax2.set_xticks(x)
-        ax2.set_xticklabels([f"Conv {i + 1}" for i in range(n)], fontsize=8)
-        ax2.set_ylabel("Token Count")
+        ax2.set_xticklabels([CATEGORY_NAMES[c][:6] for c in cats], fontsize=8)
+        ax2.set_ylim(0, 1.0)
+        ax2.set_ylabel("Token-level F1")
         ax2.legend(fontsize=8)
         ax2.grid(axis="y", alpha=0.3)
-    ax2.set_title("Tokens Before / After Compaction")
+    ax2.set_title("Absolute F1 by Category  (reference only — low values are expected)")
 
     # ── bottom-right: Compaction summary table ────────────────────────
     ax3 = fig.add_subplot(gs[1, 1])
     ax3.axis("off")
-    rows = [
+    rows: list[list[str]] = []
+    if not metrics_only:
+        delta_overall = m_overall - b_overall
+        rows += [
+            ["★ F1 delta (overall)", f"{delta_overall:+.3f}"],
+            ["★ Avg token reduction", f"{compact_stats.get('avg_reduction_pct', 0):.1f}%"],
+            ["", ""],
+        ]
+    rows += [
         ["Conversations evaluated", str(compact_stats.get("conversations", "—"))],
         ["Avg turns injected", f"{compact_stats.get('avg_turns', 0):.0f}"],
-        ["Avg token reduction", f"{compact_stats.get('avg_reduction_pct', 0):.1f}%"],
         ["Avg compaction level", f"{compact_stats.get('avg_level', 0):.1f}"],
         ["Avg messages compacted", f"{compact_stats.get('avg_msgs_compacted', 0):.0f}"],
     ]
     if not metrics_only:
         rows += [
+            ["", ""],
             ["Baseline overall F1", f"{b_overall:.3f}"],
             ["Mnesis overall F1", f"{m_overall:.3f}"],
-            ["F1 delta", f"{m_overall - b_overall:+.3f}"],
         ]
     tbl = ax3.table(
         cellText=rows,
@@ -616,8 +657,8 @@ def plot_summary(
     )
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(9)
-    tbl.scale(1.2, 1.6)
-    ax3.set_title("Compaction Summary", pad=20)
+    tbl.scale(1.2, 1.5)
+    ax3.set_title("Compaction Summary  (★ = primary metrics)", pad=20)
 
     fig.suptitle(
         "LOCOMO Benchmark — Mnesis Context Compaction",
@@ -816,7 +857,8 @@ async def main() -> None:
         if not args.metrics_only and baseline["results"]:
             b_f1 = overall_f1(baseline["results"])
             m_f1 = overall_f1(mnesis["results"])
-            print(f"  F1 baseline/mnesis: {b_f1:.3f} / {m_f1:.3f}  (Δ {m_f1 - b_f1:+.3f})")
+            delta = m_f1 - b_f1
+            print(f"  F1 Δ : {delta:+.3f}  (baseline {b_f1:.3f} → mnesis {m_f1:.3f})")
 
         # Clean up temporary session databases
         for db in (db_base, db_mnes):
@@ -850,12 +892,33 @@ async def main() -> None:
     }
 
     # ── console summary ────────────────────────────────────────────────
-    print("\n" + "=" * 56)
-    print("Results Summary")
-    print("=" * 56)
+    print("\n" + "=" * 60)
+    print("LOCOMO Results Summary")
+    print("=" * 60)
+
+    # Primary metrics — always shown
+    print("\n── Compaction Quality ─────────────────────────────────────")
+    reduction = compact_stats["avg_reduction_pct"]
+    level = compact_stats["avg_level"]
+    msgs = compact_stats["avg_msgs_compacted"]
+    print(f"  Avg token reduction : {reduction:.1f}%  (higher = more budget recovered)")
+    print(f"  Avg compaction level: {level:.1f}  (1=LLM structured, 3=deterministic)")
+    print(f"  Avg messages compacted: {msgs:.0f}")
+
     if not args.metrics_only and all_baseline:
-        print(f"{'Category':<16} {'Baseline':>10} {'Mnesis':>10} {'Δ':>8}")
-        print("-" * 48)
+        delta_overall = m_overall - b_overall
+        print(f"\n  Overall F1 delta (Δ): {delta_overall:+.3f}  (0.00 = no information lost)")
+        print(f"  Baseline F1 : {b_overall:.3f}  |  Mnesis F1: {m_overall:.3f}")
+        print()
+        print("  Note: absolute F1 values are reference only — LOCOMO questions")
+        print("  use exact dates/numbers that models answer with relative phrasing")
+        print("  ('yesterday' vs '7 May 2023'), scoring 0 even when correct.")
+        print("  The delta (Δ) is the meaningful metric.")
+
+        # F1 breakdown by category
+        print("\n── F1 by Category (reference) ─────────────────────────────")
+        print(f"  {'Category':<16} {'Baseline':>10} {'Mnesis':>10} {'Δ':>8}")
+        print("  " + "-" * 46)
         for cat in sorted(CATEGORY_NAMES):
             bv = baseline_by_cat.get(cat, float("nan"))
             mv = mnesis_by_cat.get(cat, float("nan"))
@@ -863,15 +926,10 @@ async def main() -> None:
             bvs = f"{bv:.3f}" if not math.isnan(bv) else "—"
             mvs = f"{mv:.3f}" if not math.isnan(mv) else "—"
             ds = f"{d:+.3f}" if not math.isnan(d) else "—"
-            print(f"{CATEGORY_NAMES[cat]:<16} {bvs:>10} {mvs:>10} {ds:>8}")
-        print("-" * 48)
-        delta_overall = m_overall - b_overall
-        print(f"{'Overall':<16} {b_overall:>10.3f} {m_overall:>10.3f} {delta_overall:>+8.3f}")
-        print(f"{'Human baseline':<16} {HUMAN_F1:>10.3f}")
-
-    print(f"\nAvg token reduction : {compact_stats['avg_reduction_pct']:.1f}%")
-    print(f"Avg compaction level: {compact_stats['avg_level']:.1f}")
-    print(f"Avg messages compacted: {compact_stats['avg_msgs_compacted']:.0f}")
+            print(f"  {CATEGORY_NAMES[cat]:<16} {bvs:>10} {mvs:>10} {ds:>8}")
+        print("  " + "-" * 46)
+        print(f"  {'Overall':<16} {b_overall:>10.3f} {m_overall:>10.3f} {delta_overall:>+8.3f}")
+        print(f"  {'Human baseline':<16} {HUMAN_F1:>10.3f}")
 
     # ── save raw results ───────────────────────────────────────────────
     out_json = args.output_dir / "locomo_results.json"
