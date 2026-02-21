@@ -61,7 +61,7 @@ Controls how large files are handled.
 | Field | Default | Description |
 |---|---|---|
 | `inline_threshold` | `10_000` | Files estimated above this token count are stored as `FileRefPart` objects |
-| `storage_dir` | `str` | Directory for external file storage. Defaults to `~/.mnesis/files/` |
+| `storage_dir` | `~/.mnesis/files/` | Directory for external file storage. Defaults to `~/.mnesis/files/` |
 | `exploration_summary_model` | `None` | Model for LLM-based file summaries. `None` = deterministic only |
 
 ---

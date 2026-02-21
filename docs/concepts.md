@@ -28,7 +28,7 @@ Level 3 is the unconditional safety net. Compaction runs **asynchronously** and 
 
 Tool outputs tend to dominate context usage in agentic sessions. The `ToolOutputPruner` scans backward through history and **tombstones** completed tool outputs that fall outside a configurable protect window (default: last 40K tokens).
 
-Tombstoned outputs are replaced with compact `CompactionMarkerPart` records in the Active Context, preserving the reference while reclaiming token space. The full output is still in the immutable store and can be retrieved at any time.
+Tombstoned outputs are replaced with compact string markers like `"[Tool 'tool_name' output compacted at timestamp]"` in the Active Context, preserving the reference while reclaiming token space. The full output is still in the immutable store and can be retrieved at any time.
 
 ## Large File References
 

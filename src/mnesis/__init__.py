@@ -29,8 +29,8 @@ from mnesis.models import (
     ToolPart,
     TurnResult,
 )
-from mnesis.operators.agentic_map import AgenticMap, AgentMapResult
-from mnesis.operators.llm_map import LLMMap, MapResult
+from mnesis.operators.agentic_map import AgenticMap, AgentMapBatch, AgentMapResult
+from mnesis.operators.llm_map import LLMMap, MapBatch, MapResult
 from mnesis.session import MnesisSession
 from mnesis.store.immutable import MnesisStoreError, SessionNotFoundError
 from mnesis.tokens.estimator import TokenEstimator
@@ -38,6 +38,7 @@ from mnesis.tokens.estimator import TokenEstimator
 __version__ = "0.1.1"
 
 __all__ = [
+    "AgentMapBatch",
     "AgentMapResult",
     "AgenticMap",
     "CompactionConfig",
@@ -47,6 +48,7 @@ __all__ = [
     "FileRefPart",
     "FinishReason",
     "LLMMap",
+    "MapBatch",
     "MapResult",
     "MessagePart",
     "MessageWithParts",
