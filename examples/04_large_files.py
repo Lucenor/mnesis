@@ -136,8 +136,7 @@ async def main() -> None:
     store = ImmutableStore(store_config)
     await store.initialize()
 
-    estimator = TokenEstimator()
-    estimator._force_heuristic = True  # Use heuristic for demo
+    estimator = TokenEstimator(heuristic_only=True)  # Use heuristic for demo
 
     file_config = FileConfig(inline_threshold=500)  # Very low for demo
     handler = LargeFileHandler(store, estimator, file_config)

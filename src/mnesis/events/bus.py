@@ -153,7 +153,11 @@ class EventBus:
 
     def unsubscribe(self, event: MnesisEvent, handler: Handler) -> None:
         """
-        Remove a previously registered handler. No-op if not found.
+        Remove a previously registered handler.
+
+        **Silent no-op** if ``handler`` is not registered for ``event`` — this
+        matches the behaviour of most event systems and makes teardown code safe
+        to call unconditionally without tracking registration state.
 
         Args:
             event: The event type the handler was registered for.
@@ -162,6 +166,26 @@ class EventBus:
         handlers = self._handlers.get(event, [])
         try:
             handlers.remove(handler)
+        except ValueError:
+            pass
+
+    def unsubscribe_all(self, handler: Handler) -> None:
+        """
+        Remove ``handler`` from all event types and from the global handler list.
+
+        Mirrors :meth:`subscribe_all` for symmetric cleanup. **Silent no-op**
+        for any event type or global slot where ``handler`` is not registered.
+
+        Args:
+            handler: The handler callable to remove everywhere.
+        """
+        for handlers in self._handlers.values():
+            try:
+                handlers.remove(handler)
+            except ValueError:
+                pass
+        try:
+            self._global_handlers.remove(handler)
         except ValueError:
             pass
 

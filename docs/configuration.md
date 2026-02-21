@@ -3,8 +3,7 @@
 All configuration is done through `MnesisConfig`, which groups settings into sub-configs. Every field has a sensible default — you only need to override what you want to change.
 
 ```python
-from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig, SessionConfig
-from mnesis.models.config import StoreConfig, OperatorConfig
+from mnesis import MnesisSession, MnesisConfig, CompactionConfig, FileConfig, SessionConfig, StoreConfig, OperatorConfig
 
 config = MnesisConfig(
     compaction=CompactionConfig(...),
