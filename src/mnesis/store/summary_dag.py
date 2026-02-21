@@ -24,11 +24,35 @@ class SummaryDAGStore:
 
     This store never writes to the database directly — all writes go through
     ``ImmutableStore.append_message()`` and ``ImmutableStore.append_part()``.
+
+    Superseded nodes are tracked in an in-memory set (``_superseded_ids``).
+    When condensation produces a new node that replaces its parents, those
+    parent IDs are recorded here so that ``get_active_nodes()`` excludes them
+    from subsequent rounds.
     """
 
     def __init__(self, store: ImmutableStore) -> None:
         self._store = store
         self._logger = structlog.get_logger("mnesis.summary_dag")
+        self._superseded_ids: set[str] = set()
+
+    def mark_superseded(self, node_ids: list[str]) -> None:
+        """
+        Mark one or more summary nodes as superseded by a condensed node.
+
+        Superseded nodes are excluded from future ``get_active_nodes()`` calls
+        so that the condensation loop does not re-process already-merged nodes.
+
+        Args:
+            node_ids: IDs of the summary nodes that have been consumed by a
+                condensation operation.
+        """
+        self._superseded_ids.update(node_ids)
+        self._logger.debug(
+            "nodes_marked_superseded",
+            node_ids=node_ids,
+            total_superseded=len(self._superseded_ids),
+        )
 
     async def get_active_nodes(self, session_id: str) -> list[SummaryNode]:
         """
@@ -46,6 +70,8 @@ class SummaryDAGStore:
         summary_messages = [m for m in messages if m.is_summary]
         nodes = []
         for i, summary_msg in enumerate(summary_messages):
+            if summary_msg.id in self._superseded_ids:
+                continue
             node = await self._build_node_from_message(summary_msg, messages, i)
             if node is not None:
                 nodes.append(node)

@@ -242,13 +242,12 @@ class CompactionEngine:
         return True
 
     async def wait_for_pending(self) -> None:
-        """Await any in-flight background compaction task, then clear it."""
+        """Await any in-flight background compaction task to natural completion, then clear it."""
         task = self._pending_task
         if task is not None and not task.done():
-            task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except Exception:
                 pass
         self._pending_task = None
 
@@ -407,11 +406,7 @@ class CompactionEngine:
         span_end_idx = non_summary.index(span_end_msg)
         tokens_after = (
             tokens_before
-            - sum(
-                self._estimator.estimate_message(m)
-                for m in non_summary[: span_end_idx + 1]
-                if m.id != candidate.span_end_message_id
-            )
+            - sum(self._estimator.estimate_message(m) for m in non_summary[: span_end_idx + 1])
             + candidate.token_count
         )
 
@@ -471,6 +466,9 @@ class CompactionEngine:
                 await self._dag_store.insert_node(
                     condensed_node, id_generator=lambda: self._id_gen("part")
                 )
+                # Mark consumed nodes as superseded so get_active_nodes()
+                # excludes them in subsequent rounds.
+                self._dag_store.mark_superseded(cond.parent_node_ids)
 
                 last_summary_msg_id = condensed_msg_id
                 last_summary_level = cond.compaction_level

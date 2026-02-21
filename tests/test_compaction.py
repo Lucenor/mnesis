@@ -374,18 +374,27 @@ class TestCompactionEngine:
         # Clean up background task
         await engine.wait_for_pending()
 
-    async def test_wait_for_pending_cancels_in_flight_task(
+    async def test_wait_for_pending_awaits_in_flight_task(
         self, estimator, event_bus, store, dag_store, config
     ):
-        """wait_for_pending cancels an in-flight task and clears _pending_task."""
+        """wait_for_pending awaits the task to natural completion and clears _pending_task."""
         engine = CompactionEngine(
             store, dag_store, estimator, event_bus, config, id_generator=lambda p: f"{p}_wait"
         )
-        task = asyncio.create_task(asyncio.sleep(60))
+        completed = False
+
+        async def _short_task() -> None:
+            nonlocal completed
+            await asyncio.sleep(0)
+            completed = True
+
+        task = asyncio.create_task(_short_task())
         engine._pending_task = task
         await engine.wait_for_pending()
         assert engine._pending_task is None
-        assert task.cancelled()
+        # Task must have run to completion, not been cancelled.
+        assert not task.cancelled()
+        assert completed
 
     async def test_run_compaction_returns_zero_result_for_empty_session(
         self, session_id, store, dag_store, estimator, event_bus, config
