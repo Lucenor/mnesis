@@ -169,7 +169,7 @@ The files under `docs/api/` are auto-generated from Python docstrings via `mkdoc
 
 - **Docstrings**: Google style (`Args:`, `Returns:`, `Raises:`, `Example::`). All public classes and methods must have a docstring.
 - **Callouts**: Use [MkDocs admonitions](https://squidfunk.github.io/mkdocs-material/reference/admonitions/) (`!!! note`, `!!! warning`, etc.) for callout blocks — not raw blockquotes.
-- **Diagrams**: Use [Mermaid](https://mermaid.js.org/) fenced code blocks (` ```mermaid `) for flowcharts and sequence diagrams.
+- **Diagrams**: Use [Mermaid](https://mermaid.js.org/) fenced code blocks (`` ```mermaid ``) for flowcharts and sequence diagrams.
 - **Code examples**: Keep examples minimal and runnable. Prefer `MNESIS_MOCK_LLM=1` patterns so readers can try them without API keys.
 
 ---
