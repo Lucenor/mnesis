@@ -641,23 +641,23 @@ class TestDAGSupersession:
         assert any(n.id == "node_sup_a" for n in before)
         assert any(n.id == "node_sup_b" for n in before)
 
-        dag_store.mark_superseded(["node_sup_a"])
+        await dag_store.mark_superseded(["node_sup_a"])
 
         after = await dag_store.get_active_nodes(session_id)
         assert not any(n.id == "node_sup_a" for n in after)
         # node_sup_b is still active
         assert any(n.id == "node_sup_b" for n in after)
 
-    def test_mark_superseded_multiple_calls_accumulate(self, store, dag_store):
+    async def test_mark_superseded_multiple_calls_accumulate(self, store, dag_store):
         """mark_superseded accumulates across multiple calls."""
-        dag_store.mark_superseded(["n1", "n2"])
-        dag_store.mark_superseded(["n3"])
+        await dag_store.mark_superseded(["n1", "n2"])
+        await dag_store.mark_superseded(["n3"])
         assert dag_store._superseded_ids == {"n1", "n2", "n3"}
 
-    def test_mark_superseded_idempotent(self, store, dag_store):
+    async def test_mark_superseded_idempotent(self, store, dag_store):
         """Marking the same node superseded twice is safe."""
-        dag_store.mark_superseded(["n1"])
-        dag_store.mark_superseded(["n1"])
+        await dag_store.mark_superseded(["n1"])
+        await dag_store.mark_superseded(["n1"])
         assert dag_store._superseded_ids == {"n1"}
 
     async def test_condensation_marks_parents_superseded(
