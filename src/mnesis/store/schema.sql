@@ -96,22 +96,29 @@ CREATE TABLE IF NOT EXISTS file_references (
 CREATE INDEX IF NOT EXISTS idx_file_refs_path
     ON file_references(path);
 
--- ── Summary Nodes (Phase 2 — table exists at MVP for future migration) ────────
+-- ── Summary Nodes ─────────────────────────────────────────────────────────────
+-- span_start/end_message_id have no FK constraint — they may reference pruned messages.
+-- kind, parent_node_ids, superseded added in Phase 3 (DAG persistence).
+-- For existing databases these columns are added via Python ALTER TABLE migration
+-- in ImmutableStore.initialize().
 
 CREATE TABLE IF NOT EXISTS summary_nodes (
     id                    TEXT PRIMARY KEY,
     session_id            TEXT NOT NULL REFERENCES sessions(id),
     level                 INTEGER NOT NULL DEFAULT 0,
-    span_start_message_id TEXT NOT NULL REFERENCES messages(id),
-    span_end_message_id   TEXT NOT NULL REFERENCES messages(id),
-    content               TEXT NOT NULL,
+    span_start_message_id TEXT NOT NULL DEFAULT '',
+    span_end_message_id   TEXT NOT NULL DEFAULT '',
+    content               TEXT NOT NULL DEFAULT '',
     token_count           INTEGER NOT NULL DEFAULT 0,
     created_at            INTEGER NOT NULL,
-    parent_node_id        TEXT REFERENCES summary_nodes(id),
+    parent_node_id        TEXT,
     model_id              TEXT NOT NULL DEFAULT '',
     provider_id           TEXT NOT NULL DEFAULT '',
     compaction_level      INTEGER NOT NULL DEFAULT 1,
-    is_active             INTEGER NOT NULL DEFAULT 1
+    is_active             INTEGER NOT NULL DEFAULT 1,
+    kind                  TEXT NOT NULL DEFAULT 'leaf',
+    parent_node_ids       TEXT NOT NULL DEFAULT '[]',
+    superseded            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_summary_nodes_session
@@ -119,3 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_summary_nodes_session
 
 CREATE INDEX IF NOT EXISTS idx_summary_nodes_span
     ON summary_nodes(session_id, span_start_message_id, span_end_message_id);
+
+-- idx_summary_nodes_active is created in ImmutableStore.initialize() after the
+-- Phase 3 ALTER TABLE migration so that it is safe for existing databases where
+-- the superseded column may not yet exist when executescript() runs.
