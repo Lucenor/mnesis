@@ -76,7 +76,9 @@ nav:
       - Providers: providers.md
       - BYO-LLM: byo-llm.md
   - Concepts: concepts.md
+  - Architecture: architecture.md
   - Configuration: configuration.md
+  - Operators: operators.md
   - Events: events.md
   - Examples: examples.md
   - API Reference: api/
