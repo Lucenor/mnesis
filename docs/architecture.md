@@ -302,7 +302,7 @@ stateDiagram-v2
     Blocking --> Idle : compaction completes
 
     Compacting --> CompactFailed : unhandled exception
-    CompactFailed --> Idle : Level 3 always produces a fallback result
+    CompactFailed --> Idle : COMPACTION_FAILED published; stub CompactionResult returned
 ```
 
 ### Thresholds
@@ -321,8 +321,11 @@ stateDiagram-v2
 ### `run_compaction()` sequence
 
 `CompactionEngine.run_compaction()` is the outer entry point. It wraps
-`_run_compaction_inner()` in a `try/except` so that any unhandled error causes
-Level 3 to run rather than crashing.
+`_run_compaction_inner()` in a `try/except` so that unexpected exceptions do
+not crash the caller. On exception, `COMPACTION_FAILED` is published and a
+stub `CompactionResult` (no summary committed) is returned. Level 3 is not
+forced by this handler — Level 3 is only the final fallback inside
+`_run_summarisation()` when Level 1/2 return `None`.
 
 The inner sequence for each round:
 
@@ -453,7 +456,11 @@ step of every compaction pass.
 
 The pruner scans the message history backward, tracking:
 
-- **Protected: two most recent user turns** — `user_turn_count < 2`: skip.
+- **Protected: most recent user turn** — `user_turn_count < 2`: skip all
+  messages until the backward scan has encountered 2 user turns. In practice
+  this protects the most recent user turn and all messages between it and the
+  second-most-recent user turn; the second-most-recent user turn itself is
+  the first message that is eligible for pruning.
 - **Protected: summary message boundaries** — stop scanning when
   `msg.is_summary` is encountered. Tool outputs before the last compaction
   boundary are not re-pruned.
@@ -463,7 +470,7 @@ The pruner scans the message history backward, tracking:
 - **Protect window**: a rolling token count accumulates output tokens. Parts
   that push the cumulative total above `prune_protect_tokens` (default 40,000)
   are candidates; those within the window are skipped.
-- **Minimum volume gate**: if total prunable tokens < `prune_minimum_tokens`
+- **Minimum volume gate**: if total prunable tokens <= `prune_minimum_tokens`
   (default 20,000), the entire prune pass is skipped — no tombstones are
   written.
 

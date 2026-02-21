@@ -147,9 +147,11 @@ before JSON parsing. If parsing or validation fails, the item is retried.
 **Source:** `src/mnesis/operators/agentic_map.py`
 
 `AgenticMap` spawns one full `MnesisSession` per input item and runs multi-turn
-reasoning inside each. Sub-sessions are fully isolated — they do not share
-conversation history, storage, or compaction state with each other or with any
-parent session.
+reasoning inside each. Sub-sessions are isolated at the session level: they do
+not share conversation history or compaction state with each other or with any
+parent session, even though they typically persist into the same underlying
+store (the same SQLite database via a shared `StorePool`) under different
+`session_id`s.
 
 Use `AgenticMap` instead of `LLMMap` when:
 
@@ -335,9 +337,13 @@ async for result in llm_map.run(inputs=items, ...):
   `max_retries`, but does **not** apply the exponential backoff. Timeout retries
   proceed immediately on the next attempt.
 
-`AgenticMap` does not implement per-item retries — sub-agent sessions either
-succeed or fail as a whole. Errors are surfaced in `AgentMapResult.error` and
-`AgentMapResult.error_kind`.
+`AgenticMap` does not implement per-item retries. Only failures that propagate
+as unhandled exceptions out of the sub-session loop are captured in
+`AgentMapResult.error` and `AgentMapResult.error_kind`. LLM provider errors
+that `MnesisSession.send()` catches internally and converts to a `TurnResult`
+with `finish_reason="error"` are treated as completed turns — in those cases
+`AgentMapResult.success` may still be `True` and the error details appear in
+the final turn's `output_text`.
 
 ### `MapResult` fields
 
@@ -462,12 +468,13 @@ batch.total_attempts  # int (always 1 per item for AgenticMap)
 
 ## Permission Restrictions
 
-`AgenticMap` enforces the following restrictions on sub-sessions, derived
+`AgenticMap` operates under the following constraints on sub-sessions, derived
 directly from the source:
 
-- Sub-sessions **cannot spawn further sub-agents**. Passing another
-  `AgenticMap` as a tool is not prevented at the API level, but the
-  `parent_id` chain and the operator's design assume a single level of nesting.
+- Further sub-agents are **not supported**. `AgenticMap` is designed for a
+  single level of nesting; the `parent_id` chain assumes this. Passing another
+  `AgenticMap` as a tool is not prevented at runtime, but the behavior is
+  undefined and not tested.
 
 - `read_only=True` **raises `NotImplementedError`** (not yet implemented).
   Always pass `read_only=False` to proceed. Write-tool filtering is planned
