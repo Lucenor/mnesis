@@ -81,6 +81,7 @@ class Session:
         "model_id",
         "parent_id",
         "provider_id",
+        "system_prompt",
         "title",
         "updated_at",
     )
@@ -97,6 +98,7 @@ class Session:
         title: str | None,
         is_active: bool,
         metadata: dict[str, Any] | None,
+        system_prompt: str = "",
     ) -> None:
         self.id = id
         self.parent_id = parent_id
@@ -108,6 +110,7 @@ class Session:
         self.title = title
         self.is_active = is_active
         self.metadata = metadata
+        self.system_prompt = system_prompt
 
 
 class RawMessagePart:
@@ -244,6 +247,14 @@ class ImmutableStore:
         await conn.executescript(schema)
         await conn.commit()
 
+        # Wave 1 migration: persist system_prompt on the sessions table.
+        try:
+            await conn.execute(
+                "ALTER TABLE sessions ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''"
+            )
+        except aiosqlite.OperationalError:
+            pass  # Column already exists
+
         # Phase 3 migration: add DAG columns to summary_nodes for existing databases.
         # CREATE TABLE IF NOT EXISTS is a no-op for pre-existing tables, so we must
         # ALTER TABLE to add new columns.  Each ADD COLUMN is wrapped in try/except
@@ -301,6 +312,7 @@ class ImmutableStore:
         parent_id: str | None = None,
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
+        system_prompt: str = "",
     ) -> Session:
         """
         Insert a new session row.
@@ -313,6 +325,8 @@ class ImmutableStore:
             parent_id: Optional parent session ID for sub-sessions.
             title: Optional human-readable title.
             metadata: Optional JSON-serializable metadata dict.
+            system_prompt: System prompt for this session. Persisted so that
+                ``load()`` can restore the original prompt on resume.
 
         Returns:
             The created Session.
@@ -328,10 +342,21 @@ class ImmutableStore:
                 """
                 INSERT INTO sessions
                     (id, parent_id, created_at, updated_at,
-                     model_id, provider_id, agent, title, is_active, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                     model_id, provider_id, agent, title, is_active, metadata, system_prompt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 """,
-                (id, parent_id, now, now, model_id, provider_id, agent, title, meta_json),
+                (
+                    id,
+                    parent_id,
+                    now,
+                    now,
+                    model_id,
+                    provider_id,
+                    agent,
+                    title,
+                    meta_json,
+                    system_prompt,
+                ),
             )
             await conn.commit()
         except aiosqlite.IntegrityError as exc:
@@ -348,6 +373,7 @@ class ImmutableStore:
             title=title,
             is_active=True,
             metadata=metadata,
+            system_prompt=system_prompt,
         )
 
     async def get_session(self, session_id: str) -> Session:
@@ -1004,6 +1030,11 @@ class ImmutableStore:
 
     def _row_to_session(self, row: aiosqlite.Row) -> Session:
         meta = json.loads(row["metadata"]) if row["metadata"] else None
+        # system_prompt column added in Wave 1 migration; guard for pre-migration DBs.
+        try:
+            system_prompt: str = row["system_prompt"] or ""
+        except IndexError:
+            system_prompt = ""
         return Session(
             id=row["id"],
             parent_id=row["parent_id"],
@@ -1015,6 +1046,7 @@ class ImmutableStore:
             title=row["title"],
             is_active=bool(row["is_active"]),
             metadata=meta,
+            system_prompt=system_prompt,
         )
 
     def _row_to_message(self, row: aiosqlite.Row) -> Message:

@@ -11,24 +11,19 @@ Primary entry point::
 """
 
 from mnesis.events.bus import EventBus, MnesisEvent
-from mnesis.files.handler import FileHandleResult, LargeFileHandler
 from mnesis.models import (
     CompactionConfig,
     CompactionResult,
-    ContextBudget,
     FileConfig,
-    FileReference,
     FileRefPart,
-    Message,
     MessagePart,
     MessageWithParts,
     MnesisConfig,
     ModelInfo,
     OperatorConfig,
-    PruneResult,
     RecordResult,
+    SessionConfig,
     StoreConfig,
-    SummaryNode,
     TextPart,
     TokenUsage,
     ToolPart,
@@ -36,7 +31,8 @@ from mnesis.models import (
 )
 from mnesis.operators.agentic_map import AgenticMap, AgentMapResult
 from mnesis.operators.llm_map import LLMMap, MapResult
-from mnesis.session import MnesisSession, make_id
+from mnesis.session import MnesisSession
+from mnesis.store.immutable import MnesisStoreError, SessionNotFoundError
 from mnesis.tokens.estimator import TokenEstimator
 
 __version__ = "0.1.0"
@@ -46,31 +42,26 @@ __all__ = [
     "AgenticMap",
     "CompactionConfig",
     "CompactionResult",
-    "ContextBudget",
     "EventBus",
     "FileConfig",
-    "FileHandleResult",
     "FileRefPart",
-    "FileReference",
     "LLMMap",
-    "LargeFileHandler",
     "MapResult",
-    "Message",
     "MessagePart",
     "MessageWithParts",
     "MnesisConfig",
     "MnesisEvent",
     "MnesisSession",
+    "MnesisStoreError",
     "ModelInfo",
     "OperatorConfig",
-    "PruneResult",
     "RecordResult",
+    "SessionConfig",
+    "SessionNotFoundError",
     "StoreConfig",
-    "SummaryNode",
     "TextPart",
     "TokenEstimator",
     "TokenUsage",
     "ToolPart",
     "TurnResult",
-    "make_id",
 ]

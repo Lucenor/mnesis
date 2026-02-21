@@ -114,9 +114,10 @@ class MnesisSession:
             model: LLM model string in litellm format (e.g. ``"anthropic/claude-opus-4-6"``).
             agent: Agent role name for multi-agent setups.
             parent_id: Parent session ID for sub-sessions (AgenticMap).
-            config: Mnesis configuration. Defaults to ``MnesisConfig.default()``.
+            config: Mnesis configuration. Defaults to ``MnesisConfig()``.
             system_prompt: System prompt for all turns in this session.
-            db_path: Override database path (useful for testing).
+            db_path: Override database path (useful for testing). Raises ``ValueError``
+                if both ``db_path`` and ``config.store.db_path`` are supplied.
             pool: Optional shared connection pool.  When provided, all sessions
                 pointing at the same ``db_path`` share a single connection,
                 avoiding SQLite write-lock contention between concurrent
@@ -127,17 +128,27 @@ class MnesisSession:
             An initialized MnesisSession ready to receive messages.
 
         Raises:
+            ValueError: If both ``db_path`` and ``config.store.db_path`` are supplied.
             aiosqlite.Error: If the database cannot be initialized.
         """
-        cfg = config or MnesisConfig.default()
-        if db_path:
-            cfg = cfg.model_copy(update={"store": StoreConfig(db_path=db_path)})
+        cfg = config or MnesisConfig()
+        if db_path is not None:
+            _default_db_path = StoreConfig().db_path
+            if config is not None and cfg.store.db_path != _default_db_path:
+                raise ValueError(
+                    "Specify db_path either via db_path= or config.store.db_path, not both."
+                )
+            cfg = cfg.model_copy(
+                update={"store": cfg.store.model_copy(update={"db_path": db_path})}
+            )
 
         store = ImmutableStore(cfg.store, pool=pool)
         await store.initialize()
 
         session_id = make_id("sess")
         model_info = ModelInfo.from_model_string(model)
+        if cfg.model_overrides:
+            model_info = model_info.model_copy(update=cfg.model_overrides)
         provider = model_info.provider_id
 
         await store.create_session(
@@ -146,6 +157,7 @@ class MnesisSession:
             provider_id=provider,
             agent=agent,
             parent_id=parent_id,
+            system_prompt=system_prompt,
         )
 
         dag_store = SummaryDAGStore(store)
@@ -206,15 +218,26 @@ class MnesisSession:
         Raises:
             SessionNotFoundError: If the session does not exist.
         """
-        cfg = config or MnesisConfig.default()
-        if db_path:
-            cfg = cfg.model_copy(update={"store": StoreConfig(db_path=db_path)})
+        cfg = config or MnesisConfig()
+        if db_path is not None:
+            _default_db_path = StoreConfig().db_path
+            if config is not None and cfg.store.db_path != _default_db_path:
+                raise ValueError(
+                    "Specify db_path either via db_path= or config.store.db_path, not both."
+                )
+            cfg = cfg.model_copy(
+                update={"store": cfg.store.model_copy(update={"db_path": db_path})}
+            )
 
         store = ImmutableStore(cfg.store, pool=pool)
         await store.initialize()
 
         db_session = await store.get_session(session_id)
-        model = db_session.model_id or "anthropic/claude-opus-4-6"
+        if not db_session.model_id:
+            raise ValueError(
+                f"Session {session_id!r} has no stored model_id; pass model= explicitly"
+            )
+        model = db_session.model_id
         model_info = ModelInfo.from_model_string(model)
 
         dag_store = SummaryDAGStore(store)
@@ -236,7 +259,7 @@ class MnesisSession:
             model=model,
             model_info=model_info,
             config=cfg,
-            system_prompt="You are a helpful assistant.",
+            system_prompt=db_session.system_prompt,
             agent=db_session.agent,
             store=store,
             dag_store=dag_store,
@@ -489,7 +512,7 @@ class MnesisSession:
 
     def _check_doom_loop(self) -> bool:
         """Detect consecutive identical tool calls."""
-        threshold = self._config.doom_loop_threshold
+        threshold = self._config.session.doom_loop_threshold
         if len(self._recent_tool_calls) < threshold:
             return False
         last_n = self._recent_tool_calls[-threshold:]
