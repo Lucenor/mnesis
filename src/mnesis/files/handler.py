@@ -109,7 +109,7 @@ class LargeFileHandler:
     **Construction:** prefer the :meth:`from_session` factory to avoid
     constructing internal objects directly::
 
-        async with await MnesisSession.create(model="...") as session:
+        async with MnesisSession.open(model="...") as session:
             handler = LargeFileHandler.from_session(session)
             result = await handler.handle_file("/path/to/large.py")
             if result.is_inline:
@@ -153,7 +153,7 @@ class LargeFileHandler:
 
         Example::
 
-            async with await MnesisSession.create(model="...") as session:
+            async with MnesisSession.open(model="...") as session:
                 handler = LargeFileHandler.from_session(session)
                 result = await handler.handle_file("/path/to/file.py")
         """
@@ -166,7 +166,7 @@ class LargeFileHandler:
 
     async def handle_file(
         self,
-        path: str,
+        path: str | Path,
         *,
         content: str | bytes | None = None,
     ) -> FileHandleResult:
@@ -175,25 +175,30 @@ class LargeFileHandler:
 
         Args:
             path: File path (used for display and type detection).
+                Accepts both ``str`` and :class:`pathlib.Path`.
             content: Pre-read content. If None, reads from disk.
 
         Returns:
             FileHandleResult with either inline content or a FileRefPart.
         """
+        # Normalise path to str at the boundary so all downstream code
+        # (FileRefPart, FileHandleResult, logging) always receives a str.
+        path_str = str(path)
+
         # Read content if not provided
         if content is None:
-            file_path = Path(path)
+            file_path = Path(path_str)
             if not file_path.exists():  # noqa: ASYNC240
                 return FileHandleResult(
-                    path=path,
-                    inline_content=f"[File not found: {path}]",
+                    path=path_str,
+                    inline_content=f"[File not found: {path_str}]",
                 )
             try:
                 content = file_path.read_text(encoding="utf-8", errors="replace")  # noqa: ASYNC240
             except Exception as exc:
                 return FileHandleResult(
-                    path=path,
-                    inline_content=f"[Error reading {path}: {exc}]",
+                    path=path_str,
+                    inline_content=f"[Error reading {path_str}: {exc}]",
                 )
 
         # Normalize to string
@@ -206,7 +211,7 @@ class LargeFileHandler:
         token_count = self._estimator.estimate(content_str)
 
         if token_count < self._config.inline_threshold:
-            return FileHandleResult(path=path, inline_content=content_str)
+            return FileHandleResult(path=path_str, inline_content=content_str)
 
         # Compute content hash for deduplication
         content_id = hashlib.sha256(content_str.encode("utf-8")).hexdigest()
@@ -214,12 +219,12 @@ class LargeFileHandler:
         # Check cache
         existing = await self._store.get_file_reference(content_id)
         if existing is not None:
-            self._logger.debug("file_cache_hit", path=path, content_id=content_id[:12])
+            self._logger.debug("file_cache_hit", path=path_str, content_id=content_id[:12])
             return FileHandleResult(
-                path=path,
+                path=path_str,
                 file_ref=FileRefPart(
                     content_id=existing.content_id,
-                    path=path,
+                    path=path_str,
                     file_type=existing.file_type,
                     token_count=existing.token_count,
                     exploration_summary=existing.exploration_summary,
@@ -227,13 +232,13 @@ class LargeFileHandler:
             )
 
         # Generate exploration summary
-        file_type = self._detect_file_type(path, content_str)
-        summary = self._generate_exploration_summary(path, content_str, file_type)
+        file_type = self._detect_file_type(path_str, content_str)
+        summary = self._generate_exploration_summary(path_str, content_str, file_type)
 
         # Store reference
         ref = FileReference(
             content_id=content_id,
-            path=path,
+            path=path_str,
             file_type=file_type,
             token_count=token_count,
             exploration_summary=summary,
@@ -242,17 +247,17 @@ class LargeFileHandler:
 
         self._logger.info(
             "file_reference_created",
-            path=path,
+            path=path_str,
             file_type=file_type,
             token_count=token_count,
             content_id=content_id[:12],
         )
 
         return FileHandleResult(
-            path=path,
+            path=path_str,
             file_ref=FileRefPart(
                 content_id=content_id,
-                path=path,
+                path=path_str,
                 file_type=file_type,
                 token_count=token_count,
                 exploration_summary=summary,
