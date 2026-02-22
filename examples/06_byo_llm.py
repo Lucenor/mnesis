@@ -89,7 +89,7 @@ async def main() -> None:
 
     system_prompt = "You are a helpful science tutor. Be concise and accurate."
 
-    async with await MnesisSession.create(
+    async with MnesisSession.open(
         model="anthropic/claude-opus-4-6",
         system_prompt=system_prompt,
         db_path="/tmp/mnesis_example_06.db",
@@ -107,10 +107,9 @@ async def main() -> None:
         for i, question in enumerate(questions):
             print(f"Turn {i + 1}: {question}")
 
-            # 1. Build the message list from mnesis context
+            # 1. Get compaction-aware context from mnesis (already serialized for any chat API)
             #    (normally you'd pass this to your SDK so the model sees history)
-            context = await session.messages()
-            llm_messages = [{"role": m.role, "content": m.text_content()} for m in context]
+            llm_messages = await session.context_for_next_turn()
             llm_messages.append({"role": "user", "content": question})
 
             # 2. Call your own LLM
