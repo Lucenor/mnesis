@@ -25,10 +25,13 @@ def on_post_page(output: str, **kwargs: object) -> str:
 
     def add_cfasync(m: re.Match[str]) -> str:
         tag = m.group(0)
-        if "data-cfasync" in tag:
+        tag_lower = tag.lower()
+        if "data-cfasync" in tag_lower:
             return tag  # already patched
-        if 'type="module"' in tag or "mermaid" in tag.lower():
-            return tag.replace("<script", '<script data-cfasync="false"', 1)
+        if 'type="module"' in tag_lower or "mermaid" in tag_lower:
+            # Preserve original case of the opening tag name while inserting the attribute.
+            open_tag = m.group(1)
+            return tag.replace(open_tag, open_tag + ' data-cfasync="false"', 1)
         return tag
 
-    return re.sub(r"<script[^>]*>", add_cfasync, output)
+    return re.sub(r"(<script)([^>]*>)", add_cfasync, output, flags=re.IGNORECASE)
