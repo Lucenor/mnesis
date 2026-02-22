@@ -28,7 +28,7 @@
       mutations.forEach(function (mutation) {
         mutation.addedNodes.forEach(function (node) {
           if (node.nodeType !== 1) return
-          if (node.tagName === "svg" && node.closest && node.closest(".mermaid")) {
+          if (node.tagName && node.tagName.toLowerCase() === "svg" && node.closest && node.closest(".mermaid")) {
             applyPanzoom(node)
           } else if (node.querySelectorAll) {
             node.querySelectorAll(".mermaid svg").forEach(applyPanzoom)
