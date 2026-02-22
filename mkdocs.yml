@@ -9,8 +9,7 @@ extra_css:
   - stylesheets/extra.css
 
 extra_javascript:
-  - path: javascripts/panzoom-diagrams.js
-    type: module
+  - javascripts/panzoom-bundle.js
 
 theme:
   name: material
