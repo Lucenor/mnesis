@@ -41,7 +41,7 @@ def on_page_markdown(
 
 def _render_svg(source: str, config: Any) -> str | None:
     """Render mermaid source to inline SVG string, with caching."""
-    cache_key = hashlib.sha256(source.encode()).hexdigest()[:16]
+    cache_key = hashlib.sha256(source.encode()).hexdigest()
     cache_dir = Path(config["docs_dir"]).parent / ".mermaid-cache"
     cache_dir.mkdir(exist_ok=True)
     cache_file = cache_dir / f"{cache_key}.svg"
@@ -71,11 +71,16 @@ def _render_svg(source: str, config: Any) -> str | None:
             timeout=30,
         )
     except FileNotFoundError:
-        log.error(
+        log.warning(
             "mmdc not found — install @mermaid-js/mermaid-cli"
             " (npm install -g @mermaid-js/mermaid-cli)"
         )
         input_path.unlink(missing_ok=True)
+        return None
+    except subprocess.TimeoutExpired:
+        log.warning("mmdc timed out after 30 s; leaving diagram block unchanged")
+        input_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
         return None
     finally:
         input_path.unlink(missing_ok=True)

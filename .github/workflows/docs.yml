@@ -50,7 +50,7 @@ jobs:
           node-version: '20'
 
       - name: Install Mermaid CLI
-        run: npm install -g @mermaid-js/mermaid-cli
+        run: npm install -g @mermaid-js/mermaid-cli@11.4.1
 
       - name: Build docs
         run: uv run mkdocs build
