@@ -10,7 +10,7 @@ extra_css:
 
 extra_javascript:
   - path: javascripts/panzoom-diagrams.js
-    defer: true
+    type: module
 
 theme:
   name: material
