@@ -44,13 +44,8 @@ jobs:
       - name: Install docs dependencies
         run: uv sync --group docs
 
-      - name: Set up Node.js
-        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
-        with:
-          node-version: '20'
-
-      - name: Install Mermaid CLI
-        run: npm install -g @mermaid-js/mermaid-cli@11.4.1
+      - name: Install D2
+        run: curl -fsSL https://d2lang.com/install.sh | sh -s --
 
       - name: Build docs
         run: uv run mkdocs build
