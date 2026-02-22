@@ -701,6 +701,9 @@ def replot(results_path: Path, output_dir: Path) -> None:
     try:
         with results_path.open() as f:
             data: dict[str, Any] = json.load(f)
+    except OSError as exc:
+        print(f"ERROR: Could not read {results_path}: {exc}")
+        sys.exit(1)
     except json.JSONDecodeError as exc:
         print(f"ERROR: Could not parse {results_path}: {exc}")
         sys.exit(1)
@@ -743,7 +746,11 @@ def replot(results_path: Path, output_dir: Path) -> None:
 
     compact_stats: dict[str, Any] = data.get("compact_stats", {})
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"ERROR: Could not create output directory '{output_dir}': {exc}", file=sys.stderr)
+        sys.exit(1)
     print(f"Replotting from: {results_path}")
     print(f"Output dir     : {output_dir}\n")
     print("Generating plots…")
