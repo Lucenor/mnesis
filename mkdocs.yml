@@ -8,11 +8,9 @@ edit_uri: edit/main/docs/
 extra_css:
   - stylesheets/extra.css
 
-extra_javascript:
-  - javascripts/panzoom-bundle.js
-
 theme:
   name: material
+  custom_dir: docs/overrides
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
