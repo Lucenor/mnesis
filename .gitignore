@@ -215,3 +215,4 @@ specs/
 coverage.xml
 .claude/
 site/
+.mermaid-cache/
