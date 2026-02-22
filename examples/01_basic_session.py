@@ -3,7 +3,7 @@ Example 01: Basic Session
 =========================
 
 Demonstrates the simplest end-to-end usage of MnesisSession:
-- Creating a session with create()
+- Opening a session with open()
 - Sending messages in a loop
 - Monitoring compaction via TurnResult.compaction_triggered
 - Using session as an async context manager
@@ -37,8 +37,8 @@ async def main() -> None:
         )
     )
 
-    # Create session — using async context manager for clean cleanup
-    async with await MnesisSession.create(
+    # Open session — using async context manager for clean cleanup
+    async with MnesisSession.open(
         model="anthropic/claude-opus-4-6",
         system_prompt="You are a helpful coding assistant. Be concise.",
         config=config,

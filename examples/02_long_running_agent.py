@@ -50,7 +50,7 @@ async def main() -> None:
         if isinstance(part, TextPart):
             print(part.text, end="", flush=True)
 
-    async with await MnesisSession.create(
+    async with MnesisSession.open(
         model="anthropic/claude-opus-4-6",
         system_prompt=(
             "You are a senior software engineer helping with a large refactoring task. "

@@ -123,7 +123,7 @@ LARGE_JSON_FILE = json.dumps(
 
 
 async def main() -> None:
-    from mnesis import LargeFileHandler
+    from mnesis.files import LargeFileHandler
     from mnesis.models.config import FileConfig, StoreConfig
     from mnesis.store.immutable import ImmutableStore
     from mnesis.tokens.estimator import TokenEstimator
