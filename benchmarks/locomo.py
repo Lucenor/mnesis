@@ -24,6 +24,10 @@ Full QA evaluation (requires an LLM API key):
         --conversations 1 \\
         --questions-per 20
 
+Regenerate charts from an existing results file (no API key needed):
+    uv run python benchmarks/locomo.py --replot
+    uv run python benchmarks/locomo.py --replot --output-dir path/to/results/
+
 See benchmarks/README.md for full documentation.
 """
 
@@ -668,6 +672,110 @@ def plot_summary(
     print(f"  Saved: {output_path}")
 
 
+# ── replot ────────────────────────────────────────────────────────────────────
+
+
+def replot(results_path: Path, output_dir: Path) -> None:
+    """
+    Regenerate all PNG charts from an existing ``locomo_results.json``.
+
+    No LLM calls are made; the function only reads the JSON and writes PNGs.
+
+    Args:
+        results_path: Path to the ``locomo_results.json`` file produced by a
+            previous benchmark run.
+        output_dir:   Directory where the regenerated PNGs will be written.
+            Typically the same directory that contains ``results_path``.
+
+    Raises:
+        SystemExit: If ``results_path`` does not exist or cannot be parsed.
+    """
+    if not results_path.exists():
+        print(
+            f"ERROR: Results file not found: {results_path}\n"
+            "Run the benchmark first, or pass --output-dir to point at an existing"
+            " results directory."
+        )
+        sys.exit(1)
+
+    try:
+        with results_path.open() as f:
+            data: dict[str, Any] = json.load(f)
+    except OSError as exc:
+        print(f"ERROR: Could not read {results_path}: {exc}")
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: Could not parse {results_path}: {exc}")
+        sys.exit(1)
+
+    metrics_only: bool = data.get("metrics_only", False)
+
+    # Needed to decide whether to render the F1-by-category chart (not available
+    # in metrics-only runs where no QA inference was performed).
+    has_qa_results: bool = bool(data.get("baseline", {}).get("results"))
+
+    # Reconstruct per-category F1 dicts (keys were serialised as strings)
+    baseline_by_cat: dict[int, float] = {
+        int(k): v for k, v in data.get("baseline", {}).get("by_category", {}).items()
+    }
+    mnesis_by_cat: dict[int, float] = {
+        int(k): v for k, v in data.get("mnesis", {}).get("by_category", {}).items()
+    }
+
+    b_overall: float = data.get("baseline", {}).get("overall_f1", 0.0)
+    m_overall: float = data.get("mnesis", {}).get("overall_f1", 0.0)
+
+    # Reconstruct the nested token_data shape expected by plot_token_usage /
+    # plot_summary from the flat keys written by main().
+    raw_token_data: list[dict[str, Any]] = data.get("token_data", [])
+    token_data: list[dict[str, Any]] = [
+        {
+            "baseline": {
+                "tokens_before_compaction": entry["baseline_tokens_before"],
+                "tokens_after_compaction": entry["baseline_tokens_before"],  # no compaction
+                "token_reduction_pct": 0.0,
+            },
+            "mnesis": {
+                "tokens_before_compaction": entry["baseline_tokens_before"],
+                "tokens_after_compaction": entry["mnesis_tokens_after"],
+                "token_reduction_pct": entry["token_reduction_pct"],
+            },
+        }
+        for entry in raw_token_data
+    ]
+
+    compact_stats: dict[str, Any] = data.get("compact_stats", {})
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"ERROR: Could not create output directory '{output_dir}': {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Replotting from: {results_path}")
+    print(f"Output dir     : {output_dir}\n")
+    print("Generating plots…")
+
+    if not metrics_only and has_qa_results:
+        plot_f1_by_category(
+            baseline_by_cat,
+            mnesis_by_cat,
+            output_dir / "locomo_f1_by_category.png",
+        )
+    plot_token_usage(token_data, output_dir / "locomo_token_usage.png")
+    plot_summary(
+        b_overall,
+        m_overall,
+        baseline_by_cat,
+        mnesis_by_cat,
+        token_data,
+        compact_stats,
+        output_dir / "locomo_summary.png",
+        metrics_only=metrics_only,
+    )
+
+    print("\nDone.")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 
@@ -749,6 +857,15 @@ examples:
         action="store_true",
         help="Skip QA inference; report token/compaction stats only (no API key needed)",
     )
+    p.add_argument(
+        "--replot",
+        action="store_true",
+        help=(
+            "Regenerate PNG charts from an existing locomo_results.json without "
+            "re-running the benchmark. Reads from --output-dir (default: benchmarks/results/). "
+            "All other flags are ignored when --replot is set. No API key required."
+        ),
+    )
     return p.parse_args()
 
 
@@ -757,6 +874,11 @@ examples:
 
 async def main() -> None:
     args = parse_args()
+
+    if args.replot:
+        results_path = args.output_dir / "locomo_results.json"
+        replot(results_path, args.output_dir)
+        return
 
     data_path = args.data or (Path(__file__).parent / "data" / LOCOMO_DATA_FILENAME)
     args.output_dir.mkdir(parents=True, exist_ok=True)
