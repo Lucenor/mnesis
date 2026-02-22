@@ -9,8 +9,8 @@ extra_css:
   - stylesheets/extra.css
 
 extra_javascript:
-  - https://cdn.jsdelivr.net/npm/panzoom@9/dist/panzoom.min.js
-  - javascripts/panzoom-diagrams.js
+  - path: javascripts/panzoom-diagrams.js
+    type: module
 
 theme:
   name: material
