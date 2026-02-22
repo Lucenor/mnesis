@@ -3,3 +3,21 @@
 .md-tabs {
   background-color: #1a1a2e !important;
 }
+
+/* Mermaid diagram container (pre-rendered SVG) */
+.mermaid-diagram {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 1.5em 0;
+  background: transparent;
+}
+
+.mermaid-diagram svg {
+  display: block;
+  cursor: grab;
+}
+
+.mermaid-diagram svg:active {
+  cursor: grabbing;
+}
