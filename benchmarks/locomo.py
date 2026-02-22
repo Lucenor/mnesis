@@ -276,7 +276,7 @@ async def run_condition(
     )
     turns = extract_turns(convo)
 
-    async with await MnesisSession.create(
+    async with MnesisSession.open(
         model=model,
         system_prompt=(
             "You are a helpful assistant with access to a long conversation history. "
