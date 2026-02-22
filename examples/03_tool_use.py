@@ -96,7 +96,7 @@ async def main() -> None:
         )
     )
 
-    async with await MnesisSession.create(
+    async with MnesisSession.open(
         model="anthropic/claude-opus-4-6",
         system_prompt="You are a file system explorer. Use tools to investigate the codebase.",
         config=config,
