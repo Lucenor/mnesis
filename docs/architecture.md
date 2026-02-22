@@ -9,63 +9,59 @@ here.
 
 ## Component Overview
 
-```mermaid
-graph TD
-    subgraph Public API
-        MS[MnesisSession]
-        LM[LLMMap]
-        AM[AgenticMap]
-    end
+```d2
+Public API: {
+  MS: MnesisSession
+  LM: LLMMap
+  AM: AgenticMap
+}
 
-    subgraph Session internals
-        CB[ContextBuilder]
-        CE[CompactionEngine]
-        EB[EventBus]
-        TE[TokenEstimator]
-    end
+Session internals: {
+  CB: ContextBuilder
+  CE: CompactionEngine
+  EB: EventBus
+  TE: TokenEstimator
+}
 
-    subgraph Storage
-        IS[ImmutableStore]
-        SDS[SummaryDAGStore]
-        SP[StorePool]
-    end
+Storage: {
+  IS: ImmutableStore
+  SDS: SummaryDAGStore
+  SP: StorePool
+}
 
-    subgraph Compaction
-        L[levels.py<br/>L1/L2/L3]
-        PR[ToolOutputPrunerAsync]
-        FI[file_ids.py]
-    end
+Compaction: {
+  L: "levels.py (L1/L2/L3)"
+  PR: ToolOutputPrunerAsync
+  FI: file_ids.py
+}
 
-    subgraph Files
-        FH[LargeFileHandler]
-    end
+Files: {
+  FH: LargeFileHandler
+}
 
-    MS --> CB
-    MS --> CE
-    MS --> IS
-    MS --> SDS
-    MS --> EB
-    MS --> TE
+Public API.MS -> Session internals.CB
+Public API.MS -> Session internals.CE
+Public API.MS -> Storage.IS
+Public API.MS -> Storage.SDS
+Public API.MS -> Session internals.EB
+Public API.MS -> Session internals.TE
 
-    CB --> IS
-    CB --> SDS
-    CB --> TE
+Session internals.CB -> Storage.IS
+Session internals.CB -> Storage.SDS
+Session internals.CB -> Session internals.TE
 
-    CE --> PR
-    CE --> L
-    CE --> IS
-    CE --> SDS
-    CE --> EB
+Session internals.CE -> Compaction.PR
+Session internals.CE -> Compaction.L
+Session internals.CE -> Storage.IS
+Session internals.CE -> Storage.SDS
+Session internals.CE -> Session internals.EB
 
-    L --> FI
-
-    IS --> SP
-
-    FH --> IS
-    FH --> TE
-
-    LM --> EB
-    AM --> MS
+Compaction.L -> Compaction.FI
+Storage.IS -> Storage.SP
+Files.FH -> Storage.IS
+Files.FH -> Session internals.TE
+Public API.LM -> Session internals.EB
+Public API.AM -> Public API.MS
 ```
 
 ---
@@ -75,55 +71,50 @@ graph TD
 `send()` is defined in `src/mnesis/session.py`. The following is the exact
 sequence as it executes, step by step.
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant Session
-    participant Store as ImmutableStore
-    participant Engine as CompactionEngine
-    participant Builder as ContextBuilder
-    participant SDS as SummaryDAGStore
-    participant LLM
+```d2
+shape: sequence_diagram
 
-    Caller->>Session: send("message")
-    Session->>Session: normalize to TextPart list
-    Session->>Store: append_message(user_msg)
-    Store->>Store: INSERT INTO messages + context_items
-    Session->>Store: append_part(raw_part) for each user part
-    Store->>Store: INSERT INTO message_parts
+Caller
+Session
+Store: ImmutableStore
+Engine: CompactionEngine
+Builder: ContextBuilder
+SDS: SummaryDAGStore
+LLM
 
-    Session->>Session: event_bus.publish(MESSAGE_CREATED, user)
+Caller -> Session: "send(\"message\")"
+Session -> Session: normalize to TextPart list
+Session -> Store: append_message(user_msg)
+Store -> Store: "INSERT INTO messages + context_items"
+Session -> Store: "append_part(raw_part) for each user part"
+Store -> Store: INSERT INTO message_parts
+Session -> Session: "event_bus.publish(MESSAGE_CREATED, user)"
 
-    alt cumulative tokens >= hard threshold
-        Session->>Engine: check_and_trigger() if no pending task
-        Session->>Engine: await wait_for_pending() [BLOCKS]
-    end
+hard threshold check: {
+  Session -> Engine: "check_and_trigger() if no pending task"
+  Session -> Engine: "await wait_for_pending() [BLOCKS]"
+}
 
-    Session->>Builder: build(session_id, model_info, sys_prompt, config)
-    Builder->>Store: get_context_items(session_id)
-    Builder->>Store: get_messages_with_parts_by_ids(message_ids)
-    Builder->>SDS: get_node_by_id(summary_id) for each summary item
-    Builder-->>Session: BuiltContext(messages, token_estimate)
+Session -> Builder: "build(session_id, model_info, sys_prompt, config)"
+Builder -> Store: get_context_items(session_id)
+Builder -> Store: get_messages_with_parts_by_ids(message_ids)
+Builder -> SDS: "get_node_by_id(summary_id) for each summary item"
+Builder -> Session: "BuiltContext(messages, token_estimate)"
+Session -> Store: "append_message(assistant_msg) [pre-commit row]"
+Session -> LLM: "litellm.acompletion(stream=True)"
+LLM -> Session: stream TextPart chunks
+Session -> Caller: "on_part(TextPart) callbacks"
+Session -> Store: append_part(text_raw with token_estimate)
+Session -> Store: "update_message_tokens(assistant_msg_id, final_tokens)"
+Session -> Session: "cumulative_tokens += final_tokens"
+Session -> Session: _check_doom_loop()
 
-    Session->>Store: append_message(assistant_msg) [pre-commit row]
+soft threshold check: {
+  Session -> Engine: "check_and_trigger() [non-blocking, asyncio.create_task]"
+}
 
-    Session->>LLM: litellm.acompletion(stream=True)
-    LLM-->>Session: stream TextPart chunks
-    Session-->>Caller: on_part(TextPart) callbacks
-
-    Session->>Store: append_part(text_raw with token_estimate)
-    Session->>Store: update_message_tokens(assistant_msg_id, final_tokens)
-
-    Session->>Session: cumulative_tokens += final_tokens
-    Session->>Session: _check_doom_loop()
-
-    alt cumulative tokens >= soft threshold
-        Session->>Engine: check_and_trigger() [non-blocking, asyncio.create_task]
-        Note over Engine: runs in background
-    end
-
-    Session->>Session: event_bus.publish(MESSAGE_CREATED, assistant)
-    Session-->>Caller: TurnResult(text, tokens, compaction_triggered)
+Session -> Session: "event_bus.publish(MESSAGE_CREATED, assistant)"
+Session -> Caller: "TurnResult(text, tokens, compaction_triggered)"
 ```
 
 **Key observations derived from the source:**
@@ -290,20 +281,31 @@ is an extreme edge case handled by the multi-round condensation loop.
 
 ## Compaction Lifecycle
 
-```mermaid
-stateDiagram-v2
-    [*] --> Idle : session created
+```d2
+direction: right
 
-    Idle --> SoftTrigger : tokens above soft threshold
-    SoftTrigger --> Compacting : create_task scheduled
-    Compacting --> Idle : CompactionResult produced
+start: {
+  shape: circle
+  style.fill: "#000000"
+  label: ""
+}
 
-    Idle --> HardBlock : tokens above hard threshold at send
-    HardBlock --> Blocking : await wait_for_pending
-    Blocking --> Idle : compaction completes
+Idle
+SoftTrigger: "tokens above\nsoft threshold"
+Compacting: "Compacting\n(create_task scheduled)"
+HardBlock: "tokens above\nhard threshold at send"
+Blocking: "Blocking\n(await wait_for_pending)"
+CompactFailed: "CompactFailed\n(unhandled exception)"
 
-    Compacting --> CompactFailed : unhandled exception
-    CompactFailed --> Idle : COMPACTION_FAILED published, stub result returned
+start -> Idle: session created
+Idle -> SoftTrigger
+SoftTrigger -> Compacting: create_task scheduled
+Compacting -> Idle: CompactionResult produced
+Idle -> HardBlock
+HardBlock -> Blocking: await wait_for_pending
+Blocking -> Idle: compaction completes
+Compacting -> CompactFailed: unhandled exception
+CompactFailed -> Idle: "COMPACTION_FAILED published\nstub result returned"
 ```
 
 ### Thresholds

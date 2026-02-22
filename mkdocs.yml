@@ -5,19 +5,11 @@ repo_url: https://github.com/Lucenor/mnesis
 repo_name: Lucenor/mnesis
 edit_uri: edit/main/docs/
 
-hooks:
-  - docs/hooks/cfasync.py
-  - docs/hooks/mermaid_render.py
-
 extra_css:
   - stylesheets/extra.css
 
-extra_javascript:
-  - javascripts/panzoom-bundle.js
-
 theme:
   name: material
-  custom_dir: docs/overrides
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -76,6 +68,9 @@ plugins:
             show_signature_annotations: true
   - git-revision-date-localized:
       fallback_to_build_date: true
+  - d2:
+      layout: elk
+  - panzoom
 
 nav:
   - Home: index.md

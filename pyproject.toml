@@ -64,6 +64,8 @@ docs = [
     "mkdocs-gen-files>=0.5.0",
     "mkdocs-literate-nav>=0.6.0",
     "mkdocs-git-revision-date-localized-plugin>=1.2.0",
+    "mkdocs-d2-plugin>=1.6.0",
+    "mkdocs-panzoom-plugin>=0.5.2",
 ]
 
 [tool.hatch.build.targets.wheel]
