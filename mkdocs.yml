@@ -7,9 +7,13 @@ edit_uri: edit/main/docs/
 
 hooks:
   - docs/hooks/cfasync.py
+  - docs/hooks/mermaid_render.py
 
 extra_css:
   - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/panzoom-bundle.js
 
 theme:
   name: material
@@ -50,11 +54,6 @@ theme:
 plugins:
   - search:
       lang: en
-  - mermaid2:
-      arguments:
-        theme: default
-        securityLevel: loose
-        startOnLoad: false
   - gen-files:
       scripts:
         - docs/gen_ref_pages.py
@@ -96,11 +95,7 @@ nav:
 markdown_extensions:
   - admonition
   - pymdownx.details
-  - pymdownx.superfences:
-      custom_fences:
-        - name: mermaid
-          class: mermaid
-          format: !!python/name:mermaid2.fence_mermaid_custom
+  - pymdownx.superfences
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
