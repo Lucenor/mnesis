@@ -1068,9 +1068,10 @@ async def main() -> None:
             else:
                 # Fallback: try to locate a matching results file that may have been
                 # created with fewer conversations than requested (e.g. custom data).
-                category_part = args.category or "all"
-                model_slug = re.sub(r"[^a-zA-Z0-9_-]", "-", args.model.split("/")[-1])
-                pattern = f"locomo_{model_slug}_c*_q{args.questions_per}_{category_part}.json"
+                # Derive the glob pattern from the computed key, wildcarding only the
+                # conversation count so we stay consistent with `_run_key()`.
+                pattern_key = key.replace(f"_c{args.conversations}_", "_c*_")
+                pattern = f"locomo_{pattern_key}.json"
                 matches = sorted(args.output_dir.glob(pattern))
                 if len(matches) == 1:
                     results_path = matches[0]
