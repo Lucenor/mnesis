@@ -66,6 +66,45 @@ Public API.AM -> Public API.MS
 
 ---
 
+## `session.history()` — Per-Turn Context Snapshots
+
+`session.history()` returns a `list[TurnSnapshot]` — one entry per completed
+`send()` or `record()` call, in chronological order.
+
+Each `TurnSnapshot` contains:
+
+- **`turn_index`** — 0-based counter.
+- **`role`** — always `"assistant"` (snapshots are captured after the full
+  user + assistant exchange is persisted).
+- **`context_tokens`** — a `ContextBreakdown` with five token counts:
+  `system_prompt`, `summary` (compaction summaries in context), `messages`
+  (raw non-summary messages), `tool_outputs` (subset of `messages` from tool
+  parts), and `total` (equals `system_prompt + summary + messages`).
+- **`compaction_triggered`** — whether background compaction was scheduled
+  during this turn.
+- **`compact_result`** — the `CompactionResult` from the most recent
+  `compact()` call that completed before this snapshot was captured, or `None`.
+
+**How token counts are computed.**  After every turn is fully persisted,
+`ContextBuilder.build()` is called once more to assemble the post-turn context
+snapshot.  This second build call populates three additional fields on
+`BuiltContext`: `raw_message_tokens` (the `tokens_used` variable from the
+main assembly loop), `tool_output_tokens` (accumulated by inspecting each
+`ToolPart` in the includable messages), and `summary_token_count` (already
+present).  The system-prompt token count comes from
+`TokenEstimator.estimate(system_prompt, model_info)`.  Exceptions during
+snapshot capture are caught and logged; a zeroed-out `ContextBreakdown` is
+used in their place so the caller is never affected.
+
+**`compact_result` lifetime.**  When `session.compact()` is called explicitly,
+the `CompactionResult` is stored in `_pending_compact_result`.  The next
+`_capture_turn_snapshot()` call drains this slot and attaches the result to
+the snapshot, then clears the slot.  This means `compact_result` appears on
+the *first* turn snapshot that follows the `compact()` call, not on a
+synthetic snapshot of its own.
+
+---
+
 ## `session.send()` Walkthrough
 
 `send()` is defined in `src/mnesis/session.py`. The following is the exact

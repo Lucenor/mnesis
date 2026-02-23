@@ -745,3 +745,127 @@ class TestTokenEstimatorHeuristicOnly:
 
         estimator = TokenEstimator(heuristic_only=True)
         assert estimator._force_heuristic is True
+
+
+class TestSessionHistory:
+    """Tests for session.history() per-turn context snapshots."""
+
+    async def test_history_accumulates_per_turn(self, tmp_path, monkeypatch):
+        """history() grows by one entry per send() call."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        from mnesis import MnesisSession
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            assert len(session.history()) == 0
+
+            await session.send("First message.")
+            assert len(session.history()) == 1
+
+            await session.send("Second message.")
+            assert len(session.history()) == 2
+
+            await session.send("Third message.")
+            assert len(session.history()) == 3
+
+        # Each snapshot has a sequential turn_index
+        history = session.history()
+        for i, snap in enumerate(history):
+            assert snap.turn_index == i
+
+    async def test_history_token_breakdown(self, tmp_path, monkeypatch):
+        """context_tokens fields are populated and consistent after send()."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        from mnesis import MnesisSession
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+            system_prompt="You are a helpful assistant.",
+        ) as session:
+            await session.send("Tell me about the ocean.")
+            await session.send("Tell me more.")
+
+        history = session.history()
+        assert len(history) == 2
+
+        for snap in history:
+            bd = snap.context_tokens
+            # System prompt should be non-zero (we passed a real system prompt)
+            assert bd.system_prompt > 0, "system_prompt tokens must be > 0"
+            # Total should equal system_prompt + summary + messages
+            assert bd.total == bd.system_prompt + bd.summary + bd.messages
+            # Total is always positive after real turns
+            assert bd.total > 0
+            # Tool outputs are a subset of messages (can be 0 for text-only turns)
+            assert 0 <= bd.tool_outputs <= bd.messages
+            # Role is always 'assistant' for a completed turn
+            assert snap.role == "assistant"
+
+    async def test_history_compaction_captured(self, tmp_path, monkeypatch):
+        """compact_result is populated on the snapshot following an explicit compact() call."""
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        from mnesis import CompactionResult, MnesisSession
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            await session.send("Message one.")
+            await session.send("Message two.")
+
+            # Explicit manual compaction — result should appear on next snapshot
+            await session.compact()
+
+            await session.send("Message three, after compaction.")
+
+        history = session.history()
+        # 3 send() calls → 3 snapshots
+        assert len(history) == 3
+
+        # The third snapshot (turn_index=2) should carry the compact_result
+        snap = history[2]
+        assert snap.compact_result is not None
+        assert isinstance(snap.compact_result, CompactionResult)
+        # Snapshots before compaction should have None
+        assert history[0].compact_result is None
+        assert history[1].compact_result is None
+
+    async def test_history_record_mode(self, tmp_path):
+        """history() works in BYO-LLM mode (session.record())."""
+        from mnesis import MnesisSession, TokenUsage
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+            system_prompt="You are a specialist.",
+        ) as session:
+            assert len(session.history()) == 0
+
+            await session.record(
+                user_message="What is 2+2?",
+                assistant_response="Four.",
+                tokens=TokenUsage(input=10, output=5),
+            )
+            await session.record(
+                user_message="What is 3+3?",
+                assistant_response="Six.",
+                tokens=TokenUsage(input=12, output=5),
+            )
+
+        history = session.history()
+        assert len(history) == 2
+
+        for i, snap in enumerate(history):
+            assert snap.turn_index == i
+            assert snap.role == "assistant"
+            # System prompt was non-empty, so system_prompt tokens > 0
+            assert snap.context_tokens.system_prompt > 0
+            # Total is sane
+            assert snap.context_tokens.total > 0
+
+        # history() returns a copy — mutating it does not affect internal state
+        history.append(history[0])
+        assert len(session.history()) == 2
