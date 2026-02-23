@@ -28,6 +28,13 @@ Regenerate charts from an existing results file (no API key needed):
     uv run python benchmarks/locomo.py --replot
     uv run python benchmarks/locomo.py --replot --output-dir path/to/results/
 
+Generate baseline data (run once per model; no API key with --metrics-only):
+    uv run python benchmarks/locomo.py --generate-baseline --metrics-only
+
+Then run the mnesis benchmark against that baseline:
+    ANTHROPIC_API_KEY=sk-... uv run python benchmarks/locomo.py \\
+        --model anthropic/claude-haiku-4-5 --conversations 10 --questions-per 300
+
 See benchmarks/README.md for full documentation.
 """
 
@@ -38,6 +45,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -110,6 +118,8 @@ Format your response as:
 be relevant to answer questions about this conversation)
 """
 
+BASELINE_DIR = Path(__file__).parent / "baseline"
+
 COLORS = {
     "baseline": "#4878cf",  # blue
     "mnesis": "#e87d3e",  # orange
@@ -125,6 +135,17 @@ plt.rcParams.update(
         "axes.spines.right": False,
     }
 )
+
+
+# ── run key ───────────────────────────────────────────────────────────────────
+
+
+def _run_key(model: str, conversations: int, questions_per: int, category: int | None) -> str:
+    """Produce a filesystem-safe identifier for a benchmark run configuration."""
+    model_slug = re.sub(r"[^a-zA-Z0-9_-]", "-", model.split("/")[-1])
+    cat = f"cat{category}" if category is not None else "all"
+    return f"{model_slug}_c{conversations}_q{questions_per}_{cat}"
+
 
 # ── data loading ──────────────────────────────────────────────────────────────
 
@@ -215,8 +236,6 @@ def speaker_names(convo: dict[str, Any]) -> tuple[str, str]:
 
 
 def _tokenise(text: str) -> list[str]:
-    import re
-
     return re.sub(r"[^a-z0-9\s]", " ", str(text).lower()).split()
 
 
@@ -866,7 +885,105 @@ examples:
             "All other flags are ignored when --replot is set. No API key required."
         ),
     )
+    p.add_argument(
+        "--generate-baseline",
+        action="store_true",
+        dest="generate_baseline",
+        help=(
+            "Run only the baseline condition (no compaction) and save per-conversation "
+            "results to benchmarks/baseline/. No API key needed when combined with "
+            "--metrics-only. Use this before running the main benchmark."
+        ),
+    )
     return p.parse_args()
+
+
+# ── baseline generation ───────────────────────────────────────────────────────
+
+
+async def generate_baseline(
+    args: argparse.Namespace,
+    conversations: list[dict[str, Any]],
+    data_path: Path,
+) -> None:
+    """
+    Run the baseline condition for each conversation and save results to disk.
+
+    Each conversation's result dict is written as a pretty-printed JSON file
+    under ``benchmarks/baseline/`` using a key derived from the run configuration.
+    After all conversations are processed, a summary is printed showing how many
+    files were written and the command to run the main benchmark.
+
+    Args:
+        args:          Parsed CLI arguments (model, compaction_model, questions_per,
+                       category, metrics_only).
+        conversations: List of LOCOMO conversation dicts to evaluate.
+        data_path:     Path to the dataset file (used only for display purposes).
+    """
+    compaction_model = args.compaction_model or args.model
+    key = _run_key(args.model, len(conversations), args.questions_per, args.category)
+
+    BASELINE_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("Generating baseline data")
+    print(f"  Model            : {args.model}")
+    print(f"  Compaction model : {compaction_model}")
+    print(f"  Conversations    : {len(conversations)}")
+    print(f"  Max questions    : {args.questions_per}")
+    cat_label = CATEGORY_NAMES.get(args.category, "all") if args.category else "all"
+    print(f"  Category         : {cat_label}")
+    print(f"  Mode             : {'metrics-only' if args.metrics_only else 'full QA'}")
+    print(f"  Output           : {BASELINE_DIR}\n")
+
+    files_written: list[Path] = []
+
+    for conv_idx, convo in enumerate(conversations):
+        spk_a, spk_b = speaker_names(convo)
+        print(f"Conversation {conv_idx + 1}/{len(conversations)}: {spk_a} & {spk_b}")
+
+        qa_pairs = extract_qa(convo)
+        if args.category is not None:
+            qa_pairs = [q for q in qa_pairs if q["category"] == args.category]
+        turns = extract_turns(convo)
+        print(f"  Turns: {len(turns)}  QA pairs available: {len(qa_pairs)}")
+
+        db_path = str(BASELINE_DIR / f"_tmp_{key}_conv{conv_idx}.db")
+        print("  [baseline] injecting history…", end=" ", flush=True)
+        t0 = time.monotonic()
+        result = await run_condition(
+            convo,
+            qa_pairs,
+            model=args.model,
+            compaction_model=compaction_model,
+            compact=False,
+            db_path=db_path,
+            max_questions=args.questions_per,
+            metrics_only=args.metrics_only,
+        )
+        print(f"done ({time.monotonic() - t0:.1f}s)")
+
+        # Clean up the temporary session database
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        out_path = BASELINE_DIR / f"{key}_conv{conv_idx}.json"
+        with out_path.open("w") as f:
+            json.dump(result, f, indent=2)
+        files_written.append(out_path)
+        print(f"  Saved: {out_path}")
+
+    print(f"\nBaseline data complete: {len(files_written)} file(s) written to {BASELINE_DIR}")
+    print("\nRun the mnesis benchmark against this baseline:")
+    cat_flag = f" --category {args.category}" if args.category else ""
+    print(
+        f"  ANTHROPIC_API_KEY=sk-... uv run python benchmarks/locomo.py"
+        f" --model {args.model}"
+        f" --conversations {len(conversations)}"
+        f" --questions-per {args.questions_per}"
+        f"{cat_flag}"
+    )
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -881,12 +998,29 @@ async def main() -> None:
         return
 
     data_path = args.data or (Path(__file__).parent / "data" / LOCOMO_DATA_FILENAME)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     ensure_data(data_path)
     conversations = load_conversations(data_path)[: args.conversations]
 
     compaction_model = args.compaction_model or args.model
+
+    # In metrics-only mode, enable mock LLM for compaction if no API key is
+    # detected so compaction reaches level 1 (LLM summary) instead of falling
+    # back to level 3 (deterministic), giving a realistic token-reduction figure.
+    if args.metrics_only and not os.environ.get("MNESIS_MOCK_LLM"):
+        _has_key = any(
+            os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")
+        )
+        if not _has_key:
+            os.environ["MNESIS_MOCK_LLM"] = "1"
+            print("(No API key found — using mock LLM for compaction in metrics-only mode.)\n")
+
+    # ── generate-baseline mode ─────────────────────────────────────────
+    if args.generate_baseline:
+        await generate_baseline(args, conversations, data_path)
+        return
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print("LOCOMO Benchmark")
     print(f"  Model            : {args.model}")
@@ -905,16 +1039,29 @@ async def main() -> None:
             "or unset MNESIS_MOCK_LLM and provide a real API key.\n"
         )
 
-    # In metrics-only mode, enable mock LLM for compaction if no API key is
-    # detected so compaction reaches level 1 (LLM summary) instead of falling
-    # back to level 3 (deterministic), giving a realistic token-reduction figure.
-    if args.metrics_only and not os.environ.get("MNESIS_MOCK_LLM"):
-        _has_key = any(
-            os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY")
+    # ── load baseline data from pre-generated files ────────────────────
+    key = _run_key(args.model, len(conversations), args.questions_per, args.category)
+    baseline_paths = [BASELINE_DIR / f"{key}_conv{i}.json" for i in range(len(conversations))]
+    missing = [p for p in baseline_paths if not p.exists()]
+    if missing:
+        print("ERROR: Baseline data files are missing. Generate them first with:")
+        cat_flag = f" --category {args.category}" if args.category else ""
+        print(
+            f"  uv run python benchmarks/locomo.py --generate-baseline --metrics-only"
+            f" --model {args.model}"
+            f" --conversations {len(conversations)}"
+            f" --questions-per {args.questions_per}"
+            f"{cat_flag}"
         )
-        if not _has_key:
-            os.environ["MNESIS_MOCK_LLM"] = "1"
-            print("(No API key found — using mock LLM for compaction in metrics-only mode.)\n")
+        print("\nMissing files:")
+        for p in missing:
+            print(f"  {p}")
+        sys.exit(1)
+
+    loaded_baselines: list[dict[str, Any]] = []
+    for p in baseline_paths:
+        with p.open() as f:
+            loaded_baselines.append(json.load(f))
 
     all_baseline: list[dict[str, Any]] = []
     all_mnesis: list[dict[str, Any]] = []
@@ -932,23 +1079,11 @@ async def main() -> None:
         turns = extract_turns(convo)
         print(f"  Turns: {len(turns)}  QA pairs available: {len(qa_pairs)}")
 
-        db_base = str(args.output_dir / f"_conv{idx}_baseline.db")
-        db_mnes = str(args.output_dir / f"_conv{idx}_mnesis.db")
+        # ── baseline condition (loaded from pre-generated file) ────────
+        baseline = loaded_baselines[idx]
+        print(f"  [baseline] loaded from {baseline_paths[idx].name}")
 
-        # ── baseline condition ─────────────────────────────────────────
-        print("  [baseline] injecting history…", end=" ", flush=True)
-        t0 = time.monotonic()
-        baseline = await run_condition(
-            convo,
-            qa_pairs,
-            model=args.model,
-            compaction_model=compaction_model,
-            compact=False,
-            db_path=db_base,
-            max_questions=args.questions_per,
-            metrics_only=args.metrics_only,
-        )
-        print(f"done ({time.monotonic() - t0:.1f}s)")
+        db_mnes = str(args.output_dir / f"_conv{idx}_mnesis.db")
 
         # ── mnesis condition ───────────────────────────────────────────
         print("  [mnesis  ] injecting + compacting…", end=" ", flush=True)
@@ -981,12 +1116,11 @@ async def main() -> None:
             delta = m_f1 - b_f1
             print(f"  F1 Δ : {delta:+.3f}  (baseline {b_f1:.3f} → mnesis {m_f1:.3f})")
 
-        # Clean up temporary session databases
-        for db in (db_base, db_mnes):
-            try:
-                Path(db).unlink(missing_ok=True)
-            except OSError:
-                pass  # Cleanup is best-effort; ignore failures for temp files
+        # Clean up temporary session database
+        try:
+            Path(db_mnes).unlink(missing_ok=True)
+        except OSError:
+            pass  # Cleanup is best-effort; ignore failures for temp files
 
     # ── aggregate ──────────────────────────────────────────────────────
     baseline_by_cat = aggregate_f1(all_baseline)
