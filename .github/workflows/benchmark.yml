@@ -36,4 +36,6 @@ jobs:
       - name: LOCOMO dry-run (metrics only, no API key needed)
         env:
           MNESIS_MOCK_LLM: "1"
-        run: uv run python benchmarks/locomo.py --metrics-only --conversations 1
+        run: |
+          uv run python benchmarks/locomo.py --generate-baseline --metrics-only --conversations 1
+          uv run python benchmarks/locomo.py --metrics-only --conversations 1
