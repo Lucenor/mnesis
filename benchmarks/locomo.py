@@ -344,7 +344,7 @@ async def run_condition(
         for i in tqdm(
             range(0, len(turns), 2),
             desc="  injecting",
-            unit="turn",
+            unit="pair",
             leave=False,
             dynamic_ncols=True,
         ):
@@ -1255,10 +1255,10 @@ async def generate_baseline(
             json.dump(result, f, indent=2)
         files_written.append(out_path)
 
-        n_turns = result.get("turns_injected", len(turns) // 2)
+        n_pairs = result.get("turns_injected", len(turns) // 2)
         tqdm.write(
             f"[{conv_idx + 1}/{len(conversations)}] {spk_a} & {spk_b}"
-            f"   {n_turns} turns   ({elapsed:.1f}s)"
+            f"   {n_pairs} pairs   ({elapsed:.1f}s)"
         )
 
     print(f"\nBaseline data complete: {len(files_written)} file(s) written to {BASELINE_DIR}")
@@ -1455,15 +1455,15 @@ async def main() -> None:
 
         pct = mnesis["token_reduction_pct"]
         level = cr.get("level_used", 0)
-        n_turns = mnesis.get("turns_injected", 0)
+        n_pairs = mnesis.get("turns_injected", 0)
 
         # Build a concise one-liner printed after each conversation completes.
         # Fields included depend on run mode so the line never shows placeholder dashes.
         summary_parts = [
             f"[{idx + 1}/{len(conversations)}] {spk_a} & {spk_b}",
-            f"  {n_turns} turns",
+            f"  {n_pairs} pairs",
             f"  Level {level}",
-            f"  -{pct:.1f}%",
+            f"  {pct:.1f}%",
         ]
         if not args.metrics_only and baseline["results"] and mnesis["results"]:
             b_f1 = overall_f1(baseline["results"])
