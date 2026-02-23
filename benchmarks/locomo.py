@@ -962,11 +962,11 @@ async def generate_baseline(
         )
         print(f"done ({time.monotonic() - t0:.1f}s)")
 
-        # Clean up the temporary session database
+        # Clean up the temporary session database; best-effort, do not abort on failure.
         try:
             Path(db_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"  [warn] Could not remove temp DB {db_path}: {exc}", file=sys.stderr)
 
         out_path = BASELINE_DIR / f"{key}_conv{conv_idx}.json"
         with out_path.open("w") as f:
