@@ -823,8 +823,10 @@ def plot_sawtooth(
                 label="Mnesis",
             )
 
-            # Mark compaction events with a vertical dashed line
+            # Mark compaction events recorded in snapshot data (compaction_triggered=True).
+            # Label only the first line per subplot to avoid duplicate legend entries.
             compact_turns = [s["turn_index"] for s in mn_snaps if s.get("compaction_triggered")]
+            ct_label_added = False
             for ct in compact_turns:
                 ax.axvline(
                     ct,
@@ -832,16 +834,19 @@ def plot_sawtooth(
                     linestyle="--",
                     linewidth=1.0,
                     alpha=0.7,
+                    label="Compaction (triggered)" if not ct_label_added else None,
                 )
+                ct_label_added = True
 
-            # Mark turns where total context drops significantly (sawtooth valleys).
+            # When compaction_triggered is not set in all snapshots, fall back to
+            # valley detection: mark turns where total context drops >20%.
             # Label only the first valley to avoid duplicate legend entries.
             valleys = [
                 mn_turns[i]
                 for i in range(1, len(mn_totals))
                 if mn_totals[i] < mn_totals[i - 1] * 0.8  # >20% drop signals compaction
             ]
-            compaction_label_added = False
+            valley_label_added = False
             for v in valleys:
                 ax.axvline(
                     v,
@@ -849,9 +854,9 @@ def plot_sawtooth(
                     linestyle=":",
                     linewidth=1.2,
                     alpha=0.9,
-                    label="Compaction" if not compaction_label_added else None,
+                    label="Compaction (valley)" if not valley_label_added else None,
                 )
-                compaction_label_added = True
+                valley_label_added = True
 
         ax.set_title(f"Conv {conv_idx + 1}", fontsize=9)
         ax.set_xlabel("Turn", fontsize=8)
