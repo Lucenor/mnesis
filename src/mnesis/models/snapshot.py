@@ -73,9 +73,13 @@ class TurnSnapshot(BaseModel):
         compaction_triggered: ``True`` if compaction was scheduled (background
             or foreground) during or immediately after this turn.
         compact_result: The :class:`~mnesis.models.message.CompactionResult`
-            from the most recent compaction run that completed before or during
-            this turn.  ``None`` when no compaction has run yet or when
-            compaction was still in flight when the snapshot was captured.
+            from the most recent explicit
+            :meth:`~mnesis.session.MnesisSession.compact` call that completed
+            before this snapshot was captured.  Background compactions
+            triggered automatically by :meth:`~mnesis.session.MnesisSession.send`
+            or :meth:`~mnesis.session.MnesisSession.record` are not reflected
+            here.  ``None`` when no explicit ``compact()`` call has been made
+            yet or when one was still in flight when the snapshot was captured.
     """
 
     turn_index: int = Field(
@@ -95,7 +99,9 @@ class TurnSnapshot(BaseModel):
     compact_result: CompactionResult | None = Field(
         default=None,
         description=(
-            "Result of the most recent compaction run, if it completed before "
-            "this snapshot was captured. None otherwise."
+            "Result of the most recent explicit compact() call that completed "
+            "before this snapshot was captured. Background compactions are not "
+            "reflected here. None when no explicit compact() call has been made "
+            "yet or when one was still in flight."
         ),
     )

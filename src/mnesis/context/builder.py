@@ -143,15 +143,13 @@ class ContextBuilder:
                 for part in msg_fb.parts:
                     if isinstance(part, ToolPart):
                         if part.compacted_at is not None:
-                            tool_output_tokens_fb += self._estimator.estimate(
-                                f"[Tool output compacted at {part.compacted_at}]", model
+                            tombstone = (
+                                f"[Tool '{part.tool_name}' output compacted at {part.compacted_at}]"
                             )
+                            tool_output_tokens_fb += self._estimator.estimate(tombstone, model)
                         else:
                             tool_output_tokens_fb += self._estimator.estimate(
-                                str(part.input), model
-                            )
-                            tool_output_tokens_fb += self._estimator.estimate(
-                                part.output or "", model
+                                self._render_tool_part(part), model
                             )
             return BuiltContext(
                 messages=llm_messages_fb,
@@ -227,11 +225,13 @@ class ContextBuilder:
                 if isinstance(part, ToolPart):
                     if part.compacted_at is not None:
                         tool_output_tokens += self._estimator.estimate(
-                            f"[Tool output compacted at {part.compacted_at}]", model
+                            f"[Tool '{part.tool_name}' output compacted at {part.compacted_at}]",
+                            model,
                         )
                     else:
-                        tool_output_tokens += self._estimator.estimate(str(part.input), model)
-                        tool_output_tokens += self._estimator.estimate(part.output or "", model)
+                        tool_output_tokens += self._estimator.estimate(
+                            self._render_tool_part(part), model
+                        )
 
         # Step 5: Convert to LLM message format
         llm_messages: list[LLMMessage] = []
