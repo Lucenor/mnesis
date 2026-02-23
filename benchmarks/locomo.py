@@ -923,18 +923,15 @@ async def generate_baseline(
     files were written and the command to run the main benchmark.
 
     Args:
-        args:          Parsed CLI arguments (model, compaction_model, questions_per,
-                       category, metrics_only).
+        args:          Parsed CLI arguments (model, questions_per, category, metrics_only).
         conversations: List of LOCOMO conversation dicts to evaluate.
     """
-    compaction_model = args.compaction_model or args.model
     key = _run_key(args.model, len(conversations), args.questions_per, args.category)
 
     BASELINE_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Generating baseline data")
     print(f"  Model            : {args.model}")
-    print(f"  Compaction model : {compaction_model}")
     print(f"  Conversations    : {len(conversations)}")
     print(f"  Max questions    : {args.questions_per}")
     cat_label = CATEGORY_NAMES.get(args.category, "all") if args.category else "all"
@@ -961,7 +958,7 @@ async def generate_baseline(
             convo,
             qa_pairs,
             model=args.model,
-            compaction_model=compaction_model,
+            compaction_model=args.model,  # compact=False; model unused but required by signature
             compact=False,
             db_path=db_path,
             max_questions=args.questions_per,
