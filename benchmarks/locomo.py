@@ -25,8 +25,10 @@ Full QA evaluation (requires an LLM API key):
         --questions-per 20
 
 Regenerate charts from an existing results file (no API key needed):
-    uv run python benchmarks/locomo.py --replot
-    uv run python benchmarks/locomo.py --replot --output-dir path/to/results/
+    uv run python benchmarks/locomo.py --replot --model anthropic/claude-haiku-4-5 \\
+        --conversations 1 --questions-per 20
+    uv run python benchmarks/locomo.py --replot \\
+        --results-file benchmarks/results/locomo_claude-haiku-4-5_c1_q20_all.json
 
 See benchmarks/README.md for full documentation.
 """
@@ -38,6 +40,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -125,6 +128,16 @@ plt.rcParams.update(
         "axes.spines.right": False,
     }
 )
+
+# ── run key ───────────────────────────────────────────────────────────────────
+
+
+def _run_key(model: str, conversations: int, questions_per: int, category: int | None) -> str:
+    """Produce a filesystem-safe identifier for a benchmark run configuration."""
+    model_slug = re.sub(r"[^a-zA-Z0-9_-]", "-", model.split("/")[-1])
+    cat = f"cat{category}" if category is not None else "all"
+    return f"{model_slug}_c{conversations}_q{questions_per}_{cat}"
+
 
 # ── data loading ──────────────────────────────────────────────────────────────
 
@@ -677,12 +690,15 @@ def plot_summary(
 
 def replot(results_path: Path, output_dir: Path) -> None:
     """
-    Regenerate all PNG charts from an existing ``locomo_results.json``.
+    Regenerate all PNG charts from an existing keyed results JSON.
 
     No LLM calls are made; the function only reads the JSON and writes PNGs.
+    Output PNG filenames are derived from the results file stem so they share
+    the same run key (e.g. ``locomo_{key}.json`` → ``locomo_f1_{key}.png``,
+    ``locomo_tokens_{key}.png``, ``locomo_summary_{key}.png``).
 
     Args:
-        results_path: Path to the ``locomo_results.json`` file produced by a
+        results_path: Path to the ``locomo_{key}.json`` file produced by a
             previous benchmark run.
         output_dir:   Directory where the regenerated PNGs will be written.
             Typically the same directory that contains ``results_path``.
@@ -755,13 +771,18 @@ def replot(results_path: Path, output_dir: Path) -> None:
     print(f"Output dir     : {output_dir}\n")
     print("Generating plots…")
 
+    # Derive a key from the results filename so PNGs share the same prefix.
+    # Given "locomo_{key}.json", key = stem[len("locomo_"):].
+    stem = results_path.stem
+    key_suffix = stem[len("locomo_") :] if stem.startswith("locomo_") else stem
+
     if not metrics_only and has_qa_results:
         plot_f1_by_category(
             baseline_by_cat,
             mnesis_by_cat,
-            output_dir / "locomo_f1_by_category.png",
+            output_dir / f"locomo_f1_{key_suffix}.png",
         )
-    plot_token_usage(token_data, output_dir / "locomo_token_usage.png")
+    plot_token_usage(token_data, output_dir / f"locomo_tokens_{key_suffix}.png")
     plot_summary(
         b_overall,
         m_overall,
@@ -769,7 +790,7 @@ def replot(results_path: Path, output_dir: Path) -> None:
         mnesis_by_cat,
         token_data,
         compact_stats,
-        output_dir / "locomo_summary.png",
+        output_dir / f"locomo_summary_{key_suffix}.png",
         metrics_only=metrics_only,
     )
 
@@ -798,6 +819,12 @@ examples:
 
   # Only temporal reasoning questions
   uv run python benchmarks/locomo.py --category 3 --metrics-only
+
+  # Replot from a keyed results file (no API key needed)
+  uv run python benchmarks/locomo.py --replot \\
+      --model anthropic/claude-haiku-4-5 --conversations 1 --questions-per 20
+  uv run python benchmarks/locomo.py --replot \\
+      --results-file benchmarks/results/locomo_claude-haiku-4-5_c1_q20_all.json
 """,
     )
     p.add_argument(
@@ -861,9 +888,23 @@ examples:
         "--replot",
         action="store_true",
         help=(
-            "Regenerate PNG charts from an existing locomo_results.json without "
-            "re-running the benchmark. Reads from --output-dir (default: benchmarks/results/). "
-            "All other flags are ignored when --replot is set. No API key required."
+            "Regenerate PNG charts from an existing results JSON without re-running the "
+            "benchmark. No API key required. "
+            "If --results-file is given, use that path directly. "
+            "Otherwise the keyed filename is derived from --model, --conversations, "
+            "--questions-per, and --category and looked up in --output-dir."
+        ),
+    )
+    p.add_argument(
+        "--results-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        dest="results_file",
+        help=(
+            "Path to a specific results JSON to use with --replot. "
+            "When set, --model / --conversations / --questions-per / --category are "
+            "ignored for file lookup (though --output-dir still controls where PNGs land)."
         ),
     )
     return p.parse_args()
@@ -876,7 +917,11 @@ async def main() -> None:
     args = parse_args()
 
     if args.replot:
-        results_path = args.output_dir / "locomo_results.json"
+        if args.results_file:
+            results_path = args.results_file
+        else:
+            key = _run_key(args.model, args.conversations, args.questions_per, args.category)
+            results_path = args.output_dir / f"locomo_{key}.json"
         replot(results_path, args.output_dir)
         return
 
@@ -1053,7 +1098,8 @@ async def main() -> None:
         print(f"  {'Human baseline':<16} {HUMAN_F1:>10.3f}")
 
     # ── save raw results ───────────────────────────────────────────────
-    out_json = args.output_dir / "locomo_results.json"
+    key = _run_key(args.model, len(conversations), args.questions_per, args.category)
+    out_json = args.output_dir / f"locomo_{key}.json"
     with out_json.open("w") as f:
         json.dump(
             {
@@ -1094,9 +1140,9 @@ async def main() -> None:
         plot_f1_by_category(
             baseline_by_cat,
             mnesis_by_cat,
-            args.output_dir / "locomo_f1_by_category.png",
+            args.output_dir / f"locomo_f1_{key}.png",
         )
-    plot_token_usage(token_data, args.output_dir / "locomo_token_usage.png")
+    plot_token_usage(token_data, args.output_dir / f"locomo_tokens_{key}.png")
     plot_summary(
         b_overall,
         m_overall,
@@ -1104,7 +1150,7 @@ async def main() -> None:
         mnesis_by_cat,
         token_data,
         compact_stats,
-        args.output_dir / "locomo_summary.png",
+        args.output_dir / f"locomo_summary_{key}.png",
         metrics_only=args.metrics_only,
     )
 
