@@ -73,6 +73,15 @@ CATEGORY_NAMES: dict[int, str] = {
     5: "Adversarial",
 }
 
+# Short labels for compact axes (bar charts with limited x-axis width)
+SHORT_CAT: dict[int, str] = {
+    1: "Single",
+    2: "Multi",
+    3: "Temporal",
+    4: "Open",
+    5: "Adversarial",
+}
+
 # Human F1 baseline from LOCOMO paper (Table 1)
 HUMAN_F1 = 0.879
 
@@ -425,7 +434,7 @@ def plot_f1_by_category(
     for i, (bv, mv) in enumerate(zip(b_vals, m_vals, strict=False)):
         delta = mv - bv
         color = "#2ca02c" if delta >= -0.02 else "#d62728"
-        top = max(bv, mv) + 0.06
+        top = min(max(bv, mv) + 0.06, 1.12)
         ax.text(
             x[i],
             top,
@@ -540,7 +549,18 @@ def plot_summary(
     # ── top-left: F1 delta by category (PRIMARY quality signal) ──────
     ax0 = fig.add_subplot(gs[0, 0])
     if metrics_only:
-        ax0.text(0.5, 0.5, "N/A\n(run without --metrics-only)", transform=ax0.transAxes, **na_kw)
+        ax0.text(
+            0.5,
+            0.5,
+            "QA not run\n(omit --metrics-only\nto see F1 delta)",
+            transform=ax0.transAxes,
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="#aaaaaa",
+            style="italic",
+        )
+        ax0.set_title("F1 Delta by Category")
         ax0.axis("off")
     else:
         cats = sorted(CATEGORY_NAMES)
@@ -548,19 +568,27 @@ def plot_summary(
         bar_colors = ["#2ca02c" if d >= -0.02 else "#d62728" for d in deltas]
         x = np.arange(len(cats))
         bars = ax0.bar(x, deltas, color=bar_colors, alpha=0.85, width=0.5)
+        offset = 0.012
         for bar, d in zip(bars, deltas, strict=False):
+            label_y = d + offset if d >= 0 else d - offset
+            va = "bottom" if d >= 0 else "top"
             ax0.text(
                 bar.get_x() + bar.get_width() / 2,
-                d + (0.005 if d >= 0 else -0.015),
+                label_y,
                 f"{d:+.2f}",
                 ha="center",
-                va="bottom" if d >= 0 else "top",
+                va=va,
                 fontsize=9,
                 fontweight="bold",
             )
-        ax0.axhline(0, color="black", linewidth=0.8, linestyle="-")
+        ax0.axhline(0, color="black", linewidth=0.8, linestyle="-", zorder=0)
+        y_pad = 0.08
+        ax0.set_ylim(
+            min(min(deltas) - y_pad, -y_pad),
+            max(max(deltas) + y_pad * 2, y_pad),
+        )
         ax0.set_xticks(x)
-        ax0.set_xticklabels([CATEGORY_NAMES[c][:6] for c in cats], fontsize=8)
+        ax0.set_xticklabels([SHORT_CAT[c] for c in cats], fontsize=8, rotation=15, ha="right")
         ax0.set_ylabel("F1 delta (Δ)  — closer to 0 is better")
         overall_delta = m_overall - b_overall
         ax0.set_title(f"F1 Delta by Category  (overall Δ {overall_delta:+.3f})")
@@ -621,7 +649,7 @@ def plot_summary(
             label="Mnesis",
         )
         ax2.set_xticks(x)
-        ax2.set_xticklabels([CATEGORY_NAMES[c][:6] for c in cats], fontsize=8)
+        ax2.set_xticklabels([SHORT_CAT[c] for c in cats], fontsize=8, rotation=15, ha="right")
         ax2.set_ylim(0, 1.0)
         ax2.set_ylabel("Token-level F1")
         ax2.legend(fontsize=8)
@@ -667,6 +695,7 @@ def plot_summary(
         fontsize=14,
         fontweight="bold",
     )
+    fig.tight_layout(rect=[0, 0, 1, 0.95])  # leave room for suptitle
     fig.savefig(output_path)
     plt.close(fig)
     print(f"  Saved: {output_path}")
