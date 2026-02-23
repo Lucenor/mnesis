@@ -834,21 +834,24 @@ def plot_sawtooth(
                     alpha=0.7,
                 )
 
-            # Mark the first turn where total context drops (sawtooth valley)
+            # Mark turns where total context drops significantly (sawtooth valleys).
+            # Label only the first valley to avoid duplicate legend entries.
             valleys = [
                 mn_turns[i]
                 for i in range(1, len(mn_totals))
                 if mn_totals[i] < mn_totals[i - 1] * 0.8  # >20% drop signals compaction
             ]
-            if valleys:
+            compaction_label_added = False
+            for v in valleys:
                 ax.axvline(
-                    valleys[0],
+                    v,
                     color=COLORS["reduction"],
                     linestyle=":",
                     linewidth=1.2,
                     alpha=0.9,
-                    label="Compaction",
+                    label="Compaction" if not compaction_label_added else None,
                 )
+                compaction_label_added = True
 
         ax.set_title(f"Conv {conv_idx + 1}", fontsize=9)
         ax.set_xlabel("Turn", fontsize=8)
