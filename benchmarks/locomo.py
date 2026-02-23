@@ -34,7 +34,7 @@ Regenerate charts from an existing results file (no API key needed):
     uv run python benchmarks/locomo.py --replot --model anthropic/claude-haiku-4-5 \\
         --conversations 1 --questions-per 20
     uv run python benchmarks/locomo.py --replot \\
-        --results-file benchmarks/results/locomo_claude-haiku-4-5_c1_q20_all.json
+        --results-file benchmarks/results/locomo_anthropic-claude-haiku-4-5_c1_q20_all.json
 
 See benchmarks/README.md for full documentation.
 """
@@ -869,7 +869,7 @@ examples:
   uv run python benchmarks/locomo.py --replot \\
       --model anthropic/claude-haiku-4-5 --conversations 1 --questions-per 20
   uv run python benchmarks/locomo.py --replot \\
-      --results-file benchmarks/results/locomo_claude-haiku-4-5_c1_q20_all.json
+      --results-file benchmarks/results/locomo_anthropic-claude-haiku-4-5_c1_q20_all.json
 """,
     )
     p.add_argument(
