@@ -118,11 +118,25 @@ class TokenEstimator:
                 total += self.estimate(part.text, model)
             elif isinstance(part, ToolPart):
                 if part.compacted_at is not None:
-                    # Tombstone is short
-                    total += self.estimate(f"[Tool output compacted at {part.compacted_at}]", model)
+                    # Tombstone format matches ContextBuilder._convert_message
+                    total += self.estimate(
+                        f"[Tool '{part.tool_name}' output compacted at {part.compacted_at}]",
+                        model,
+                    )
                 else:
-                    total += self.estimate(str(part.input), model)
-                    total += self.estimate(part.output or "", model)
+                    # Render format matches ContextBuilder._render_tool_part
+                    import json
+
+                    lines = [
+                        f"[Tool: {part.tool_name}]",
+                        f"Input: {json.dumps(part.input, indent=2)}",
+                    ]
+                    if part.output:
+                        lines.append(f"Output: {part.output}")
+                    if part.error_message:
+                        lines.append(f"Error: {part.error_message}")
+                    lines.append("[/Tool]")
+                    total += self.estimate("\n".join(lines), model)
             elif isinstance(part, FileRefPart):
                 # File ref block rendered by ContextBuilder
                 ref_block = (

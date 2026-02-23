@@ -26,6 +26,7 @@ from mnesis.models.message import (
     ToolPart,
     TurnResult,
 )
+from mnesis.models.snapshot import ContextBreakdown, TurnSnapshot
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
 from mnesis.store.pool import StorePool
 from mnesis.store.summary_dag import SummaryDAGStore
@@ -120,6 +121,11 @@ class MnesisSession:
         self._cumulative_tokens = TokenUsage()
         self._recent_tool_calls: list[tuple[str, str]] = []  # (tool_name, input_json)
         self._logger = structlog.get_logger("mnesis.session").bind(session_id=session_id)
+        # Per-turn history snapshots (see history() method)
+        self._turn_snapshots: list[TurnSnapshot] = []
+        # Holds a CompactionResult from compact() or a completed background task
+        # so the next snapshot can report it via compact_result.
+        self._pending_compact_result: CompactionResult | None = None
 
     @classmethod
     async def create(
@@ -506,6 +512,9 @@ class MnesisSession:
             MnesisEvent.MESSAGE_CREATED, {"message_id": assistant_msg_id, "role": "assistant"}
         )
 
+        # Capture per-turn history snapshot after full persistence.
+        await self._capture_turn_snapshot(compaction_triggered)
+
         return TurnResult(
             message_id=assistant_msg_id,
             text=text_accumulator,
@@ -788,6 +797,9 @@ class MnesisSession:
             assistant_message_id=assistant_msg_id,
         )
 
+        # Capture per-turn history snapshot after full persistence.
+        await self._capture_turn_snapshot(compaction_triggered)
+
         return RecordResult(
             user_message_id=user_msg_id,
             assistant_message_id=assistant_msg_id,
@@ -882,11 +894,18 @@ class MnesisSession:
         Blocks until compaction completes. Useful for checkpointing before
         complex operations or for testing.
 
+        The compaction result is stored internally so that the *next*
+        :meth:`send` or :meth:`record` call will include it in its
+        :class:`~mnesis.models.snapshot.TurnSnapshot` via the
+        ``compact_result`` field.
+
         Returns:
             CompactionResult describing the compaction outcome.
         """
         self._logger.info("manual_compaction_triggered", session_id=self._session_id)
-        return await self._compaction_engine.run_compaction(self._session_id)
+        result = await self._compaction_engine.run_compaction(self._session_id)
+        self._pending_compact_result = result
+        return result
 
     async def close(self) -> None:
         """
@@ -944,3 +963,88 @@ class MnesisSession:
         Convenience wrapper for ``session.event_bus.subscribe()``.
         """
         self._event_bus.subscribe(event, handler)
+
+    def history(self) -> list[TurnSnapshot]:
+        """
+        Return the accumulated per-turn context snapshots.
+
+        Each entry corresponds to one completed turn — one :meth:`send` call or
+        one :meth:`record` call.  Entries are appended in turn order and the
+        list grows monotonically; it is never reordered or truncated.
+
+        Typical use-cases:
+
+        - **Debugging** — inspect the exact context composition at each turn
+          to diagnose unexpected compaction or budget overflows.
+        - **Research** — plot sawtooth token-usage curves, compute compaction
+          level distributions, or analyse information retention across
+          compaction boundaries.
+
+        Returns:
+            A list of :class:`~mnesis.models.snapshot.TurnSnapshot` objects in
+            chronological order.  Returns an empty list if no turns have
+            completed yet.
+
+        Example::
+
+            async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
+                await session.send("Hello!")
+                await session.send("Tell me about Paris.")
+                for snap in session.history():
+                    print(
+                        f"Turn {snap.turn_index}: "
+                        f"{snap.context_tokens.total} tokens "
+                        f"(summary={snap.context_tokens.summary})"
+                    )
+        """
+        return list(self._turn_snapshots)
+
+    async def _capture_turn_snapshot(self, compaction_triggered: bool) -> None:
+        """Build a context breakdown and append a TurnSnapshot for the just-completed turn.
+
+        Called after all messages for a turn have been persisted to the store.
+        Makes one additional ``ContextBuilder.build()`` call to get the post-turn
+        token breakdown.  If compaction data arrived since the last snapshot,
+        it is attached and the pending slot is cleared.
+
+        Args:
+            compaction_triggered: Whether compaction was scheduled this turn.
+        """
+        try:
+            context = await self._context_builder.build(
+                self._session_id,
+                self._model_info,
+                self._system_prompt,
+                self._config,
+            )
+            system_tokens = self._estimator.estimate(self._system_prompt, self._model_info)
+            breakdown = ContextBreakdown(
+                system_prompt=system_tokens,
+                summary=context.summary_token_count,
+                messages=context.raw_message_tokens,
+                tool_outputs=context.tool_output_tokens,
+                total=context.token_estimate,
+            )
+        except Exception:
+            # Snapshot capture must never crash the caller. Fall back to zeroes.
+            self._logger.warning("turn_snapshot_build_failed", session_id=self._session_id)
+            breakdown = ContextBreakdown(
+                system_prompt=0,
+                summary=0,
+                messages=0,
+                tool_outputs=0,
+                total=0,
+            )
+
+        # Drain any pending compact result
+        compact_result = self._pending_compact_result
+        self._pending_compact_result = None
+
+        snapshot = TurnSnapshot(
+            turn_index=len(self._turn_snapshots),
+            role="assistant",
+            context_tokens=breakdown,
+            compaction_triggered=compaction_triggered,
+            compact_result=compact_result,
+        )
+        self._turn_snapshots.append(snapshot)

@@ -14,6 +14,7 @@ from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models import (
     CompactionConfig,
     CompactionResult,
+    ContextBreakdown,
     FileConfig,
     FileRefPart,
     FinishReason,
@@ -28,6 +29,7 @@ from mnesis.models import (
     TokenUsage,
     ToolPart,
     TurnResult,
+    TurnSnapshot,
 )
 from mnesis.operators.agentic_map import AgenticMap, AgentMapBatch, AgentMapResult
 from mnesis.operators.llm_map import LLMMap, MapBatch, MapResult
@@ -43,6 +45,7 @@ __all__ = [
     "AgenticMap",
     "CompactionConfig",
     "CompactionResult",
+    "ContextBreakdown",
     "EventBus",
     "FileConfig",
     "FileRefPart",
@@ -66,4 +69,5 @@ __all__ = [
     "TokenUsage",
     "ToolPart",
     "TurnResult",
+    "TurnSnapshot",
 ]
