@@ -311,7 +311,23 @@ async def run_condition(
             compaction_prompt=LOCOMO_COMPACTION_PROMPT,
         )
     )
-    turns = extract_turns(convo)
+    # Build turns with session date headers injected.
+    # Session dates are required for multi-hop temporal questions (cat=2) whose
+    # answers ("7 May 2023") are derived from the session timestamp combined with
+    # relative time cues in the text ("yesterday", "last Sunday"). Without the
+    # session date in context these questions are structurally unanswerable.
+    conv = convo.get("conversation", convo)
+    turns: list[tuple[str, str]] = []
+    session_idx = 1
+    while (skey := f"session_{session_idx}") in conv:
+        date_str = conv.get(f"{skey}_date_time", "")
+        for j, turn in enumerate(conv[skey]):
+            speaker = turn.get("speaker", "")
+            text = turn.get("text", "")
+            if j == 0 and date_str:
+                text = f"[Session {session_idx} — {date_str}]\n{text}"
+            turns.append((speaker, text))
+        session_idx += 1
 
     async with MnesisSession.open(
         model=model,
@@ -1281,9 +1297,9 @@ async def main() -> None:
         print(f"\n  Overall F1 delta (Δ): {delta_overall:+.3f}  (0.00 = no information lost)")
         print(f"  Baseline F1 : {b_overall:.3f}  |  Mnesis F1: {m_overall:.3f}")
         print()
-        print("  Note: absolute F1 values are reference only — LOCOMO questions")
-        print("  use exact dates/numbers that models answer with relative phrasing")
-        print("  ('yesterday' vs '7 May 2023'), scoring 0 even when correct.")
+        print("  Note: absolute F1 values are reference only — even with session dates")
+        print("  injected, models may answer temporal questions with relative phrasing")
+        print("  ('yesterday' vs '7 May 2023'), scoring 0 even when conceptually correct.")
         print("  The delta (Δ) is the meaningful metric.")
 
         # F1 breakdown by category
