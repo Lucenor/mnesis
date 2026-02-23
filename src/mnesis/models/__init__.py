@@ -21,11 +21,13 @@ from mnesis.models.message import (
     ToolPart,
     TurnResult,
 )
+from mnesis.models.snapshot import ContextBreakdown, TurnSnapshot
 from mnesis.models.summary import MessageSpan
 
 __all__ = [
     "CompactionConfig",
     "CompactionResult",
+    "ContextBreakdown",
     "FileConfig",
     "FileRefPart",
     "FinishReason",
@@ -42,4 +44,5 @@ __all__ = [
     "TokenUsage",
     "ToolPart",
     "TurnResult",
+    "TurnSnapshot",
 ]

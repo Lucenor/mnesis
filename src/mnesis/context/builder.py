@@ -39,6 +39,10 @@ class BuiltContext:
     has_summary: bool
     oldest_included_message_id: str | None = None
     summary_token_count: int = 0
+    raw_message_tokens: int = 0
+    """Tokens consumed by raw (non-summary) messages included in context."""
+    tool_output_tokens: int = 0
+    """Subset of raw_message_tokens attributable to tool call parts."""
 
 
 class ContextBuilder:
@@ -134,6 +138,19 @@ class ContextBuilder:
                 tokens_used_fb += msg_tokens
             includable_fb.reverse()
             llm_messages_fb = [self._convert_message(m) for m in includable_fb]
+            tool_output_tokens_fb = 0
+            for msg_fb in includable_fb:
+                for part in msg_fb.parts:
+                    if isinstance(part, ToolPart):
+                        if part.compacted_at is not None:
+                            tombstone = (
+                                f"[Tool '{part.tool_name}' output compacted at {part.compacted_at}]"
+                            )
+                            tool_output_tokens_fb += self._estimator.estimate(tombstone, model)
+                        else:
+                            tool_output_tokens_fb += self._estimator.estimate(
+                                self._render_tool_part(part), model
+                            )
             return BuiltContext(
                 messages=llm_messages_fb,
                 system_prompt=system_prompt,
@@ -142,6 +159,8 @@ class ContextBuilder:
                 has_summary=False,
                 oldest_included_message_id=includable_fb[0].id if includable_fb else None,
                 summary_token_count=0,
+                raw_message_tokens=tokens_used_fb,
+                tool_output_tokens=tool_output_tokens_fb,
             )
 
         # Step 3: Separate summaries from messages and compute summary tokens
@@ -199,6 +218,21 @@ class ContextBuilder:
 
         includable.reverse()  # Restore chronological order
 
+        # Compute tool-output token subset across all included raw messages.
+        tool_output_tokens = 0
+        for msg_with_parts in includable:
+            for part in msg_with_parts.parts:
+                if isinstance(part, ToolPart):
+                    if part.compacted_at is not None:
+                        tool_output_tokens += self._estimator.estimate(
+                            f"[Tool '{part.tool_name}' output compacted at {part.compacted_at}]",
+                            model,
+                        )
+                    else:
+                        tool_output_tokens += self._estimator.estimate(
+                            self._render_tool_part(part), model
+                        )
+
         # Step 5: Convert to LLM message format
         llm_messages: list[LLMMessage] = []
 
@@ -233,6 +267,8 @@ class ContextBuilder:
             has_summary=has_summary,
             oldest_included_message_id=includable[0].id if includable else None,
             summary_token_count=summary_token_count,
+            raw_message_tokens=tokens_used,
+            tool_output_tokens=tool_output_tokens,
         )
 
     def _convert_message(self, msg_with_parts: MessageWithParts) -> LLMMessage:
