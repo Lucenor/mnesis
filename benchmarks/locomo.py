@@ -558,7 +558,7 @@ def plot_summary(
             va="center",
             fontsize=10,
             color="#aaaaaa",
-            style="italic",
+            fontstyle="italic",
         )
         ax0.set_title("F1 Delta by Category")
         ax0.axis("off")
