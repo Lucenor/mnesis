@@ -141,8 +141,13 @@ plt.rcParams.update(
 
 
 def _run_key(model: str, conversations: int, questions_per: int, category: int | None) -> str:
-    """Produce a filesystem-safe identifier for a benchmark run configuration."""
-    model_slug = re.sub(r"[^a-zA-Z0-9_-]", "-", model.split("/")[-1])
+    """Produce a filesystem-safe identifier for a benchmark run configuration.
+
+    The full model string (including provider prefix) is slugified to avoid
+    collisions between providers that share a model suffix, e.g.
+    ``openai/gpt-4o`` vs ``azure/gpt-4o`` produce distinct keys.
+    """
+    model_slug = re.sub(r"[^a-zA-Z0-9_-]", "-", model)
     cat = f"cat{category}" if category is not None else "all"
     return f"{model_slug}_c{conversations}_q{questions_per}_{cat}"
 
@@ -904,7 +909,6 @@ examples:
 async def generate_baseline(
     args: argparse.Namespace,
     conversations: list[dict[str, Any]],
-    data_path: Path,
 ) -> None:
     """
     Run the baseline condition for each conversation and save results to disk.
@@ -918,7 +922,6 @@ async def generate_baseline(
         args:          Parsed CLI arguments (model, compaction_model, questions_per,
                        category, metrics_only).
         conversations: List of LOCOMO conversation dicts to evaluate.
-        data_path:     Path to the dataset file (used only for display purposes).
     """
     compaction_model = args.compaction_model or args.model
     key = _run_key(args.model, len(conversations), args.questions_per, args.category)
@@ -962,11 +965,13 @@ async def generate_baseline(
         )
         print(f"done ({time.monotonic() - t0:.1f}s)")
 
-        # Clean up the temporary session database; best-effort, do not abort on failure.
-        try:
-            Path(db_path).unlink(missing_ok=True)
-        except OSError as exc:
-            print(f"  [warn] Could not remove temp DB {db_path}: {exc}", file=sys.stderr)
+        # Clean up the temporary session database and any SQLite WAL/SHM sidecars;
+        # best-effort, do not abort on failure.
+        for path_str in (db_path, f"{db_path}-wal", f"{db_path}-shm"):
+            try:
+                Path(path_str).unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"  [warn] Could not remove temp DB file {path_str}: {exc}", file=sys.stderr)
 
         out_path = BASELINE_DIR / f"{key}_conv{conv_idx}.json"
         with out_path.open("w") as f:
@@ -1017,7 +1022,7 @@ async def main() -> None:
 
     # ── generate-baseline mode ─────────────────────────────────────────
     if args.generate_baseline:
-        await generate_baseline(args, conversations, data_path)
+        await generate_baseline(args, conversations)
         return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1062,6 +1067,29 @@ async def main() -> None:
     for p in baseline_paths:
         with p.open() as f:
             loaded_baselines.append(json.load(f))
+
+    # Warn if full QA run uses baselines generated in metrics-only mode (no QA
+    # results), which would silently produce all-zero F1 scores.
+    if not args.metrics_only:
+        metrics_only_baselines = [
+            p
+            for p, bl in zip(baseline_paths, loaded_baselines, strict=True)
+            if not bl.get("results")
+        ]
+        if metrics_only_baselines:
+            print(
+                "WARNING: The following baseline files contain no QA results (were generated\n"
+                "  with --metrics-only). F1 scores will be meaningless for this run.\n"
+                "  Regenerate baseline without --metrics-only to include QA results:\n"
+                f"  uv run python benchmarks/locomo.py --generate-baseline"
+                f" --model {args.model}"
+                f" --conversations {len(conversations)}"
+                f" --questions-per {args.questions_per}"
+                + (f" --category {args.category}" if args.category else "")
+            )
+            for p in metrics_only_baselines:
+                print(f"    {p}")
+            print()
 
     all_baseline: list[dict[str, Any]] = []
     all_mnesis: list[dict[str, Any]] = []
