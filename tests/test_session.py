@@ -869,3 +869,10 @@ class TestSessionHistory:
         # history() returns a copy — mutating it does not affect internal state
         history.append(history[0])
         assert len(session.history()) == 2
+
+    async def test_history_new_types_importable_from_top_level(self):
+        """ContextBreakdown and TurnSnapshot are importable from top-level mnesis."""
+        from mnesis import ContextBreakdown, TurnSnapshot
+
+        assert ContextBreakdown.__name__ == "ContextBreakdown"
+        assert TurnSnapshot.__name__ == "TurnSnapshot"
