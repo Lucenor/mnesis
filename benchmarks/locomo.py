@@ -58,11 +58,12 @@ try:
     import matplotlib.gridspec as gridspec
     import matplotlib.pyplot as plt
     import numpy as np
+    from tqdm import tqdm
 except ImportError:
     print(
-        "ERROR: matplotlib and numpy are required.\n"
-        "Install:  pip install matplotlib numpy\n"
-        "  or:     uv add --dev matplotlib numpy"
+        "ERROR: matplotlib, numpy, and tqdm are required.\n"
+        "Install:  pip install matplotlib numpy tqdm\n"
+        "  or:     uv add --dev matplotlib numpy tqdm"
     )
     sys.exit(1)
 
@@ -340,7 +341,13 @@ async def run_condition(
         db_path=db_path,
     ) as session:
         # ── inject conversation turns ──────────────────────────────────────
-        for i in range(0, len(turns), 2):
+        for i in tqdm(
+            range(0, len(turns), 2),
+            desc="  injecting",
+            unit="pair",
+            leave=False,
+            dynamic_ncols=True,
+        ):
             user_text = f"{turns[i][0]}: {turns[i][1]}"
             asst_text = (
                 f"{turns[i + 1][0]}: {turns[i + 1][1]}" if i + 1 < len(turns) else "(no reply)"
@@ -367,7 +374,13 @@ async def run_condition(
         # ── QA evaluation ──────────────────────────────────────────────────
         qa_results: list[dict[str, Any]] = []
         if not metrics_only:
-            for qa in qa_pairs[:max_questions]:
+            for qa in tqdm(
+                qa_pairs[:max_questions],
+                desc="  answering",
+                unit="q",
+                leave=False,
+                dynamic_ncols=True,
+            ):
                 try:
                     turn = await session.send(
                         "Based on the conversation above, answer this question "
@@ -1003,6 +1016,31 @@ def replot(results_path: Path, output_dir: Path) -> None:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 
+def _silence_library_logs() -> None:
+    """Suppress INFO/DEBUG output from noisy libraries during benchmark runs.
+
+    Configures both stdlib ``logging`` and ``structlog`` so that mnesis,
+    litellm, aiosqlite, and httpx only emit WARNING-level messages or above.
+    Must be called before any library modules are first imported so that
+    structlog's wrapper class is set before loggers are bound and cached.
+    """
+    import logging
+
+    import structlog
+
+    # Stdlib-backed loggers (litellm, httpx, httpcore, aiosqlite).
+    logging.basicConfig(level=logging.WARNING)
+    for name in ("litellm", "LiteLLM", "httpx", "httpcore", "aiosqlite", "mnesis"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    # structlog uses its own PrintLogger pipeline by default — reconfigure its
+    # wrapper class so all structlog loggers (used by mnesis internals) are
+    # clamped to WARNING and above.
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+    )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="LOCOMO benchmark: measures mnesis compaction quality.",
@@ -1156,33 +1194,38 @@ async def generate_baseline(
         args:          Parsed CLI arguments (model, questions_per, category, metrics_only).
         conversations: List of LOCOMO conversation dicts to evaluate.
     """
+    _silence_library_logs()
+
     key = _run_key(args.model, len(conversations), args.questions_per, args.category)
 
     BASELINE_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("Generating baseline data")
-    print(f"  Model            : {args.model}")
-    print(f"  Conversations    : {len(conversations)}")
-    print(f"  Max questions    : {args.questions_per}")
     cat_label = CATEGORY_NAMES.get(args.category, "all") if args.category else "all"
-    print(f"  Category         : {cat_label}")
-    print(f"  Mode             : {'metrics-only' if args.metrics_only else 'full QA'}")
-    print(f"  Output           : {BASELINE_DIR}\n")
+    mode_label = "metrics-only" if args.metrics_only else "full QA"
+    n = len(conversations)
+    print(
+        f"LOCOMO Baseline  |  model: {args.model}  |  {n} conv{'s' if n != 1 else ''}  "
+        f"|  {args.questions_per} q/conv  |  {mode_label}  |  category: {cat_label}"
+    )
+    print()
 
     files_written: list[Path] = []
 
-    for conv_idx, convo in enumerate(conversations):
+    for conv_idx, convo in tqdm(
+        enumerate(conversations),
+        total=len(conversations),
+        desc="Conversations",
+        unit="conv",
+        dynamic_ncols=True,
+    ):
         spk_a, spk_b = speaker_names(convo)
-        print(f"Conversation {conv_idx + 1}/{len(conversations)}: {spk_a} & {spk_b}")
 
         qa_pairs = extract_qa(convo)
         if args.category is not None:
             qa_pairs = [q for q in qa_pairs if q["category"] == args.category]
         turns = extract_turns(convo)
-        print(f"  Turns: {len(turns)}  QA pairs available: {len(qa_pairs)}")
 
         db_path = str(BASELINE_DIR / f"_tmp_{key}_conv{conv_idx}.db")
-        print("  [baseline] injecting history…", end=" ", flush=True)
         t0 = time.monotonic()
         result = await run_condition(
             convo,
@@ -1194,7 +1237,7 @@ async def generate_baseline(
             max_questions=args.questions_per,
             metrics_only=args.metrics_only,
         )
-        print(f"done ({time.monotonic() - t0:.1f}s)")
+        elapsed = time.monotonic() - t0
 
         # Clean up the temporary session database and any SQLite WAL/SHM sidecars;
         # best-effort, do not abort on failure.
@@ -1211,7 +1254,12 @@ async def generate_baseline(
         with out_path.open("w") as f:
             json.dump(result, f, indent=2)
         files_written.append(out_path)
-        print(f"  Saved: {out_path}")
+
+        n_pairs = result.get("turns_injected", len(turns) // 2)
+        tqdm.write(
+            f"[{conv_idx + 1}/{len(conversations)}] {spk_a} & {spk_b}"
+            f"   {n_pairs} pairs   ({elapsed:.1f}s)"
+        )
 
     print(f"\nBaseline data complete: {len(files_written)} file(s) written to {BASELINE_DIR}")
     print("\nRun the mnesis benchmark against this baseline:")
@@ -1229,6 +1277,7 @@ async def generate_baseline(
 
 
 async def main() -> None:
+    _silence_library_logs()
     args = parse_args()
 
     if args.replot:
@@ -1290,15 +1339,17 @@ async def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("LOCOMO Benchmark")
-    print(f"  Model            : {args.model}")
-    print(f"  Compaction model : {compaction_model}")
-    print(f"  Conversations    : {len(conversations)}")
-    print(f"  Max questions    : {args.questions_per}")
     cat_label = CATEGORY_NAMES.get(args.category, "all") if args.category else "all"
-    print(f"  Category         : {cat_label}")
-    print(f"  Mode             : {'metrics-only' if args.metrics_only else 'full QA'}")
-    print(f"  Output           : {args.output_dir}\n")
+    mode_label = "metrics-only" if args.metrics_only else "full QA"
+    n_convs = len(conversations)
+    conv_label = f"{n_convs} conv{'s' if n_convs != 1 else ''}"
+    print(
+        f"LOCOMO Benchmark  |  model: {args.model}  |  {conv_label}"
+        f"  |  {args.questions_per} q/conv  |  {mode_label}  |  category: {cat_label}"
+    )
+    if compaction_model != args.model:
+        print(f"  compaction model : {compaction_model}")
+    print()
 
     if os.environ.get("MNESIS_MOCK_LLM") == "1" and not args.metrics_only:
         print(
@@ -1361,24 +1412,25 @@ async def main() -> None:
     compact_levels: list[float] = []
     compact_msgs: list[float] = []
 
-    for idx, convo in enumerate(conversations):
+    for idx, convo in tqdm(
+        enumerate(conversations),
+        total=len(conversations),
+        desc="Conversations",
+        unit="conv",
+        dynamic_ncols=True,
+    ):
         spk_a, spk_b = speaker_names(convo)
-        print(f"Conversation {idx + 1}/{len(conversations)}: {spk_a} & {spk_b}")
 
         qa_pairs = extract_qa(convo)
         if args.category is not None:
             qa_pairs = [q for q in qa_pairs if q["category"] == args.category]
-        turns = extract_turns(convo)
-        print(f"  Turns: {len(turns)}  QA pairs available: {len(qa_pairs)}")
 
         # ── baseline condition (loaded from pre-generated file) ────────
         baseline = loaded_baselines[idx]
-        print(f"  [baseline] loaded from {baseline_paths[idx].name}")
 
         db_mnes = str(args.output_dir / f"_conv{idx}_mnesis.db")
 
         # ── mnesis condition ───────────────────────────────────────────
-        print("  [mnesis  ] injecting + compacting…", end=" ", flush=True)
         t0 = time.monotonic()
         mnesis = await run_condition(
             convo,
@@ -1390,7 +1442,7 @@ async def main() -> None:
             max_questions=args.questions_per,
             metrics_only=args.metrics_only,
         )
-        print(f"done ({time.monotonic() - t0:.1f}s)")
+        elapsed = time.monotonic() - t0
 
         all_baseline.extend(baseline["results"])
         all_mnesis.extend(mnesis["results"])
@@ -1402,12 +1454,24 @@ async def main() -> None:
         compact_msgs.append(cr.get("compacted_message_count", 0))
 
         pct = mnesis["token_reduction_pct"]
-        print(f"  Token reduction : {pct:.1f}%")
-        if not args.metrics_only and baseline["results"]:
+        level = cr.get("level_used", 0)
+        n_pairs = mnesis.get("turns_injected", 0)
+
+        # Build a concise one-liner printed after each conversation completes.
+        # Fields included depend on run mode so the line never shows placeholder dashes.
+        summary_parts = [
+            f"[{idx + 1}/{len(conversations)}] {spk_a} & {spk_b}",
+            f"  {n_pairs} pairs",
+            f"  Level {level}",
+            f"  {pct:.1f}%",
+        ]
+        if not args.metrics_only and baseline["results"] and mnesis["results"]:
             b_f1 = overall_f1(baseline["results"])
             m_f1 = overall_f1(mnesis["results"])
             delta = m_f1 - b_f1
-            print(f"  F1 Δ : {delta:+.3f}  (baseline {b_f1:.3f} → mnesis {m_f1:.3f})")
+            summary_parts.append(f"  F1D={delta:+.3f}")
+        summary_parts.append(f"  ({elapsed:.1f}s)")
+        tqdm.write("".join(summary_parts))
 
         # Clean up temporary session database
         try:
