@@ -16,9 +16,15 @@ The F1 difference between conditions answers: *does compaction preserve enough
 information to answer questions accurately?*
 
 Quick start (no API key — token/compaction stats only):
+    uv run python benchmarks/locomo.py --generate-baseline --metrics-only
     uv run python benchmarks/locomo.py --metrics-only
 
+The first command generates baseline data (run once per model). The second
+runs the mnesis condition and compares against those files.
+
 Full QA evaluation (requires an LLM API key):
+    uv run python benchmarks/locomo.py --generate-baseline \\
+        --model anthropic/claude-haiku-4-5 --conversations 1 --questions-per 20
     ANTHROPIC_API_KEY=sk-... uv run python benchmarks/locomo.py \\
         --model anthropic/claude-haiku-4-5 \\
         --conversations 1 \\
@@ -27,13 +33,6 @@ Full QA evaluation (requires an LLM API key):
 Regenerate charts from an existing results file (no API key needed):
     uv run python benchmarks/locomo.py --replot
     uv run python benchmarks/locomo.py --replot --output-dir path/to/results/
-
-Generate baseline data (run once per model; no API key with --metrics-only):
-    uv run python benchmarks/locomo.py --generate-baseline --metrics-only
-
-Then run the mnesis benchmark against that baseline:
-    ANTHROPIC_API_KEY=sk-... uv run python benchmarks/locomo.py \\
-        --model anthropic/claude-haiku-4-5 --conversations 10 --questions-per 300
 
 See benchmarks/README.md for full documentation.
 """
@@ -809,14 +808,19 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  # Dry-run (no API key): token/compaction stats only
+  # Dry-run (no API key): generate baseline, then run mnesis metrics
+  uv run python benchmarks/locomo.py --generate-baseline --metrics-only
   uv run python benchmarks/locomo.py --metrics-only
 
-  # Quick QA evaluation: 1 conversation, 20 questions
+  # Quick QA evaluation: 1 conversation, 20 questions (generate baseline first)
+  uv run python benchmarks/locomo.py --generate-baseline \\
+      --model anthropic/claude-haiku-4-5 --conversations 1 --questions-per 20
   ANTHROPIC_API_KEY=sk-... uv run python benchmarks/locomo.py \\
       --model anthropic/claude-haiku-4-5 --conversations 1 --questions-per 20
 
-  # Full evaluation: all 10 conversations
+  # Full evaluation: all 10 conversations (generate baseline first)
+  uv run python benchmarks/locomo.py --generate-baseline \\
+      --model anthropic/claude-haiku-4-5 --conversations 10 --questions-per 100
   ANTHROPIC_API_KEY=sk-... uv run python benchmarks/locomo.py \\
       --model anthropic/claude-haiku-4-5 --conversations 10 --questions-per 100
 
