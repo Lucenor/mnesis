@@ -329,6 +329,7 @@ async def run_condition(
             turns.append((speaker, text))
         session_idx += 1
 
+    snapshots = []
     async with MnesisSession.open(
         model=model,
         system_prompt=(
@@ -386,6 +387,9 @@ async def run_condition(
                     }
                 )
 
+        # Collect per-turn snapshots before closing the session.
+        snapshots = session.history()
+
     reduction_pct = (1 - tokens_after / tokens_before) * 100 if tokens_before > 0 else 0.0
     return {
         "results": qa_results,
@@ -395,6 +399,15 @@ async def run_condition(
         "compact_result": compact_result.model_dump() if compact_result else None,
         "turns_injected": (len(turns) + 1) // 2,
         "total_qa": len(qa_results),
+        "snapshot_metrics": [
+            {
+                "turn_index": s.turn_index,
+                "context_tokens": s.context_tokens.model_dump(),
+                "compaction_triggered": s.compaction_triggered,
+                "compact_result": s.compact_result.model_dump() if s.compact_result else None,
+            }
+            for s in snapshots
+        ],
     }
 
 
@@ -741,6 +754,134 @@ def plot_summary(
     print(f"  Saved: {output_path}")
 
 
+def plot_sawtooth(
+    snapshot_data: dict[str, Any],
+    output_path: Path,
+) -> None:
+    """
+    Line plot of total context-window tokens per turn for baseline and mnesis.
+
+    Shows the sawtooth pattern of mnesis (tokens rise → compaction → drop → rise)
+    versus the monotonically growing baseline. One subplot per evaluated
+    conversation, arranged in a grid.
+
+    Args:
+        snapshot_data: The ``"snapshot_metrics"`` dict from the results JSON,
+            with keys ``"baseline"`` and ``"mnesis"``. Each value is a list
+            of per-conversation snapshot lists (one list of snapshot dicts
+            per conversation). ``None`` entries are skipped.
+        output_path:   Destination PNG path.
+    """
+    baseline_list: list[Any] = snapshot_data.get("baseline") or []
+    mnesis_list: list[Any] = snapshot_data.get("mnesis") or []
+
+    n_convos = max(len(baseline_list), len(mnesis_list))
+    if n_convos == 0:
+        return
+
+    # Grid layout: up to 3 columns
+    ncols = min(n_convos, 3)
+    nrows = math.ceil(n_convos / ncols)
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(max(6, ncols * 5), max(4, nrows * 3.5)),
+        squeeze=False,
+    )
+
+    for conv_idx in range(n_convos):
+        row, col = divmod(conv_idx, ncols)
+        ax = axes[row][col]
+
+        bl_snaps: list[dict[str, Any]] = (
+            baseline_list[conv_idx] if conv_idx < len(baseline_list) else None
+        ) or []
+        mn_snaps: list[dict[str, Any]] = (
+            mnesis_list[conv_idx] if conv_idx < len(mnesis_list) else None
+        ) or []
+
+        if bl_snaps:
+            bl_turns = [s["turn_index"] for s in bl_snaps]
+            bl_totals = [s["context_tokens"]["total"] for s in bl_snaps]
+            ax.plot(
+                bl_turns,
+                bl_totals,
+                color=COLORS["baseline"],
+                linewidth=1.5,
+                label="Baseline",
+            )
+
+        if mn_snaps:
+            mn_turns = [s["turn_index"] for s in mn_snaps]
+            mn_totals = [s["context_tokens"]["total"] for s in mn_snaps]
+            ax.plot(
+                mn_turns,
+                mn_totals,
+                color=COLORS["mnesis"],
+                linewidth=1.5,
+                label="Mnesis",
+            )
+
+            # Mark compaction events recorded in snapshot data (compaction_triggered=True).
+            # Label only the first line per subplot to avoid duplicate legend entries.
+            compact_turns = [s["turn_index"] for s in mn_snaps if s.get("compaction_triggered")]
+            ct_label_added = False
+            for ct in compact_turns:
+                ax.axvline(
+                    ct,
+                    color=COLORS["reduction"],
+                    linestyle="--",
+                    linewidth=1.0,
+                    alpha=0.7,
+                    label="Compaction (triggered)" if not ct_label_added else None,
+                )
+                ct_label_added = True
+
+            # When compaction_triggered is not set in all snapshots, fall back to
+            # valley detection: mark turns where total context drops >20%.
+            # Label only the first valley to avoid duplicate legend entries.
+            valleys = [
+                mn_turns[i]
+                for i in range(1, len(mn_totals))
+                if mn_totals[i] < mn_totals[i - 1] * 0.8  # >20% drop signals compaction
+            ]
+            valley_label_added = False
+            for v in valleys:
+                ax.axvline(
+                    v,
+                    color=COLORS["reduction"],
+                    linestyle=":",
+                    linewidth=1.2,
+                    alpha=0.9,
+                    label="Compaction (valley)" if not valley_label_added else None,
+                )
+                valley_label_added = True
+
+        ax.set_title(f"Conv {conv_idx + 1}", fontsize=9)
+        ax.set_xlabel("Turn", fontsize=8)
+        ax.set_ylabel("Context tokens", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(axis="y", alpha=0.3)
+        if conv_idx == 0:
+            ax.legend(fontsize=7, loc="upper left")
+
+    # Hide unused subplots
+    for extra_idx in range(n_convos, nrows * ncols):
+        row, col = divmod(extra_idx, ncols)
+        axes[row][col].set_visible(False)
+
+    fig.suptitle(
+        "LOCOMO: Context-Window Tokens per Turn  (sawtooth = compaction events)",
+        fontsize=11,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(output_path)
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
 # ── replot ────────────────────────────────────────────────────────────────────
 
 
@@ -849,6 +990,12 @@ def replot(results_path: Path, output_dir: Path) -> None:
         output_dir / f"locomo_summary_{key_suffix}.png",
         metrics_only=metrics_only,
     )
+
+    snapshot_data: dict[str, Any] | None = data.get("snapshot_metrics")
+    if snapshot_data is not None:
+        plot_sawtooth(snapshot_data, output_dir / f"locomo_sawtooth_{key_suffix}.png")
+    else:
+        print("  (No snapshot_metrics in results file — skipping sawtooth plot.)")
 
     print("\nDone.")
 
@@ -978,6 +1125,15 @@ examples:
             "--metrics-only. Use this before running the main benchmark."
         ),
     )
+    p.add_argument(
+        "--no-snapshot-metrics",
+        action="store_true",
+        dest="no_snapshot_metrics",
+        help=(
+            "Omit per-turn context snapshot data from the results JSON "
+            "(smaller file, faster serialisation)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1047,6 +1203,9 @@ async def generate_baseline(
                 Path(path_str).unlink(missing_ok=True)
             except OSError as exc:
                 print(f"  [warn] Could not remove temp DB file {path_str}: {exc}", file=sys.stderr)
+
+        if args.no_snapshot_metrics:
+            result.pop("snapshot_metrics", None)
 
         out_path = BASELINE_DIR / f"{key}_conv{conv_idx}.json"
         with out_path.open("w") as f:
@@ -1197,6 +1356,7 @@ async def main() -> None:
 
     all_baseline: list[dict[str, Any]] = []
     all_mnesis: list[dict[str, Any]] = []
+    all_mnesis_raw: list[dict[str, Any]] = []  # full per-conversation result dicts
     token_data: list[dict[str, Any]] = []
     compact_levels: list[float] = []
     compact_msgs: list[float] = []
@@ -1234,6 +1394,7 @@ async def main() -> None:
 
         all_baseline.extend(baseline["results"])
         all_mnesis.extend(mnesis["results"])
+        all_mnesis_raw.append(mnesis)
         token_data.append({"baseline": baseline, "mnesis": mnesis})
 
         cr = mnesis.get("compact_result") or {}
@@ -1318,6 +1479,20 @@ async def main() -> None:
         print(f"  {'Overall':<16} {b_overall:>10.3f} {m_overall:>10.3f} {delta_overall:>+8.3f}")
         print(f"  {'Human baseline':<16} {HUMAN_F1:>10.3f}")
 
+    # ── build snapshot_metrics payload ─────────────────────────────────
+    snapshot_metrics: dict[str, Any] | None
+    if args.no_snapshot_metrics:
+        snapshot_metrics = None
+    else:
+        # Check whether any baseline file has snapshot data; if not all do,
+        # the sawtooth chart will have gaps — still include what we have.
+        bl_snapshots: list[Any] = [bl.get("snapshot_metrics") for bl in loaded_baselines]
+        mn_snapshots: list[Any] = [r.get("snapshot_metrics") for r in all_mnesis_raw]
+        has_any_snapshots = any(s is not None for s in bl_snapshots + mn_snapshots)
+        snapshot_metrics = (
+            {"baseline": bl_snapshots, "mnesis": mn_snapshots} if has_any_snapshots else None
+        )
+
     # ── save raw results ───────────────────────────────────────────────
     key = _run_key(args.model, len(conversations), args.questions_per, args.category)
     out_json = args.output_dir / f"locomo_{key}.json"
@@ -1349,6 +1524,7 @@ async def main() -> None:
                     for d in token_data
                 ],
                 "compact_stats": compact_stats,
+                "snapshot_metrics": snapshot_metrics,
             },
             f,
             indent=2,
@@ -1374,6 +1550,8 @@ async def main() -> None:
         args.output_dir / f"locomo_summary_{key}.png",
         metrics_only=args.metrics_only,
     )
+    if snapshot_metrics is not None:
+        plot_sawtooth(snapshot_metrics, args.output_dir / f"locomo_sawtooth_{key}.png")
 
     print("\nDone.")
 
