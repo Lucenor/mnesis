@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+import mnesis
+from mnesis import MnesisSession
 from mnesis.models.config import (
     CompactionConfig,
     FileConfig,
@@ -176,8 +178,6 @@ class TestDualDbPathRaisesValueError:
     """M-6: supplying both db_path and config.store.db_path raises ValueError."""
 
     async def test_create_raises_on_dual_db_path(self, tmp_path: Path) -> None:
-        from mnesis import MnesisConfig, MnesisSession, StoreConfig
-
         cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "a.db")))
         with pytest.raises(ValueError, match="db_path"):
             await MnesisSession.create(
@@ -187,8 +187,6 @@ class TestDualDbPathRaisesValueError:
             )
 
     async def test_load_raises_on_dual_db_path(self, tmp_path: Path) -> None:
-        from mnesis import MnesisConfig, MnesisSession, StoreConfig
-
         cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "a.db")))
         with pytest.raises(ValueError, match="db_path"):
             await MnesisSession.load(
@@ -202,19 +200,13 @@ class TestVersion:
     """__version__ is sourced from installed package metadata."""
 
     def test_version_matches_package_metadata(self) -> None:
-        import mnesis
-
         assert mnesis.__version__ == version("mnesis")
 
     def test_version_is_nonempty_string(self) -> None:
-        import mnesis
-
         assert isinstance(mnesis.__version__, str)
         assert mnesis.__version__ != ""
 
     def test_version_has_semver_shape(self) -> None:
-        import mnesis
-
         parts = mnesis.__version__.split(".")
         assert len(parts) >= 2, "Expected at least MAJOR.MINOR"
         assert all(p.split("-")[0].isdigit() for p in parts), "Each segment must start with digits"
