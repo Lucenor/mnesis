@@ -10,6 +10,8 @@ Primary entry point::
         print(result.text)
 """
 
+from importlib.metadata import version
+
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models import (
     CompactionConfig,
@@ -37,7 +39,7 @@ from mnesis.session import MnesisSession
 from mnesis.store.immutable import MnesisStoreError, SessionNotFoundError
 from mnesis.tokens.estimator import TokenEstimator
 
-__version__ = "0.1.1"
+__version__ = version("mnesis")
 
 __all__ = [
     "AgentMapBatch",

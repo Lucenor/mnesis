@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -195,3 +196,25 @@ class TestDualDbPathRaisesValueError:
                 config=cfg,
                 db_path=str(tmp_path / "b.db"),
             )
+
+
+class TestVersion:
+    """__version__ is sourced from installed package metadata."""
+
+    def test_version_matches_package_metadata(self) -> None:
+        import mnesis
+
+        assert mnesis.__version__ == version("mnesis")
+
+    def test_version_is_nonempty_string(self) -> None:
+        import mnesis
+
+        assert isinstance(mnesis.__version__, str)
+        assert mnesis.__version__ != ""
+
+    def test_version_has_semver_shape(self) -> None:
+        import mnesis
+
+        parts = mnesis.__version__.split(".")
+        assert len(parts) >= 2, "Expected at least MAJOR.MINOR"
+        assert all(p.split("-")[0].isdigit() for p in parts), "Each segment must start with digits"
