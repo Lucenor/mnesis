@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -175,7 +177,7 @@ class TestDualDbPathRaisesValueError:
     """M-6: supplying both db_path and config.store.db_path raises ValueError."""
 
     async def test_create_raises_on_dual_db_path(self, tmp_path: Path) -> None:
-        from mnesis import MnesisConfig, MnesisSession, StoreConfig
+        from mnesis import MnesisSession
 
         cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "a.db")))
         with pytest.raises(ValueError, match="db_path"):
@@ -186,7 +188,7 @@ class TestDualDbPathRaisesValueError:
             )
 
     async def test_load_raises_on_dual_db_path(self, tmp_path: Path) -> None:
-        from mnesis import MnesisConfig, MnesisSession, StoreConfig
+        from mnesis import MnesisSession
 
         cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "a.db")))
         with pytest.raises(ValueError, match="db_path"):
@@ -195,3 +197,25 @@ class TestDualDbPathRaisesValueError:
                 config=cfg,
                 db_path=str(tmp_path / "b.db"),
             )
+
+
+class TestVersion:
+    """__version__ is sourced from installed package metadata."""
+
+    def test_version_matches_package_metadata(self) -> None:
+        from mnesis import __version__
+
+        assert __version__ == version("mnesis")
+
+    def test_version_is_nonempty_string(self) -> None:
+        from mnesis import __version__
+
+        assert isinstance(__version__, str)
+        assert __version__ != ""
+
+    def test_version_has_semver_shape(self) -> None:
+        from mnesis import __version__
+
+        parts = __version__.split(".")
+        assert len(parts) >= 2, "Expected at least MAJOR.MINOR"
+        assert all(re.match(r"^\d", p) for p in parts), "Each segment must start with a digit"
