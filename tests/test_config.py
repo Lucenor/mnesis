@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pytest
 
-import mnesis
-from mnesis import MnesisSession
+from mnesis import MnesisSession, __version__
 from mnesis.models.config import (
     CompactionConfig,
     FileConfig,
@@ -201,13 +200,13 @@ class TestVersion:
     """__version__ is sourced from installed package metadata."""
 
     def test_version_matches_package_metadata(self) -> None:
-        assert mnesis.__version__ == version("mnesis")
+        assert __version__ == version("mnesis")
 
     def test_version_is_nonempty_string(self) -> None:
-        assert isinstance(mnesis.__version__, str)
-        assert mnesis.__version__ != ""
+        assert isinstance(__version__, str)
+        assert __version__ != ""
 
     def test_version_has_semver_shape(self) -> None:
-        parts = mnesis.__version__.split(".")
+        parts = __version__.split(".")
         assert len(parts) >= 2, "Expected at least MAJOR.MINOR"
         assert all(re.match(r"^\d", p) for p in parts), "Each segment must start with a digit"
