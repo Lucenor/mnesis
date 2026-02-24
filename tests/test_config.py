@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from importlib.metadata import version
 from pathlib import Path
 
@@ -209,4 +210,4 @@ class TestVersion:
     def test_version_has_semver_shape(self) -> None:
         parts = mnesis.__version__.split(".")
         assert len(parts) >= 2, "Expected at least MAJOR.MINOR"
-        assert all(p.split("-")[0].isdigit() for p in parts), "Each segment must start with digits"
+        assert all(re.match(r"^\d", p) for p in parts), "Each segment must start with a digit"

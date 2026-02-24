@@ -10,7 +10,7 @@ Primary entry point::
         print(result.text)
 """
 
-from importlib.metadata import version
+from importlib.metadata import version as _version
 
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models import (
@@ -39,7 +39,7 @@ from mnesis.session import MnesisSession
 from mnesis.store.immutable import MnesisStoreError, SessionNotFoundError
 from mnesis.tokens.estimator import TokenEstimator
 
-__version__ = version("mnesis")
+__version__ = _version("mnesis")
 
 __all__ = [
     "AgentMapBatch",
