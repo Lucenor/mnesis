@@ -264,7 +264,7 @@ jobs:
           upload-artifact: false
 
       - name: Attest SBOM
-        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.0.0
+        uses: actions/attest-sbom@07e74fc4e78d1aad915e867f9a094073a9f71527 # v2.0.0
         with:
           subject-path: dist/*
           sbom-path: sbom.spdx.json
