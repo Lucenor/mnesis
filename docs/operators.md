@@ -476,16 +476,14 @@ directly from the source:
   `AgenticMap` as a tool is not prevented at runtime, but the behavior is
   undefined and not tested.
 
-- `read_only=True` is supported. When set, sub-sessions receive `tools=None` —
-  they can reason over multiple turns but cannot invoke any tools. This is the
-  simplest correct enforcement: no partial filtering, no new permission model,
-  just "tools or no tools." If `tools=[...]` is passed alongside `read_only=True`,
-  a warning is logged and the tools are still stripped.
+- `read_only=True` **raises `NotImplementedError`** (not yet implemented).
+  Always pass `read_only=False` to proceed. Write-tool filtering is planned
+  for a future release.
 
 ```python
-# Sub-sessions reason multi-turn but have no tool access:
+# This raises NotImplementedError:
 await agentic_map.run_all(inputs=..., read_only=True, ...)
 
-# Sub-sessions have full tool access (default):
+# Correct:
 await agentic_map.run_all(inputs=..., read_only=False, ...)
 ```
