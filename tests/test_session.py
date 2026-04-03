@@ -1197,7 +1197,7 @@ class TestRetryResilience:
             except TimeoutError:
                 send_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await send_task
+                    _ = await send_task
                 pytest.fail("send() did not finish promptly after close() cancelled retry sleep")
             except Exception:
                 pass  # DB-closed or other error after cancellation — expected
