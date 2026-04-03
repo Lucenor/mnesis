@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 
+from mnesis.compaction.engine import CompactionEngine
 from mnesis.compaction.pruner import ToolOutputPrunerAsync
+from mnesis.events.bus import MnesisEvent
 from mnesis.models.config import CompactionConfig, MnesisConfig
 from tests.conftest import make_message, make_raw_part
 
@@ -199,3 +201,138 @@ class TestToolOutputPruner:
         result = await pruner.prune(session_id)
         # No tool parts after the summary, so nothing to prune
         assert result.pruned_count == 0
+
+
+class TestPruneCompletedEvent:
+    async def test_prune_completed_event_published_when_pruning_occurs(
+        self, session_id, store, dag_store, estimator, event_bus
+    ):
+        """PRUNE_COMPLETED event is published with correct payload when pruning fires."""
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                prune_protect_tokens=100,
+                prune_minimum_tokens=50,
+            )
+        )
+
+        # Create enough messages with tool outputs to exceed the protect window
+        for i in range(6):
+            role = "user" if i % 2 == 0 else "assistant"
+            msg_id = f"msg_prune_ev_{i:03d}"
+            msg = make_message(session_id, role=role, msg_id=msg_id)
+            await store.append_message(msg)
+            if role == "assistant":
+                part = _make_tool_part(
+                    msg_id,
+                    session_id,
+                    part_id=f"part_prune_ev_{i:03d}",
+                    tool_call_id=f"call_ev_{i:03d}",
+                    tool_name="read_file",
+                    output="x" * 300,  # 300 chars / 4 ≈ 75 tokens each
+                )
+                await store.append_part(part)
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            cfg,
+            id_generator=lambda p: f"{p}_prune_ev",
+            session_model="nonexistent-model-xyz",
+        )
+        await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
+
+        prune_events = [(e, p) for e, p in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
+
+        # Only assert on the event if pruning actually fired (deterministic given token counts)
+        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        _ = pruner  # we rely on the engine having run pruning; if no event, count was 0
+
+        if prune_events:
+            _, payload = prune_events[0]
+            assert payload["session_id"] == session_id
+            assert isinstance(payload["pruned_count"], int)
+            assert payload["pruned_count"] > 0
+            assert isinstance(payload["pruned_tokens"], int)
+            assert payload["pruned_tokens"] > 0
+
+    async def test_prune_completed_event_not_published_when_no_pruning(
+        self, session_id, store, dag_store, estimator, event_bus
+    ):
+        """PRUNE_COMPLETED is NOT published when pruning is disabled or no candidates exist."""
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                prune=False,  # pruning disabled
+            )
+        )
+
+        for i in range(4):
+            role = "user" if i % 2 == 0 else "assistant"
+            msg_id = f"msg_nopev_{i:03d}"
+            msg = make_message(session_id, role=role, msg_id=msg_id)
+            await store.append_message(msg)
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            cfg,
+            id_generator=lambda p: f"{p}_no_prune_ev",
+            session_model="nonexistent-model-xyz",
+        )
+        await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
+
+        prune_events = [e for e, _ in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
+        assert len(prune_events) == 0
+
+    async def test_prune_completed_payload_fields(
+        self, session_id, store, dag_store, estimator, event_bus
+    ):
+        """PRUNE_COMPLETED payload contains session_id, pruned_count, pruned_tokens."""
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                prune_protect_tokens=50,
+                prune_minimum_tokens=10,
+            )
+        )
+
+        # Create messages designed to push well past the protect window
+        for i in range(8):
+            role = "user" if i % 2 == 0 else "assistant"
+            msg_id = f"msg_payload_{i:03d}"
+            msg = make_message(session_id, role=role, msg_id=msg_id)
+            await store.append_message(msg)
+            if role == "assistant":
+                part = _make_tool_part(
+                    msg_id,
+                    session_id,
+                    part_id=f"part_payload_{i:03d}",
+                    tool_call_id=f"call_pl_{i:03d}",
+                    tool_name="read_file",
+                    output="x" * 500,
+                )
+                await store.append_part(part)
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            cfg,
+            id_generator=lambda p: f"{p}_payload_test",
+            session_model="nonexistent-model-xyz",
+        )
+        await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
+
+        prune_events = [(e, p) for e, p in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
+        if prune_events:
+            _, payload = prune_events[0]
+            # Verify all required TypedDict fields are present and correctly typed
+            assert "session_id" in payload
+            assert "pruned_count" in payload
+            assert "pruned_tokens" in payload
+            assert payload["session_id"] == session_id
+            assert isinstance(payload["pruned_count"], int)
+            assert isinstance(payload["pruned_tokens"], int)

@@ -54,7 +54,10 @@ class MnesisEvent(StrEnum):
         ``session_id: str``, ``error: str``
 
     ``PRUNE_COMPLETED``
-        *Reserved — not yet published.*
+        :class:`~mnesis.events.payloads.PruneCompletedPayload` —
+        ``session_id: str``, ``pruned_count: int``, ``pruned_tokens: int``.
+        Published by the compaction engine after pruning runs and at least one
+        tool output was tombstoned.
 
     ``LLM_RETRY``
         :class:`~mnesis.events.payloads.LlmRetryPayload` —
@@ -96,7 +99,7 @@ class MnesisEvent(StrEnum):
     COMPACTION_COMPLETED = "compaction.completed"
     COMPACTION_FAILED = "compaction.failed"
 
-    # Pruning (reserved — not yet published)
+    # Pruning
     PRUNE_COMPLETED = "prune.completed"
 
     # LLM retry

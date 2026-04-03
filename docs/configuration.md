@@ -184,3 +184,42 @@ def on_retry(event: MnesisEvent, payload: LlmRetryPayload) -> None:
 
 session.event_bus.subscribe(MnesisEvent.LLM_RETRY, on_retry)  # type: ignore[arg-type]
 ```
+
+---
+
+## model_overrides
+
+`MnesisConfig.model_overrides` is a `dict[str, int]` that lets you override
+the auto-detected `context_limit` and `max_output_tokens` for the model being
+used in a session. This is useful for custom fine-tuned models, private
+deployments, or models that litellm does not yet know about.
+
+Supported keys: `context_limit` and `max_output_tokens`. Only the fields you
+provide are overridden; omitted fields retain their auto-detected values.
+
+```python
+from mnesis import MnesisSession, MnesisConfig
+
+config = MnesisConfig(
+    # A fine-tuned model served on a custom endpoint with a 32K context.
+    model_overrides={
+        "context_limit": 32_768,
+        "max_output_tokens": 4_096,
+    },
+)
+
+async with MnesisSession.open(model="openai/my-finetuned-gpt4", config=config) as session:
+    result = await session.send("Hello from my fine-tuned model!")
+```
+
+The same `model_overrides` dict is applied to both the session model and the
+compaction model (if `compaction.compaction_model` is set). Because overrides
+are a single flat dict applied to whichever model is active, they are most
+useful when the session model and compaction model are the same custom model,
+or when both models share the same context and output limits.
+
+!!! note
+    `model_overrides` only affects how Mnesis allocates the context budget and
+    compaction thresholds — it does not change how litellm routes the request.
+    You still need to configure litellm (API base, headers, etc.) separately
+    for non-standard endpoints.

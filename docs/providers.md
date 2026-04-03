@@ -90,6 +90,38 @@ litellm.headers = {"X-Custom-Header": "value"}
 
 See the [litellm provider docs](https://docs.litellm.ai/docs/providers) for the full list of supported providers and their options.
 
+## Custom and fine-tuned models
+
+When you use a custom fine-tuned model or a private model deployment that
+litellm does not know about, Mnesis falls back to conservative defaults for
+`context_limit` and `max_output_tokens`. Use `MnesisConfig.model_overrides` to
+tell Mnesis the actual limits so it can allocate the context budget correctly.
+
+```python
+from mnesis import MnesisSession, MnesisConfig
+
+config = MnesisConfig(
+    model_overrides={
+        # Fine-tuned model with a 32K context window.
+        "openai/my-finetuned-gpt4": {
+            "context_limit": 32_768,
+            "max_output_tokens": 4_096,
+        },
+    }
+)
+
+async with MnesisSession.open(model="openai/my-finetuned-gpt4", config=config) as session:
+    result = await session.send("Hello!")
+```
+
+Keys in `model_overrides` must match the exact model string passed to
+`MnesisSession.open()` or `MnesisSession.create()`. Only the fields you
+provide are overridden — if you omit `max_output_tokens`, the auto-detected
+value is used.
+
+See [Configuration — model_overrides](configuration.md#model_overrides) for
+the full reference.
+
 ## Prefer your own SDK?
 
 If you want to use the Anthropic, OpenAI, or another SDK directly for LLM calls, see [BYO-LLM](byo-llm.md) — mnesis can act as a pure memory/compaction layer without routing calls through litellm at all.
