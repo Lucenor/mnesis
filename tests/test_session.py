@@ -1577,7 +1577,8 @@ class TestSessionCoverageGaps:
             db_path=str(tmp_path / "test.db"),
         ) as session:
             session.subscribe(
-                MnesisEvent.MESSAGE_CREATED, lambda event, payload: received.append(payload)
+                MnesisEvent.MESSAGE_CREATED,
+                lambda event, payload: received.append(payload),
             )
             await session.send("Hi")
 
