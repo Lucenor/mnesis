@@ -127,7 +127,7 @@ class LlmRetryPayload(TypedDict):
     max_retries: int
     """Maximum number of retries configured for this session."""
     error_type: str
-    """Fully-qualified exception class name (e.g. ``"litellm.RateLimitError"``)."""
+    """Fully-qualified exception class name (e.g. ``"litellm.exceptions.RateLimitError"``)."""
     error_message: str
     """Human-readable error message from the exception."""
     delay_seconds: float

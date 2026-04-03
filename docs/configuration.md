@@ -115,7 +115,9 @@ Controls automatic retry of transient LLM errors inside `send()`. Retry is **opt
 | `max_delay` | `60.0` | Maximum delay cap in seconds |
 | `jitter` | `True` | Add random jitter (sampled from `[0, base_delay)`) to spread retries |
 
-**Backoff formula:** `min(base_delay × 2^attempt + jitter, max_delay)`
+**Backoff formula:** `min(base_delay × 2^(attempt-1) + jitter, max_delay)`
+
+where `attempt` is the 1-based retry number matching `LlmRetryPayload.attempt` (first retry = 1, so the first backoff = `base_delay × 2^0 = base_delay`).
 
 ### Retryable errors
 

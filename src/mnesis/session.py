@@ -469,20 +469,52 @@ class MnesisSession:
         # Retry loop: wraps ONLY the LLM call, not the message shell creation.
         # The assistant message row (assistant_msg_id) was already appended above
         # and is reused across all retry attempts to preserve immutable-store invariant.
+        #
+        # on_part buffering: to prevent duplicate/partial streamed output reaching
+        # callers on failed attempts, each attempt collects parts into a local buffer.
+        # Parts are forwarded to the caller's on_part only after the attempt succeeds.
         import os
 
         retry_cfg = self._config.session.retry
         _is_mock = os.environ.get("MNESIS_MOCK_LLM") == "1"
         for _attempt in range(retry_cfg.max_retries + 1):
+            _buffered_parts: list[MessagePart] = []
+            # Build a per-attempt closure bound to this iteration's _buffered_parts
+            # list via default argument to avoid the B023 loop-variable capture issue.
+            _attempt_on_part: Callable[[MessagePart], None] | None = None
+            if on_part is not None:
+
+                def _make_buffering_on_part(
+                    buf: list[MessagePart],
+                ) -> Callable[[MessagePart], None]:
+                    def _cb(part: MessagePart, _buf: list[MessagePart] = buf) -> None:
+                        _buf.append(part)
+
+                    return _cb
+
+                _attempt_on_part = _make_buffering_on_part(_buffered_parts)
+
             try:
                 if _is_mock:
                     text_accumulator, final_tokens, finish_reason = await self._mock_response(
-                        llm_messages, on_part, assistant_msg_id
+                        llm_messages,
+                        _attempt_on_part,
+                        assistant_msg_id,
                     )
                 else:
                     text_accumulator, final_tokens, finish_reason = await self._stream_response(
-                        llm_messages, sys_prompt, tools, on_part, assistant_msg_id
+                        llm_messages,
+                        sys_prompt,
+                        tools,
+                        _attempt_on_part,
+                        assistant_msg_id,
                     )
+                # Attempt succeeded — forward buffered parts to caller now.
+                if on_part is not None:
+                    for _part in _buffered_parts:
+                        _result = on_part(_part)
+                        if asyncio.iscoroutine(_result):
+                            await _result
                 break  # success — exit retry loop
             except Exception as exc:
                 if not self._is_retryable(exc) or _attempt >= retry_cfg.max_retries:
@@ -509,13 +541,13 @@ class MnesisSession:
                         "session_id": self._session_id,
                         "attempt": _attempt + 1,
                         "max_retries": retry_cfg.max_retries,
-                        "error_type": type(exc).__qualname__,
+                        "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
                         "error_message": str(exc),
                         "delay_seconds": delay,
                     },
                 )
                 # Sleep in a cancellable task so close() can abort the wait.
-                self._retry_sleep_task = asyncio.get_event_loop().create_task(asyncio.sleep(delay))
+                self._retry_sleep_task = asyncio.create_task(asyncio.sleep(delay))
                 try:
                     await self._retry_sleep_task
                 except asyncio.CancelledError:

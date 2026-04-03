@@ -175,7 +175,7 @@ Published on each retry attempt, immediately before the backoff sleep begins. On
 | `session_id` | `str` | The session retrying the LLM call |
 | `attempt` | `int` | Current attempt number (1-based: first retry is `1`) |
 | `max_retries` | `int` | Maximum retries configured for this session |
-| `error_type` | `str` | Fully-qualified exception class name (e.g. `"RateLimitError"`) |
+| `error_type` | `str` | Fully-qualified exception class name (e.g. `"litellm.exceptions.RateLimitError"`) |
 | `error_message` | `str` | Human-readable error message from the exception |
 | `delay_seconds` | `float` | Seconds the session will sleep before the next attempt |
 

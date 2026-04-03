@@ -1173,8 +1173,17 @@ class TestRetryResilience:
             # Run send() in background; it will hit the first error and go to sleep.
             send_task = asyncio.create_task(_send_and_collect())
 
-            # Wait briefly for the retry sleep to be registered.
-            await asyncio.sleep(0.05)
+            # Wait deterministically for the retry sleep task to be registered and
+            # running, rather than relying on a fixed asyncio.sleep() delay that can
+            # be too short on a slow CI runner.
+            async def _wait_for_retry_sleep() -> None:
+                while True:
+                    t = getattr(session, "_retry_sleep_task", None)
+                    if t is not None and not t.done():
+                        return
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(_wait_for_retry_sleep(), timeout=5.0)
 
             # close() must cancel the sleep so send() unblocks.
             await session.close()
@@ -1184,6 +1193,13 @@ class TestRetryResilience:
             # either is acceptable; what matters is it finishes promptly.
             try:
                 await asyncio.wait_for(send_task, timeout=2.0)
+            except TimeoutError:
+                send_task.cancel()
+                try:
+                    await send_task
+                except asyncio.CancelledError:
+                    pass
+                pytest.fail("send() did not finish promptly after close() cancelled retry sleep")
             except Exception:
                 pass  # DB-closed or other error after cancellation — expected
 
