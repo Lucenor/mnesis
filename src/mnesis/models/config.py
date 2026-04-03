@@ -178,6 +178,65 @@ class OperatorConfig(BaseModel):
     )
 
 
+class RetryConfig(BaseModel):
+    """
+    Configuration for automatic retry of transient LLM errors in ``send()``.
+
+    Retry is opt-in: the default ``max_retries=0`` means ``send()`` fails
+    immediately on any LLM error, preserving the pre-0.3.0 behaviour.
+
+    **Differences from OperatorConfig.max_retries**
+
+    ``OperatorConfig.max_retries`` handles per-item validation errors inside
+    ``LLMMap`` and ``AgenticMap`` operators — a different failure domain.
+    This ``RetryConfig`` handles *transient LLM transport errors* (rate limits,
+    server errors, timeouts, connection failures) in the ``send()`` call path.
+
+    **AgenticMap sub-sessions**
+
+    Each ``AgenticMap`` sub-session has its own independent ``RetryConfig``.
+    The effective maximum LLM calls per sub-agent is
+    ``(max_retries + 1) * max_turns``.  Plan capacity accordingly.
+
+    **litellm num_retries interaction**
+
+    Mnesis explicitly passes ``num_retries=0`` to ``litellm.acompletion()`` to
+    disable litellm's built-in retry mechanism and prevent double-retrying.
+    If you set ``max_retries > 0`` here, all retry logic is owned by Mnesis:
+    backoff, jitter, event publication, and cancellation via ``close()``.
+    """
+
+    max_retries: int = Field(
+        default=0,
+        ge=0,
+        le=20,
+        description=(
+            "Maximum number of retry attempts on transient LLM errors. "
+            "0 (default) disables retry entirely."
+        ),
+    )
+
+    base_delay: float = Field(
+        default=1.0,
+        ge=0,
+        description="Base delay in seconds for exponential backoff. 0 disables sleep.",
+    )
+
+    max_delay: float = Field(
+        default=60.0,
+        ge=0,
+        description="Maximum delay cap in seconds. 0 disables sleep (useful in tests).",
+    )
+
+    jitter: bool = Field(
+        default=True,
+        description=(
+            "Add random jitter to backoff delay to avoid thundering-herd. "
+            "Jitter is sampled uniformly from ``[0, base_delay)``."
+        ),
+    )
+
+
 class SessionConfig(BaseModel):
     """Configuration for session-level behaviour."""
 
@@ -188,6 +247,11 @@ class SessionConfig(BaseModel):
         description=(
             "Number of consecutive identical tool calls that triggers doom loop detection."
         ),
+    )
+
+    retry: RetryConfig = Field(
+        default_factory=RetryConfig,
+        description="Automatic retry configuration for transient LLM errors in send().",
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -126,6 +127,8 @@ class MnesisSession:
         # Holds a CompactionResult from compact() or a completed background task
         # so the next snapshot can report it via compact_result.
         self._pending_compact_result: CompactionResult | None = None
+        # Holds the current retry backoff sleep task so close() can cancel it.
+        self._retry_sleep_task: asyncio.Task[None] | None = None
 
     @classmethod
     async def create(
@@ -463,22 +466,97 @@ class MnesisSession:
         compaction_triggered = False
         compaction_result_obj: CompactionResult | None = None
 
-        try:
-            # Check for mock mode (for examples without API keys)
-            import os
+        # Retry loop: wraps ONLY the LLM call, not the message shell creation.
+        # The assistant message row (assistant_msg_id) was already appended above
+        # and is reused across all retry attempts to preserve immutable-store invariant.
+        #
+        # on_part buffering: to prevent duplicate/partial streamed output reaching
+        # callers on failed attempts, each attempt collects parts into a local buffer.
+        # Parts are forwarded to the caller's on_part only after the attempt succeeds.
+        import os
 
-            if os.environ.get("MNESIS_MOCK_LLM") == "1":
-                text_accumulator, final_tokens, finish_reason = await self._mock_response(
-                    llm_messages, on_part, assistant_msg_id
+        retry_cfg = self._config.session.retry
+        _is_mock = os.environ.get("MNESIS_MOCK_LLM") == "1"
+        for _attempt in range(retry_cfg.max_retries + 1):
+            _buffered_parts: list[MessagePart] = []
+            # Build a per-attempt closure bound to this iteration's _buffered_parts
+            # list via default argument to avoid the B023 loop-variable capture issue.
+            _attempt_on_part: Callable[[MessagePart], None] | None = None
+            if on_part is not None:
+
+                def _make_buffering_on_part(
+                    buf: list[MessagePart],
+                ) -> Callable[[MessagePart], None]:
+                    def _cb(part: MessagePart, _buf: list[MessagePart] = buf) -> None:
+                        _buf.append(part)
+
+                    return _cb
+
+                _attempt_on_part = _make_buffering_on_part(_buffered_parts)
+
+            try:
+                if _is_mock:
+                    text_accumulator, final_tokens, finish_reason = await self._mock_response(
+                        llm_messages,
+                        _attempt_on_part,
+                        assistant_msg_id,
+                    )
+                else:
+                    text_accumulator, final_tokens, finish_reason = await self._stream_response(
+                        llm_messages,
+                        sys_prompt,
+                        tools,
+                        _attempt_on_part,
+                        assistant_msg_id,
+                    )
+                # Attempt succeeded — forward buffered parts to caller now.
+                if on_part is not None:
+                    for _part in _buffered_parts:
+                        _result = on_part(_part)
+                        if asyncio.iscoroutine(_result):
+                            await _result
+                break  # success — exit retry loop
+            except Exception as exc:
+                if not self._is_retryable(exc) or _attempt >= retry_cfg.max_retries:
+                    self._logger.error("llm_call_failed", error=str(exc))
+                    finish_reason = "error"
+                    text_accumulator = f"[Error: {exc}]"
+                    break
+                # Compute backoff with optional jitter
+                delay = min(
+                    retry_cfg.base_delay * (2**_attempt)
+                    + (random.uniform(0, retry_cfg.base_delay) if retry_cfg.jitter else 0.0),
+                    retry_cfg.max_delay,
                 )
-            else:
-                text_accumulator, final_tokens, finish_reason = await self._stream_response(
-                    llm_messages, sys_prompt, tools, on_part, assistant_msg_id
+                self._logger.warning(
+                    "llm_call_retrying",
+                    attempt=_attempt + 1,
+                    max_retries=retry_cfg.max_retries,
+                    delay=delay,
+                    error=str(exc),
                 )
-        except Exception as exc:
-            self._logger.error("llm_call_failed", error=str(exc))
-            finish_reason = "error"
-            text_accumulator = f"[Error: {exc}]"
+                self._event_bus.publish(
+                    MnesisEvent.LLM_RETRY,
+                    {
+                        "session_id": self._session_id,
+                        "attempt": _attempt + 1,
+                        "max_retries": retry_cfg.max_retries,
+                        "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                        "error_message": str(exc),
+                        "delay_seconds": delay,
+                    },
+                )
+                # Sleep in a cancellable task so close() can abort the wait.
+                self._retry_sleep_task = asyncio.create_task(asyncio.sleep(delay))
+                try:
+                    await self._retry_sleep_task
+                except asyncio.CancelledError:
+                    self._logger.info("llm_retry_cancelled")
+                    finish_reason = "error"
+                    text_accumulator = "[Error: retry cancelled]"
+                    break
+                finally:
+                    self._retry_sleep_task = None
 
         # Persist final text part
         text_part_id = make_id("part")
@@ -526,6 +604,44 @@ class MnesisSession:
             doom_loop_detected=doom_loop,
         )
 
+    @staticmethod
+    def _is_retryable(exc: BaseException) -> bool:
+        """Return True if ``exc`` is a transient LLM error worth retrying.
+
+        Retryable errors are transient provider-side problems (rate limits,
+        server errors, timeouts, connection issues).  Non-retryable errors
+        indicate caller mistakes (bad credentials, bad request, context
+        window exceeded) that will not resolve on retry.
+
+        Any exception type not in either known list is treated as
+        non-retryable (fail-fast) to avoid hiding unexpected errors.
+
+        Args:
+            exc: The exception raised by the LLM call.
+
+        Returns:
+            ``True`` if the call should be retried; ``False`` otherwise.
+        """
+        try:
+            from litellm.exceptions import (
+                APIConnectionError,
+                InternalServerError,
+                RateLimitError,
+                ServiceUnavailableError,
+                Timeout,
+            )
+        except ImportError:
+            return False
+
+        _retryable = (
+            RateLimitError,
+            InternalServerError,
+            ServiceUnavailableError,
+            Timeout,
+            APIConnectionError,
+        )
+        return isinstance(exc, _retryable)
+
     async def _stream_response(
         self,
         llm_messages: list[dict[str, Any]],
@@ -542,6 +658,9 @@ class MnesisSession:
             "messages": [{"role": "system", "content": system_prompt}, *llm_messages],
             "stream": True,
             "max_tokens": self._model_info.max_output_tokens,
+            # Disable litellm's built-in retry to prevent double-retrying.
+            # Mnesis owns all retry logic via RetryConfig in SessionConfig.
+            "num_retries": 0,
         }
         if tools:
             call_kwargs["tools"] = tools
@@ -919,6 +1038,9 @@ class MnesisSession:
         Publishes :attr:`~mnesis.events.bus.MnesisEvent.SESSION_CLOSED` after
         cleanup.
         """
+        # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
+        if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
+            self._retry_sleep_task.cancel()
         await self._compaction_engine.wait_for_pending()
         self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
         await self._store.close()
