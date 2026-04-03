@@ -1616,6 +1616,8 @@ class TestSessionCoverageGaps:
             # Manually override is_hard_overflow to return True on second call
             call_count = [0]
             original = session._compaction_engine.is_hard_overflow
+            original_wait = session._compaction_engine.wait_for_pending
+            wait_calls = [0]
 
             def patched_overflow(tokens, model_info):
                 call_count[0] += 1
@@ -1623,10 +1625,17 @@ class TestSessionCoverageGaps:
                     return True
                 return original(tokens, model_info)
 
+            async def patched_wait():
+                wait_calls[0] += 1
+                return await original_wait()
+
             session._compaction_engine.is_hard_overflow = patched_overflow  # type: ignore[method-assign]
+            session._compaction_engine.wait_for_pending = patched_wait  # type: ignore[method-assign]
             await session.send("First message")
             result = await session.send("Second message — should trigger sync compaction")
             assert result.finish_reason in ("stop", "end_turn", "error")
+            # The synchronous compaction path must have awaited wait_for_pending
+            assert wait_calls[0] >= 1
         finally:
             await session.close()
 

@@ -1191,8 +1191,8 @@ class TestImmutableStoreCoverageGaps:
 
     # ── Session loading: model_id NULL edge case ──────────────────────────────
 
-    async def test_get_session_with_null_model_id(self, store):
-        """Sessions created with empty model_id are loadable via get_session()."""
+    async def test_get_session_with_empty_model_id(self, store):
+        """Sessions created with empty-string model_id are loadable via get_session()."""
         conn = store._conn_or_raise()
         await conn.execute(
             "INSERT INTO sessions (id, parent_id, created_at, updated_at, model_id, "
@@ -1221,27 +1221,31 @@ class TestImmutableStoreCoverageGaps:
         await store_a.initialize()
         await store_b.initialize()
 
-        # Create a single session used by both stores
-        sid = "sess_concurrent_001"
-        await store_a.create_session(sid, model_id="gpt-4o")
+        try:
+            # Create a single session used by both stores
+            sid = "sess_concurrent_001"
+            await store_a.create_session(sid, model_id="gpt-4o")
 
-        # Concurrently append messages from both store references
-        async def _append_from_a(i: int) -> None:
-            msg = make_message(sid, msg_id=f"msg_conc_a_{i:03d}")
-            await store_a.append_message(msg)
+            # Concurrently append messages from both store references
+            async def _append_from_a(i: int) -> None:
+                msg = make_message(sid, msg_id=f"msg_conc_a_{i:03d}")
+                await store_a.append_message(msg)
 
-        async def _append_from_b(i: int) -> None:
-            msg = make_message(sid, msg_id=f"msg_conc_b_{i:03d}")
-            await store_b.append_message(msg)
+            async def _append_from_b(i: int) -> None:
+                msg = make_message(sid, msg_id=f"msg_conc_b_{i:03d}")
+                await store_b.append_message(msg)
 
-        tasks = [
-            *[_append_from_a(i) for i in range(5)],
-            *[_append_from_b(i) for i in range(5)],
-        ]
-        await asyncio.gather(*tasks)
+            tasks = [
+                *[_append_from_a(i) for i in range(5)],
+                *[_append_from_b(i) for i in range(5)],
+            ]
+            await asyncio.gather(*tasks)
 
-        messages = await store_a.get_messages(sid)
-        assert len(messages) == 10
+            messages = await store_a.get_messages(sid)
+            assert len(messages) == 10
+        finally:
+            await store_a.close()
+            await store_b.close()
 
     # ── list_sessions with parent_id filter ──────────────────────────────────
 
