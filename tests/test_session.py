@@ -876,3 +876,330 @@ class TestSessionHistory:
 
         assert ContextBreakdown.__name__ == "ContextBreakdown"
         assert TurnSnapshot.__name__ == "TurnSnapshot"
+
+
+class TestRetryResilience:
+    """Tests for RetryConfig and the retry loop in send()."""
+
+    # ------------------------------------------------------------------
+    # Test 1: max_retries=0 (default) does not retry
+    # ------------------------------------------------------------------
+    async def test_no_retry_by_default(self, tmp_path):
+        """max_retries=0 (default) means send() fails immediately on error."""
+        import os
+        from unittest.mock import AsyncMock, patch
+
+        from litellm.exceptions import RateLimitError
+
+        from mnesis import MnesisSession
+        from mnesis.events.bus import MnesisEvent
+        from mnesis.models.config import MnesisConfig, SessionConfig
+
+        cfg = MnesisConfig(session=SessionConfig())  # max_retries=0 by default
+        assert cfg.session.retry.max_retries == 0
+
+        retry_events: list[dict] = []
+
+        # Patch _stream_response to raise RateLimitError on every call
+        async def _raise_rate_limit(*args, **kwargs):
+            raise RateLimitError(
+                message="rate limited",
+                llm_provider="anthropic",
+                model="claude-opus-4-6",
+            )
+
+        env = {"MNESIS_MOCK_LLM": "0"}
+        with patch.dict(os.environ, env):
+            async with await MnesisSession.create(
+                model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "test.db"),
+            ) as session:
+                session.event_bus.subscribe(
+                    MnesisEvent.LLM_RETRY,
+                    lambda e, p: retry_events.append(p),
+                )
+                with patch.object(
+                    session, "_stream_response", new=AsyncMock(side_effect=_raise_rate_limit)
+                ):
+                    result = await session.send("Hello")
+
+        # No retry events — failed immediately
+        assert len(retry_events) == 0
+        assert result.finish_reason == "error"
+        assert "Error" in result.text
+
+    # ------------------------------------------------------------------
+    # Test 2: retry succeeds after 1 transient RateLimitError
+    # ------------------------------------------------------------------
+    async def test_retry_succeeds_after_transient_error(self, tmp_path):
+        """send() retries after a RateLimitError and returns the successful response."""
+        import os
+        from unittest.mock import AsyncMock, patch
+
+        from litellm.exceptions import RateLimitError
+
+        from mnesis import MnesisSession
+        from mnesis.events.bus import MnesisEvent
+        from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig
+        from mnesis.models.message import TokenUsage
+
+        cfg = MnesisConfig(
+            session=SessionConfig(retry=RetryConfig(max_retries=2, base_delay=0.0, jitter=False))
+        )
+        retry_events: list[dict] = []
+        call_count = 0
+
+        async def _flaky_stream(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RateLimitError(
+                    message="rate limited",
+                    llm_provider="anthropic",
+                    model="claude-opus-4-6",
+                )
+            return "success text", TokenUsage(input=10, output=5, total=15), "stop"
+
+        env = {"MNESIS_MOCK_LLM": "0"}
+        with patch.dict(os.environ, env):
+            async with await MnesisSession.create(
+                model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "test.db"),
+            ) as session:
+                session.event_bus.subscribe(
+                    MnesisEvent.LLM_RETRY,
+                    lambda e, p: retry_events.append(p),
+                )
+                with patch.object(
+                    session, "_stream_response", new=AsyncMock(side_effect=_flaky_stream)
+                ):
+                    result = await session.send("Hello")
+
+        assert result.finish_reason == "stop"
+        assert result.text == "success text"
+        assert call_count == 2
+        # One retry event published (for the first failure)
+        assert len(retry_events) == 1
+        assert retry_events[0]["attempt"] == 1
+        assert retry_events[0]["max_retries"] == 2
+
+    # ------------------------------------------------------------------
+    # Test 3: retry exhausted returns finish_reason="error"
+    # ------------------------------------------------------------------
+    async def test_retry_exhausted_returns_error(self, tmp_path):
+        """send() returns finish_reason='error' after all retries are exhausted."""
+        import os
+        from unittest.mock import AsyncMock, patch
+
+        from litellm.exceptions import InternalServerError
+
+        from mnesis import MnesisSession
+        from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig
+
+        cfg = MnesisConfig(
+            session=SessionConfig(retry=RetryConfig(max_retries=2, base_delay=0.0, jitter=False))
+        )
+
+        async def _always_fail(*args, **kwargs):
+            raise InternalServerError(
+                message="server error",
+                llm_provider="anthropic",
+                model="claude-opus-4-6",
+            )
+
+        env = {"MNESIS_MOCK_LLM": "0"}
+        with patch.dict(os.environ, env):
+            async with await MnesisSession.create(
+                model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "test.db"),
+            ) as session:
+                with patch.object(
+                    session, "_stream_response", new=AsyncMock(side_effect=_always_fail)
+                ) as mock:
+                    result = await session.send("Hello")
+                    # Called max_retries+1 times total (initial + 2 retries)
+                    assert mock.call_count == 3
+
+        assert result.finish_reason == "error"
+        assert "Error" in result.text
+
+    # ------------------------------------------------------------------
+    # Test 4: non-retryable error is NOT retried
+    # ------------------------------------------------------------------
+    async def test_non_retryable_error_not_retried(self, tmp_path):
+        """AuthenticationError is non-retryable — send() fails immediately."""
+        import os
+        from unittest.mock import AsyncMock, patch
+
+        from litellm.exceptions import AuthenticationError
+
+        from mnesis import MnesisSession
+        from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig
+
+        cfg = MnesisConfig(
+            session=SessionConfig(retry=RetryConfig(max_retries=3, base_delay=0.0, jitter=False))
+        )
+
+        async def _auth_fail(*args, **kwargs):
+            raise AuthenticationError(
+                message="invalid api key",
+                llm_provider="anthropic",
+                model="claude-opus-4-6",
+            )
+
+        env = {"MNESIS_MOCK_LLM": "0"}
+        with patch.dict(os.environ, env):
+            async with await MnesisSession.create(
+                model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "test.db"),
+            ) as session:
+                with patch.object(
+                    session, "_stream_response", new=AsyncMock(side_effect=_auth_fail)
+                ) as mock:
+                    result = await session.send("Hello")
+                    # Called only once — no retry for auth errors
+                    assert mock.call_count == 1
+
+        assert result.finish_reason == "error"
+
+    # ------------------------------------------------------------------
+    # Test 5: LLM_RETRY event published with correct payload
+    # ------------------------------------------------------------------
+    async def test_llm_retry_event_payload(self, tmp_path):
+        """LLM_RETRY event carries correct session_id, attempt, error info, delay."""
+        import os
+        from unittest.mock import AsyncMock, patch
+
+        from litellm.exceptions import ServiceUnavailableError
+
+        from mnesis import MnesisSession
+        from mnesis.events.bus import MnesisEvent
+        from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig
+        from mnesis.models.message import TokenUsage
+
+        cfg = MnesisConfig(
+            session=SessionConfig(retry=RetryConfig(max_retries=2, base_delay=0.0, jitter=False))
+        )
+        retry_payloads: list[dict] = []
+
+        call_count = 0
+
+        async def _fail_once(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ServiceUnavailableError(
+                    message="service down",
+                    llm_provider="anthropic",
+                    model="claude-opus-4-6",
+                )
+            return "ok", TokenUsage(input=5, output=3, total=8), "stop"
+
+        env = {"MNESIS_MOCK_LLM": "0"}
+        with patch.dict(os.environ, env):
+            async with await MnesisSession.create(
+                model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "test.db"),
+            ) as session:
+                session_id = session.id
+                session.event_bus.subscribe(
+                    MnesisEvent.LLM_RETRY,
+                    lambda e, p: retry_payloads.append(p),
+                )
+                with patch.object(
+                    session, "_stream_response", new=AsyncMock(side_effect=_fail_once)
+                ):
+                    await session.send("Hello")
+
+        assert len(retry_payloads) == 1
+        payload = retry_payloads[0]
+        assert payload["session_id"] == session_id
+        assert payload["attempt"] == 1
+        assert payload["max_retries"] == 2
+        assert "ServiceUnavailableError" in payload["error_type"]
+        assert "service down" in payload["error_message"]
+        assert isinstance(payload["delay_seconds"], float)
+
+    # ------------------------------------------------------------------
+    # Test 6: close() during retry backoff cancels the sleep promptly
+    # ------------------------------------------------------------------
+    async def test_close_during_retry_cancels_sleep(self, tmp_path):
+        """close() cancels the retry sleep so send() unblocks without waiting.
+
+        The critical invariant is that the retry sleep is cancelled promptly —
+        the task must complete well within the 60-second sleep window, even if
+        the DB is already closed by the time send() tries to persist results.
+        """
+        import asyncio
+        import contextlib
+        import os
+        from unittest.mock import AsyncMock, patch
+
+        from litellm.exceptions import RateLimitError
+
+        from mnesis import MnesisSession
+        from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig
+
+        # Large base_delay so the test would hang if cancellation doesn't work.
+        cfg = MnesisConfig(
+            session=SessionConfig(retry=RetryConfig(max_retries=3, base_delay=60.0, jitter=False))
+        )
+
+        async def _always_rate_limited(*args, **kwargs):
+            raise RateLimitError(
+                message="rate limited",
+                llm_provider="anthropic",
+                model="claude-opus-4-6",
+            )
+
+        env = {"MNESIS_MOCK_LLM": "0"}
+        with patch.dict(os.environ, env):
+            session = await MnesisSession.create(
+                model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "test.db"),
+            )
+
+            async def _send_and_collect():
+                with patch.object(
+                    session, "_stream_response", new=AsyncMock(side_effect=_always_rate_limited)
+                ):
+                    return await session.send("Hello")
+
+            # Run send() in background; it will hit the first error and go to sleep.
+            send_task = asyncio.create_task(_send_and_collect())
+
+            # Wait deterministically for the retry sleep task to be registered and
+            # running, rather than relying on a fixed asyncio.sleep() delay that can
+            # be too short on a slow CI runner.
+            async def _wait_for_retry_sleep() -> None:
+                while True:
+                    t = getattr(session, "_retry_sleep_task", None)
+                    if t is not None and not t.done():
+                        return
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(_wait_for_retry_sleep(), timeout=5.0)
+
+            # close() must cancel the sleep so send() unblocks.
+            await session.close()
+
+            # The send task should complete quickly (well under the 60s sleep).
+            # It may raise an exception (e.g. DB closed) or return normally —
+            # either is acceptable; what matters is it finishes promptly.
+            try:
+                await asyncio.wait_for(send_task, timeout=2.0)
+            except TimeoutError:
+                send_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    _ = await send_task
+                pytest.fail("send() did not finish promptly after close() cancelled retry sleep")
+            except Exception:
+                pass  # DB-closed or other error after cancellation — expected
+
+        # If we reach here without timing out, cancellation worked correctly.
