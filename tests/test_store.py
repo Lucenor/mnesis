@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -933,28 +934,20 @@ class TestImmutableStoreCoverageGaps:
         store = ImmutableStore(cfg)
 
         # Patch aiosqlite.connect to return a connection whose execute raises
-        class _FakeConn:
-            row_factory = None
-
-            async def execute(self, sql, *args, **kwargs):
-                if "PRAGMA journal_mode" in sql:
-                    raise RuntimeError("simulated WAL failure")
-                raise RuntimeError("unexpected call")
-
-            async def close(self):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *a):
-                pass
-
         import unittest.mock as mock
 
-        with mock.patch("aiosqlite.connect", new=mock.AsyncMock(return_value=_FakeConn())):
+        fake_conn = mock.MagicMock()
+        fake_conn.row_factory = None
+        fake_conn.execute = mock.AsyncMock(side_effect=RuntimeError("simulated WAL failure"))
+        fake_conn.close = mock.AsyncMock()
+        fake_conn.__aenter__ = mock.AsyncMock(return_value=fake_conn)
+        fake_conn.__aexit__ = mock.AsyncMock(return_value=False)
+
+        with mock.patch("aiosqlite.connect", new=mock.AsyncMock(return_value=fake_conn)):
             with pytest.raises(RuntimeError, match="simulated WAL failure"):
                 await store.initialize()
+
+        fake_conn.close.assert_awaited_once()
 
     # ── append_message skips context_items for summary messages ──────────────
 
@@ -1012,6 +1005,8 @@ class TestImmutableStoreCoverageGaps:
         parts = await store.get_parts("msg_out_001")
         assert len(parts) == 1
         assert parts[0].compacted_at is None
+        content = json.loads(parts[0].content)
+        assert content["output"] == "result data here"
 
     async def test_update_part_status_error_message_field(self, session_id, store):
         """update_part_status() merges error_message into content JSON."""
@@ -1031,9 +1026,11 @@ class TestImmutableStoreCoverageGaps:
         await store.append_part(part)
 
         await store.update_part_status("part_err_001", error_message="something failed")
-        # Should not raise; tool_state unchanged
         parts = await store.get_parts("msg_err_001")
         assert len(parts) == 1
+        content = json.loads(parts[0].content)
+        assert content["error_message"] == "something failed"
+        assert content["status"]["state"] == "running"
 
     async def test_update_part_status_no_fields_is_noop(self, session_id, store):
         """update_part_status() with no kwargs is a no-op (line 646: early return)."""
@@ -1109,10 +1106,9 @@ class TestImmutableStoreCoverageGaps:
             file_type="python",
             token_count=100,
             exploration_summary="Version 1",
+            created_at=1000,
         )
         await store.store_file_reference(ref1)
-
-        await asyncio.sleep(0.01)  # ensure different created_at
 
         ref2 = FileReference(
             content_id="hash_v2",
@@ -1120,13 +1116,15 @@ class TestImmutableStoreCoverageGaps:
             file_type="python",
             token_count=200,
             exploration_summary="Version 2",
+            created_at=2000,
         )
         await store.store_file_reference(ref2)
 
         result = await store.get_file_reference_by_path("/shared/path.py")
         assert result is not None
-        # The latest by created_at is ref2 (inserted last with a distinct content_id)
-        assert result.exploration_summary in ("Version 1", "Version 2")
+        # ref2 has the higher created_at so it must be returned as the latest
+        assert result.content_id == "hash_v2"
+        assert result.exploration_summary == "Version 2"
 
     async def test_get_file_reference_by_path_not_found(self, store):
         """get_file_reference_by_path() returns None for unknown path."""
