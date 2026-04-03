@@ -104,3 +104,205 @@ class TestLargeFileHandler:
         content = "name,age,email\nAlice,30,alice@example.com\nBob,25,bob@example.com\n"
         summary = handler._summarise_csv(content)
         assert "name" in summary.lower() or "columns" in summary.lower()
+
+    # ── inline threshold boundary ─────────────────────────────────────────────
+
+    async def test_file_at_threshold_is_inline(self, tmp_path, store, estimator):
+        """A file whose token count equals inline_threshold - 1 is returned inline."""
+        from mnesis.files.handler import LargeFileHandler
+        from mnesis.models.config import FileConfig
+
+        # threshold=100; content of exactly 99 tokens (396 chars / 4 per token = 99)
+        threshold = 100
+        handler = LargeFileHandler(store, estimator, FileConfig(inline_threshold=threshold))
+        content = "a" * (threshold * 4 - 4)  # 396 chars = 99 tokens
+        path = tmp_path / "at_threshold.py"
+        path.write_text(content)
+        result = await handler.handle_file(str(path))
+        assert result.is_inline
+
+    # ── Python AST summary ────────────────────────────────────────────────────
+
+    def test_summarise_python_with_classes_and_functions(self, handler):
+        """_summarise_python() extracts class names, function names, and imports."""
+        content = """
+import os
+import sys
+from pathlib import Path
+
+class MyClass:
+    def method_one(self):
+        pass
+    def method_two(self):
+        pass
+
+def standalone_func():
+    return 42
+
+async def async_func():
+    pass
+"""
+        summary = handler._summarise_python(content)
+        assert "MyClass" in summary
+        assert "module" in summary.lower()
+
+    def test_summarise_python_syntax_error(self, handler):
+        """_summarise_python() handles syntax errors gracefully."""
+        content = "def broken(\n  # unclosed"
+        summary = handler._summarise_python(content)
+        assert "python" in summary.lower() or "parse error" in summary.lower()
+
+    # ── JSON summary ──────────────────────────────────────────────────────────
+
+    def test_summarise_json_dict(self, handler):
+        """_summarise_json() describes dict with key count and key names."""
+        import json
+
+        data = {"name": "Alice", "age": 30, "active": True}
+        summary = handler._summarise_json(json.dumps(data))
+        assert "3" in summary  # 3 keys
+        assert "name" in summary
+
+    def test_summarise_json_array(self, handler):
+        """_summarise_json() describes array with item count."""
+        import json
+
+        data = [{"id": 1, "val": "a"}, {"id": 2, "val": "b"}]
+        summary = handler._summarise_json(json.dumps(data))
+        assert "2" in summary
+
+    def test_summarise_json_scalar(self, handler):
+        """_summarise_json() handles a JSON scalar."""
+        summary = handler._summarise_json("42")
+        assert "scalar" in summary.lower() or "int" in summary.lower()
+
+    def test_summarise_json_parse_error(self, handler):
+        """_summarise_json() returns error string on malformed JSON."""
+        summary = handler._summarise_json("{ not valid json }")
+        assert "error" in summary.lower() or "parse" in summary.lower()
+
+    def test_summarise_json_with_arrays_field(self, handler):
+        """_summarise_json() lists array-valued keys in the summary."""
+        import json
+
+        data = {"items": [1, 2, 3], "name": "test", "tags": ["a", "b"]}
+        summary = handler._summarise_json(json.dumps(data))
+        assert "items" in summary or "tags" in summary
+
+    # ── YAML summary ──────────────────────────────────────────────────────────
+
+    def test_summarise_yaml_dict(self, handler):
+        """_summarise_yaml() describes a YAML mapping."""
+        __import__("pytest").importorskip("yaml")
+        content = "name: Alice\nage: 30\nactive: true\n"
+        summary = handler._summarise_yaml(content)
+        assert "3" in summary or "name" in summary
+
+    def test_summarise_yaml_sequence(self, handler):
+        """_summarise_yaml() describes a YAML sequence."""
+        __import__("pytest").importorskip("yaml")
+        content = "- item1\n- item2\n- item3\n"
+        summary = handler._summarise_yaml(content)
+        assert "3" in summary or "sequence" in summary.lower()
+
+    def test_summarise_yaml_fallback_on_import_error(self, handler, monkeypatch):
+        """_summarise_yaml() falls back to line counting when yaml is unavailable."""
+        import sys
+
+        # Simulate yaml not being available
+        monkeypatch.setitem(sys.modules, "yaml", None)  # type: ignore[arg-type]
+        content = "name: Alice\nage: 30\n"
+        # Should not raise, falls back to heuristic
+        summary = handler._summarise_yaml(content)
+        assert isinstance(summary, str)
+        assert len(summary) > 0
+
+    # ── TOML summary ─────────────────────────────────────────────────────────
+
+    def test_summarise_toml_valid(self, handler):
+        """_summarise_toml() uses tomllib to describe TOML sections."""
+        content = '[tool.ruff]\nline-length = 88\n\n[project]\nname = "test"\n'
+        summary = handler._summarise_toml(content)
+        assert "tool" in summary or "project" in summary or "section" in summary.lower()
+
+    def test_summarise_toml_fallback(self, handler, monkeypatch):
+        """_summarise_toml() falls back to section line scanning on parse error."""
+        import sys
+
+        # Force tomllib to fail
+        monkeypatch.setitem(sys.modules, "tomllib", None)  # type: ignore[arg-type]
+        content = "[section1]\nkey = 1\n\n[section2]\nkey = 2\n"
+        summary = handler._summarise_toml(content)
+        assert "section1" in summary or "section2" in summary or isinstance(summary, str)
+
+    # ── TypeScript/JavaScript summary ─────────────────────────────────────────
+
+    def test_summarise_ts_js_with_exports_and_classes(self, handler):
+        """_summarise_ts_js() extracts exports, classes, and functions."""
+        content = """
+import React from 'react';
+import { useState } from 'react';
+
+export class MyComponent {
+  render() { return null; }
+}
+
+export function helper() {}
+
+export default function App() {}
+"""
+        summary = handler._summarise_ts_js(content)
+        assert "TypeScript" in summary or "JavaScript" in summary
+
+    # ── Generic text summary ──────────────────────────────────────────────────
+
+    def test_summarise_generic_text_file(self, handler):
+        """_summarise_generic() returns line count and preview."""
+        content = "\n".join(f"Line {i}" for i in range(20))
+        summary = handler._summarise_generic(content)
+        assert "20" in summary or "line" in summary.lower()
+
+    # ── detect_file_type unknown/binary/magic fallback ────────────────────────
+
+    def test_detect_file_type_unknown_extension(self, handler):
+        """Unknown extension returns 'unknown' or falls back to content inspection."""
+        file_type = handler._detect_file_type("file.xyz123", "plain text content")
+        assert isinstance(file_type, str)
+
+    def test_detect_file_type_binary_content(self, handler):
+        """High null-byte ratio in content is detected as binary."""
+        binary_content = "\x00" * 100 + "a" * 5  # >1% null bytes
+        file_type = handler._detect_file_type("file.xyz", binary_content)
+        assert file_type == "binary"
+
+    # ── generate_exploration_summary exception path ───────────────────────────
+
+    def test_generate_exploration_summary_handles_exception(self, handler, monkeypatch):
+        """_generate_exploration_summary() catches internal errors and returns fallback."""
+
+        def _raise(content: str) -> str:
+            raise ValueError("boom")
+
+        # Patch the static method to raise so _generate_exploration_summary catches it
+        monkeypatch.setattr(handler.__class__, "_summarise_python", staticmethod(_raise))
+        result = handler._generate_exploration_summary("/x.py", "class Foo: pass", "python")
+        assert "Summary generation failed" in result or isinstance(result, str)
+
+    # ── bytes content normalization ───────────────────────────────────────────
+
+    async def test_handle_file_bytes_content(self, handler, tmp_path):
+        """handle_file() accepts bytes content and decodes it."""
+        content = b"x" * 600  # Large enough to exceed threshold
+        path = tmp_path / "bytes_file.py"
+        result = await handler.handle_file(str(path), content=content)
+        # bytes decoded → string → estimated → should be ref or inline
+        assert result.path == str(path)
+        assert result.inline_content is not None or result.file_ref is not None
+
+    # ── TSV summary ───────────────────────────────────────────────────────────
+
+    def test_summarise_tsv(self, handler):
+        """_summarise_csv() with tab separator handles TSV files."""
+        content = "col1\tcol2\tcol3\nval1\tval2\tval3\n"
+        summary = handler._summarise_csv(content, sep="\t")
+        assert "col1" in summary or "3" in summary

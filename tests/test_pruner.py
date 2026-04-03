@@ -8,6 +8,7 @@ from mnesis.compaction.engine import CompactionEngine
 from mnesis.compaction.pruner import ToolOutputPrunerAsync
 from mnesis.events.bus import MnesisEvent
 from mnesis.models.config import CompactionConfig, MnesisConfig
+from mnesis.store.immutable import RawMessagePart
 from tests.conftest import make_message, make_raw_part
 
 
@@ -20,8 +21,8 @@ def _make_tool_part(
     output: str = "x" * 500,
     state: str = "completed",
     compacted_at: int | None = None,
-) -> tuple:
-    """Returns (RawMessagePart, json_content)."""
+) -> RawMessagePart:
+    """Build and return a RawMessagePart with tool content for use in pruner tests."""
     content = json.dumps(
         {
             "type": "tool",
@@ -41,6 +42,7 @@ def _make_tool_part(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         tool_state=state,
+        compacted_at=compacted_at,
     )
     return part
 
@@ -201,6 +203,176 @@ class TestToolOutputPruner:
         result = await pruner.prune(session_id)
         # No tool parts after the summary, so nothing to prune
         assert result.pruned_count == 0
+
+    async def test_prune_skipped_below_minimum_tokens(self, session_id, store, estimator):
+        """Pruner is a no-op when total prunable volume is below prune_minimum_tokens.
+
+        Covers lines 122-133 in pruner.py: when pruned_volume <= minimum_tokens
+        the method returns early with pruned_count=0.
+        """
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                prune_protect_tokens=200_000,  # large protect window (must exceed minimum)
+                prune_minimum_tokens=100_000,  # huge minimum — nothing will ever exceed it
+            )
+        )
+
+        # Create enough turns to pass the user-turn guard (>= 2 user turns)
+        for i in range(6):
+            role = "user" if i % 2 == 0 else "assistant"
+            msg_id = f"msg_min_{i:03d}"
+            msg = make_message(session_id, role=role, msg_id=msg_id)
+            await store.append_message(msg)
+            if role == "assistant":
+                part = _make_tool_part(
+                    msg_id,
+                    session_id,
+                    part_id=f"part_min_{i:03d}",
+                    tool_call_id=f"call_m{i:03d}",
+                    output="x" * 100,  # Small output — well below 100K minimum
+                )
+                await store.append_part(part)
+
+        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        result = await pruner.prune(session_id)
+
+        assert result.pruned_count == 0
+        assert result.pruned_tokens == 0
+        # Tool parts were added so the scanner must have visited them before the
+        # minimum-token early return.
+        assert result.candidates_scanned > 0
+
+    async def test_prune_all_tool_outputs_already_compacted(self, session_id, store, estimator):
+        """Pruner is a no-op when all tool outputs already have compacted_at set.
+
+        Covers the break-on-compacted_at path (line 219-220 in ToolOutputPrunerAsync).
+        """
+        import time as _time
+
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                prune_protect_tokens=10,
+                prune_minimum_tokens=5,
+            )
+        )
+
+        now_ms = int(_time.time() * 1000)
+
+        # Create 6 messages — all tool outputs already tombstoned
+        for i in range(6):
+            role = "user" if i % 2 == 0 else "assistant"
+            msg_id = f"msg_already_{i:03d}"
+            msg = make_message(session_id, role=role, msg_id=msg_id)
+            await store.append_message(msg)
+            if role == "assistant":
+                part = _make_tool_part(
+                    msg_id,
+                    session_id,
+                    part_id=f"part_already_{i:03d}",
+                    tool_call_id=f"call_a{i:03d}",
+                    output="x" * 300,
+                    compacted_at=now_ms,  # already tombstoned
+                )
+                await store.append_part(part)
+
+        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        result = await pruner.prune(session_id)
+
+        # All outputs already compacted — nothing new to tombstone
+        assert result.pruned_count == 0
+
+    async def test_base_pruner_prune_noop_when_disabled(self, session_id, store, estimator):
+        """Base ToolOutputPruner.prune() returns early when prune=False.
+
+        Covers lines 67-68 of the base class implementation.
+        """
+        from mnesis.compaction.pruner import ToolOutputPruner
+
+        cfg = MnesisConfig(compaction=CompactionConfig(prune=False))
+        pruner = ToolOutputPruner(store, estimator, cfg)
+        result = await pruner.prune(session_id)
+        assert result.pruned_count == 0
+        assert result.pruned_tokens == 0
+
+    async def test_base_pruner_prune_empty_session(self, session_id, store, estimator):
+        """Base ToolOutputPruner.prune() returns zeros for an empty session.
+
+        Covers lines 73-75 (early return on empty messages).
+        """
+        from mnesis.compaction.pruner import ToolOutputPruner
+
+        cfg = MnesisConfig(compaction=CompactionConfig(prune=True))
+        pruner = ToolOutputPruner(store, estimator, cfg)
+        result = await pruner.prune(session_id)
+        assert result.pruned_count == 0
+        assert result.candidates_scanned == 0
+
+    async def test_base_pruner_prune_applies_tombstones(self, session_id, store, estimator):
+        """Base ToolOutputPruner.prune() tombstones outputs outside protect window.
+
+        Covers lines 83-150 of the base class (full pruning loop including
+        _get_part_id lookup).
+        """
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                prune_protect_tokens=50,
+                prune_minimum_tokens=10,
+            )
+        )
+
+        for i in range(8):
+            role = "user" if i % 2 == 0 else "assistant"
+            msg_id = f"msg_base_{i:03d}"
+            msg = make_message(session_id, role=role, msg_id=msg_id)
+            await store.append_message(msg)
+            if role == "assistant":
+                part = _make_tool_part(
+                    msg_id,
+                    session_id,
+                    part_id=f"part_base_{i:03d}",
+                    tool_call_id=f"call_b{i:03d}",
+                    output="x" * 300,
+                )
+                await store.append_part(part)
+
+        from mnesis.compaction.pruner import ToolOutputPruner
+
+        pruner = ToolOutputPruner(store, estimator, cfg)
+        result = await pruner.prune(session_id)
+
+        # With 4 assistant messages each carrying ~300-char output (>> 50-token protect window),
+        # the base pruner must tombstone at least one part outside that window.
+        assert result.pruned_count > 0
+        assert result.candidates_scanned > 0
+
+    async def test_base_pruner_get_part_id_sync_returns_empty(self, session_id, store, estimator):
+        """_get_part_id_sync always returns empty string (sentinel).
+
+        Covers line 165 of pruner.py.
+        """
+        from mnesis.compaction.pruner import ToolOutputPruner
+        from mnesis.models.message import ToolPart, ToolStatus
+
+        cfg = MnesisConfig()
+        pruner = ToolOutputPruner(store, estimator, cfg)
+
+        # Create a minimal MessageWithParts and ToolPart to pass in
+        from mnesis.models.message import Message, MessageWithParts
+
+        msg = Message(
+            id="msg_sync_001",
+            session_id=session_id,
+            role="assistant",
+        )
+        tool_part = ToolPart(
+            tool_name="test_tool",
+            tool_call_id="call_sync_001",
+            input={},
+            status=ToolStatus(state="completed"),
+        )
+        mwp = MessageWithParts(message=msg, parts=[tool_part])
+        result = pruner._get_part_id_sync(mwp, tool_part)
+        assert result == ""
 
 
 class TestPruneCompletedEvent:
