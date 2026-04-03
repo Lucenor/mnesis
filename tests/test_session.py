@@ -1136,6 +1136,7 @@ class TestRetryResilience:
         the DB is already closed by the time send() tries to persist results.
         """
         import asyncio
+        import contextlib
         import os
         from unittest.mock import AsyncMock, patch
 
@@ -1195,10 +1196,8 @@ class TestRetryResilience:
                 await asyncio.wait_for(send_task, timeout=2.0)
             except TimeoutError:
                 send_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await send_task
-                except asyncio.CancelledError:
-                    pass
                 pytest.fail("send() did not finish promptly after close() cancelled retry sleep")
             except Exception:
                 pass  # DB-closed or other error after cancellation — expected
