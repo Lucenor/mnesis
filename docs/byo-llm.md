@@ -122,3 +122,9 @@ result.compaction_triggered # True if compaction was scheduled
 ## Runnable example
 
 See [`examples/06_byo_llm.py`](https://github.com/Lucenor/mnesis/blob/main/examples/06_byo_llm.py) for a complete, self-contained example that runs without any API key.
+
+## Streaming is for managed mode only
+
+`session.stream()` is a wrapper around `session.send()` — it routes the LLM call through litellm and is only available in **managed mode**.
+
+If you are using BYO-LLM (i.e. you call your own LLM SDK and use `record()` to persist the turn), there is no streaming path through mnesis.  Streaming is handled entirely by your SDK.  Persist the completed turn with `record()` as usual once your SDK has finished streaming.
