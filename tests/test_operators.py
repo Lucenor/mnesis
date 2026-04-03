@@ -826,14 +826,7 @@ class TestAgenticMap:
 
         monkeypatch.setattr(session_module.MnesisSession, "create", patched_create)
 
-        warning_logged = []
-
-        def capture_warning(event: str, **kw: object) -> None:
-            warning_logged.append(event)
-
         agentic_map = AgenticMap(op_config)
-        # Patch the logger to capture warning calls
-        agentic_map._logger = agentic_map._logger.bind()  # type: ignore[attr-defined]
 
         import structlog.testing
 

@@ -215,22 +215,31 @@ class TestPruneCompletedEvent:
             )
         )
 
-        # Create enough messages with tool outputs to exceed the protect window
-        for i in range(6):
+        # 10 messages (5 user/5 assistant pairs). The pruner protects the 2 most
+        # recent user turns, so the 3 oldest assistant tool outputs (≈75 tokens each,
+        # 225 tokens total) fall outside the protect window and will be pruned.
+        for i in range(10):
             role = "user" if i % 2 == 0 else "assistant"
-            msg_id = f"msg_prune_ev_{i:03d}"
+            msg_id = f"msg_pcev_{i:03d}"
             msg = make_message(session_id, role=role, msg_id=msg_id)
             await store.append_message(msg)
             if role == "assistant":
                 part = _make_tool_part(
                     msg_id,
                     session_id,
-                    part_id=f"part_prune_ev_{i:03d}",
-                    tool_call_id=f"call_ev_{i:03d}",
+                    part_id=f"part_pcev_{i:03d}",
+                    tool_call_id=f"call_pcev_{i:03d}",
                     tool_name="read_file",
                     output="x" * 300,  # 300 chars / 4 ≈ 75 tokens each
                 )
                 await store.append_part(part)
+
+        # Use a counter-based id_generator to avoid UNIQUE constraint collisions
+        _counter: list[int] = [0]
+
+        def _id_gen(prefix: str) -> str:
+            _counter[0] += 1
+            return f"{prefix}_pcev_{_counter[0]:04d}"
 
         engine = CompactionEngine(
             store,
@@ -238,24 +247,22 @@ class TestPruneCompletedEvent:
             estimator,
             event_bus,
             cfg,
-            id_generator=lambda p: f"{p}_prune_ev",
+            id_generator=_id_gen,
             session_model="nonexistent-model-xyz",
         )
         await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
 
         prune_events = [(e, p) for e, p in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
 
-        # Only assert on the event if pruning actually fired (deterministic given token counts)
-        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
-        _ = pruner  # we rely on the engine having run pruning; if no event, count was 0
-
-        if prune_events:
-            _, payload = prune_events[0]
-            assert payload["session_id"] == session_id
-            assert isinstance(payload["pruned_count"], int)
-            assert payload["pruned_count"] > 0
-            assert isinstance(payload["pruned_tokens"], int)
-            assert payload["pruned_tokens"] > 0
+        assert len(prune_events) == 1, (
+            f"Expected exactly one PRUNE_COMPLETED event, got {len(prune_events)}"
+        )
+        _, payload = prune_events[0]
+        assert payload["session_id"] == session_id
+        assert isinstance(payload["pruned_count"], int)
+        assert payload["pruned_count"] > 0
+        assert isinstance(payload["pruned_tokens"], int)
+        assert payload["pruned_tokens"] > 0
 
     async def test_prune_completed_event_not_published_when_no_pruning(
         self, session_id, store, dag_store, estimator, event_bus
@@ -327,12 +334,15 @@ class TestPruneCompletedEvent:
         await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
 
         prune_events = [(e, p) for e, p in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
-        if prune_events:
-            _, payload = prune_events[0]
-            # Verify all required TypedDict fields are present and correctly typed
-            assert "session_id" in payload
-            assert "pruned_count" in payload
-            assert "pruned_tokens" in payload
-            assert payload["session_id"] == session_id
-            assert isinstance(payload["pruned_count"], int)
-            assert isinstance(payload["pruned_tokens"], int)
+
+        assert len(prune_events) == 1, (
+            f"Expected exactly one PRUNE_COMPLETED event, got {len(prune_events)}"
+        )
+        _, payload = prune_events[0]
+        # Verify all required TypedDict fields are present and correctly typed
+        assert "session_id" in payload
+        assert "pruned_count" in payload
+        assert "pruned_tokens" in payload
+        assert payload["session_id"] == session_id
+        assert isinstance(payload["pruned_count"], int)
+        assert isinstance(payload["pruned_tokens"], int)

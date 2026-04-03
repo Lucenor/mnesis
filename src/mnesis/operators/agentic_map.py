@@ -57,7 +57,7 @@ class AgenticMap:
     - Sub-sessions cannot spawn further sub-agents.
     - ``read_only=True`` passes ``tools=None`` to every sub-session ``send()``
       call, removing all tool access from the sub-agent. If ``tools=[...]`` is
-      also passed to ``run()``, it is silently stripped and a warning is logged.
+      also passed to ``run()``, it is automatically stripped and a warning is logged.
 
     Example::
 

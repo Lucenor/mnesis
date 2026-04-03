@@ -101,23 +101,19 @@ tell Mnesis the actual limits so it can allocate the context budget correctly.
 from mnesis import MnesisSession, MnesisConfig
 
 config = MnesisConfig(
+    # Fine-tuned model with a 32K context window.
     model_overrides={
-        # Fine-tuned model with a 32K context window.
-        "openai/my-finetuned-gpt4": {
-            "context_limit": 32_768,
-            "max_output_tokens": 4_096,
-        },
-    }
+        "context_limit": 32_768,
+        "max_output_tokens": 4_096,
+    },
 )
 
 async with MnesisSession.open(model="openai/my-finetuned-gpt4", config=config) as session:
     result = await session.send("Hello!")
 ```
 
-Keys in `model_overrides` must match the exact model string passed to
-`MnesisSession.open()` or `MnesisSession.create()`. Only the fields you
-provide are overridden — if you omit `max_output_tokens`, the auto-detected
-value is used.
+Only the fields you provide are overridden — if you omit `max_output_tokens`,
+the auto-detected value is used.
 
 See [Configuration — model_overrides](configuration.md#model_overrides) for
 the full reference.
