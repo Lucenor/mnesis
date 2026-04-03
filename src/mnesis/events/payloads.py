@@ -111,6 +111,29 @@ class CompactionFailedPayload(TypedDict):
 # It is defined in MnesisEvent but not currently published.
 
 
+# ── LLM retry ────────────────────────────────────────────────────────────────
+
+
+class LlmRetryPayload(TypedDict):
+    """Payload for :attr:`MnesisEvent.LLM_RETRY`.
+
+    Published on each retry attempt before the backoff sleep begins.
+    """
+
+    session_id: str
+    """The session that is retrying the LLM call."""
+    attempt: int
+    """The current attempt number (1-based: first retry is attempt 1)."""
+    max_retries: int
+    """Maximum number of retries configured for this session."""
+    error_type: str
+    """Fully-qualified exception class name (e.g. ``"litellm.RateLimitError"``)."""
+    error_message: str
+    """Human-readable error message from the exception."""
+    delay_seconds: float
+    """Seconds the session will sleep before the next attempt."""
+
+
 # ── Safety ────────────────────────────────────────────────────────────────────
 
 

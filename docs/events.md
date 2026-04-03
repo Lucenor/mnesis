@@ -72,6 +72,7 @@ session.event_bus.subscribe_all(log_all)
 | `COMPACTION_COMPLETED` | `compaction.completed` | A compaction pass finishes (success or partial) | `CompactionCompletedPayload` |
 | `COMPACTION_FAILED` | `compaction.failed` | Compaction raises an unhandled exception | `CompactionFailedPayload` |
 | `DOOM_LOOP_DETECTED` | `doom_loop.detected` | The same tool call repeats past the threshold | `DoomLoopDetectedPayload` |
+| `LLM_RETRY` | `llm.retry` | `send()` is about to retry after a transient LLM error | `LlmRetryPayload` |
 | `MAP_STARTED` | `map.started` | An operator begins processing its item list | `MapStartedPayload` |
 | `MAP_ITEM_COMPLETED` | `map.item_completed` | One item finishes (success or failure) | `MapItemCompletedPayload` |
 | `MAP_COMPLETED` | `map.completed` | All items have been processed | `MapCompletedPayload` |
@@ -162,6 +163,21 @@ Fired by: `MnesisEvent.DOOM_LOOP_DETECTED`
 |---|---|---|
 | `session_id` | `str` | The session where the doom loop was detected |
 | `tool` | `str` | Name of the tool call that was repeated past the threshold |
+
+### `LlmRetryPayload`
+
+Fired by: `MnesisEvent.LLM_RETRY`
+
+Published on each retry attempt, immediately before the backoff sleep begins. Only fires when `RetryConfig.max_retries > 0` and the error is retryable.
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | `str` | The session retrying the LLM call |
+| `attempt` | `int` | Current attempt number (1-based: first retry is `1`) |
+| `max_retries` | `int` | Maximum retries configured for this session |
+| `error_type` | `str` | Fully-qualified exception class name (e.g. `"RateLimitError"`) |
+| `error_message` | `str` | Human-readable error message from the exception |
+| `delay_seconds` | `float` | Seconds the session will sleep before the next attempt |
 
 ---
 

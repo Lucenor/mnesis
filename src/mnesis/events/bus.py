@@ -56,6 +56,11 @@ class MnesisEvent(StrEnum):
     ``PRUNE_COMPLETED``
         *Reserved — not yet published.*
 
+    ``LLM_RETRY``
+        :class:`~mnesis.events.payloads.LlmRetryPayload` —
+        ``session_id: str``, ``attempt: int``, ``max_retries: int``,
+        ``error_type: str``, ``error_message: str``, ``delay_seconds: float``
+
     ``DOOM_LOOP_DETECTED``
         :class:`~mnesis.events.payloads.DoomLoopDetectedPayload` —
         ``session_id: str``, ``tool: str``
@@ -93,6 +98,9 @@ class MnesisEvent(StrEnum):
 
     # Pruning (reserved — not yet published)
     PRUNE_COMPLETED = "prune.completed"
+
+    # LLM retry
+    LLM_RETRY = "llm.retry"
 
     # Safety
     DOOM_LOOP_DETECTED = "doom_loop.detected"
