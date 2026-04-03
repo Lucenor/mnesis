@@ -130,7 +130,7 @@ You can also match on the `type` discriminator string (`"text_delta"`, `"turn_co
 
 ### Abandonment safety
 
-If you `break` out of the `async for` loop or an exception interrupts iteration, the underlying `send()` task still completes in the background.  The turn is fully persisted, token counters are updated, and compaction is triggered if the threshold is crossed.  The `TurnComplete` event may not be consumed by the caller, but the `TURN_COMPLETED` event is still published on the event bus.
+If you `break` out of the `async for` loop or an exception interrupts iteration, the underlying `send()` task still completes in the background.  The turn is fully persisted, token counters are updated, and compaction is triggered if the threshold is crossed.  The `TurnComplete` event may not be consumed by the caller, but completion still happens even if iteration stops early.
 
 ```python
 # Safe to break early — the turn is still persisted
