@@ -1101,8 +1101,6 @@ class TestImmutableStoreCoverageGaps:
 
     async def test_get_file_reference_by_path_returns_latest(self, store):
         """get_file_reference_by_path() returns the most recently stored ref for a path."""
-        import asyncio
-
         from mnesis.models.summary import FileReference
 
         ref1 = FileReference(
@@ -1217,8 +1215,6 @@ class TestImmutableStoreCoverageGaps:
         Verifies that concurrent appends via a shared connection pool do not
         produce 'database is locked' errors (StorePool invariant).
         """
-        import asyncio
-
         from mnesis.store.immutable import ImmutableStore
         from tests.conftest import make_message
 

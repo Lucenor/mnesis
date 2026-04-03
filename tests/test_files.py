@@ -156,8 +156,6 @@ async def async_func():
 
     def test_summarise_json_dict(self, handler):
         """_summarise_json() describes dict with key count and key names."""
-        import json
-
         data = {"name": "Alice", "age": 30, "active": True}
         summary = handler._summarise_json(json.dumps(data))
         assert "3" in summary  # 3 keys
@@ -165,8 +163,6 @@ async def async_func():
 
     def test_summarise_json_array(self, handler):
         """_summarise_json() describes array with item count."""
-        import json
-
         data = [{"id": 1, "val": "a"}, {"id": 2, "val": "b"}]
         summary = handler._summarise_json(json.dumps(data))
         assert "2" in summary
@@ -183,8 +179,6 @@ async def async_func():
 
     def test_summarise_json_with_arrays_field(self, handler):
         """_summarise_json() lists array-valued keys in the summary."""
-        import json
-
         data = {"items": [1, 2, 3], "name": "test", "tags": ["a", "b"]}
         summary = handler._summarise_json(json.dumps(data))
         assert "items" in summary or "tags" in summary
