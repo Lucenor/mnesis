@@ -107,8 +107,16 @@ class CompactionFailedPayload(TypedDict):
 
 # ── Pruning ───────────────────────────────────────────────────────────────────
 
-# PRUNE_COMPLETED is reserved for future use.
-# It is defined in MnesisEvent but not currently published.
+
+class PruneCompletedPayload(TypedDict):
+    """Payload for :attr:`MnesisEvent.PRUNE_COMPLETED`."""
+
+    session_id: str
+    """The session whose tool outputs were pruned."""
+    pruned_count: int
+    """Number of tool output parts tombstoned in this prune pass."""
+    pruned_tokens: int
+    """Estimated tokens reclaimed by this prune pass."""
 
 
 # ── LLM retry ────────────────────────────────────────────────────────────────

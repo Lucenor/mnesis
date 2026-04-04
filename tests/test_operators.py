@@ -752,19 +752,104 @@ class TestAgenticMap:
         # Only turn 0 ran — intermediate_outputs has exactly one entry.
         assert len(results[0].intermediate_outputs) == 1
 
-    async def test_read_only_true_raises_not_implemented(self, op_config):
-        """read_only=True raises NotImplementedError immediately (not silently ignored)."""
+    async def test_read_only_true_passes_tools_none(self, tmp_path, op_config, monkeypatch):
+        """read_only=True passes tools=None to every sub-session send() call."""
+        from mnesis.models.message import TokenUsage, TurnResult
         from mnesis.operators.agentic_map import AgenticMap
 
+        tools_seen: list[object] = []
+
+        async def fake_send(user_message, *, tools=None):
+            tools_seen.append(tools)
+            return TurnResult(
+                message_id="msg_1",
+                text="read-only response",
+                finish_reason="stop",
+                tokens=TokenUsage(),
+                cost=0.0,
+            )
+
+        import mnesis.session as session_module
+
+        original_create = session_module.MnesisSession.create
+
+        async def patched_create(*args, **kwargs):
+            sess = await original_create(*args, **kwargs)
+            sess.send = fake_send  # type: ignore
+            return sess
+
+        monkeypatch.setattr(session_module.MnesisSession, "create", patched_create)
+
         agentic_map = AgenticMap(op_config)
-        with pytest.raises(NotImplementedError, match="read_only"):
-            async for _ in agentic_map.run(
-                inputs=["test"],
-                agent_prompt_template="Process: {{ item }}",
-                model="test-model",
+        results = []
+        async for result in agentic_map.run(
+            inputs=["x", "y"],
+            agent_prompt_template="Analyze: {{ item }}",
+            model="anthropic/claude-opus-4-6",
+            read_only=True,  # default
+            db_path=str(tmp_path / "read_only_true.db"),
+            max_turns=1,
+        ):
+            results.append(result)
+
+        assert len(results) == 2
+        # Every send() call must have received tools=None
+        assert all(t is None for t in tools_seen), f"Expected all None, got {tools_seen}"
+
+    async def test_read_only_true_strips_explicit_tools_with_warning(
+        self, tmp_path, op_config, monkeypatch
+    ):
+        """read_only=True strips tools=[...] and logs a warning."""
+        from mnesis.models.message import TokenUsage, TurnResult
+        from mnesis.operators.agentic_map import AgenticMap
+
+        tools_seen: list[object] = []
+
+        async def fake_send(user_message, *, tools=None):
+            tools_seen.append(tools)
+            return TurnResult(
+                message_id="msg_1",
+                text="response",
+                finish_reason="stop",
+                tokens=TokenUsage(),
+                cost=0.0,
+            )
+
+        import mnesis.session as session_module
+
+        original_create = session_module.MnesisSession.create
+
+        async def patched_create(*args, **kwargs):
+            sess = await original_create(*args, **kwargs)
+            sess.send = fake_send  # type: ignore
+            return sess
+
+        monkeypatch.setattr(session_module.MnesisSession, "create", patched_create)
+
+        agentic_map = AgenticMap(op_config)
+
+        import structlog.testing
+
+        with structlog.testing.capture_logs() as cap_logs:
+            results = []
+            async for result in agentic_map.run(
+                inputs=["x"],
+                agent_prompt_template="Analyze: {{ item }}",
+                model="anthropic/claude-opus-4-6",
                 read_only=True,
+                tools=[{"type": "function", "function": {"name": "search"}}],  # should be stripped
+                db_path=str(tmp_path / "read_only_strip.db"),
+                max_turns=1,
             ):
-                pass
+                results.append(result)
+
+        # tools must have been stripped — send() sees None
+        assert all(t is None for t in tools_seen)
+        # Warning event must have been logged
+        assert any(
+            log.get("log_level") == "warning" and "read_only_tools_stripped" in log.get("event", "")
+            for log in cap_logs
+        ), f"Expected warning not found in: {cap_logs}"
 
     async def test_read_only_false_does_not_raise_not_implemented(self, tmp_path, op_config):
         """read_only=False is accepted — no NotImplementedError is raised."""

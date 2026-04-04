@@ -55,7 +55,9 @@ class AgenticMap:
 
     Permission restrictions (always applied):
     - Sub-sessions cannot spawn further sub-agents.
-    - ``read_only=True`` is not yet implemented; passing it raises ``NotImplementedError``.
+    - ``read_only=True`` passes ``tools=None`` to every sub-session ``send()``
+      call, removing all tool access from the sub-agent. If ``tools=[...]`` is
+      also passed to ``run()``, it is automatically stripped and a warning is logged.
 
     Example::
 
@@ -63,7 +65,7 @@ class AgenticMap:
         async for result in agentic_map.run(
             inputs=repositories,
             agent_prompt_template="Analyze this repository and report quality issues:\\n{{ item }}",
-            read_only=False,
+            read_only=True,
             max_turns=20,
         ):
             print(f"Repo: {result.input}\\nFindings: {result.output_text[:200]}")
@@ -110,9 +112,12 @@ class AgenticMap:
             model: LLM model string for all sub-sessions. Falls back to the model
                 set on ``__init__`` if not provided here.
             concurrency: Maximum concurrent sub-sessions.
-            read_only: Reserved. ``True`` raises ``NotImplementedError`` until
-                enforcement is implemented.
-            tools: Optional tool definitions for sub-sessions.
+            read_only: When ``True``, passes ``tools=None`` to every sub-session
+                ``send()`` call, removing all tool access from sub-agents. If
+                ``tools=[...]`` is also provided, it is stripped and a warning
+                is logged. Default is ``True``.
+            tools: Optional tool definitions for sub-sessions. Ignored when
+                ``read_only=True``.
             max_turns: Maximum turns per sub-session before stopping.
             continuation_message: Message sent as the user turn after turn 0.
                 If an empty string (default), the sub-session runs only the
@@ -133,15 +138,18 @@ class AgenticMap:
             AgentMapResult objects as sub-sessions complete (not in input order).
 
         Raises:
-            NotImplementedError: If ``read_only=True`` is passed (not yet implemented).
             ValueError: If neither ``model`` nor the constructor ``model`` is set,
                 or if ``agent_prompt_template`` does not reference ``item``.
         """
-        if read_only:
-            raise NotImplementedError(
-                "read_only enforcement is not yet implemented. "
-                "Pass read_only=False to proceed without write-tool filtering."
+        if read_only and tools:
+            self._logger.warning(
+                "read_only_tools_stripped",
+                message=(
+                    "tools=[...] was passed alongside read_only=True; "
+                    "tools will be stripped — sub-sessions have no tool access."
+                ),
             )
+            tools = None
 
         resolved_model = model or self._default_model
         if not resolved_model:
