@@ -382,3 +382,38 @@ class RecordResult(BaseModel):
     assistant_message_id: str
     tokens: TokenUsage
     compaction_triggered: bool = False
+
+
+# ── Streaming Event Types ──────────────────────────────────────────────────────
+
+
+class TextDelta(BaseModel):
+    """A streamed text chunk emitted by ``MnesisSession.stream()``.
+
+    Yielded progressively as the LLM produces output.  Consumers can
+    concatenate ``event.text`` across all ``TextDelta`` events to reconstruct
+    the full assistant response before the final :class:`TurnComplete`.
+
+    Attributes:
+        type: Discriminator literal — always ``"text_delta"``.
+        text: The text fragment for this chunk.
+    """
+
+    type: Literal["text_delta"] = "text_delta"
+    text: str
+
+
+class TurnComplete(BaseModel):
+    """The final event emitted by ``MnesisSession.stream()``.
+
+    Always the last event in the stream.  Carries the full
+    :class:`TurnResult` so callers can inspect token usage, compaction
+    status, and finish reason after the turn completes.
+
+    Attributes:
+        type: Discriminator literal — always ``"turn_complete"``.
+        result: The complete :class:`TurnResult` for the finished turn.
+    """
+
+    type: Literal["turn_complete"] = "turn_complete"
+    result: TurnResult

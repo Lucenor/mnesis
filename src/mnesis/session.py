@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -22,9 +22,11 @@ from mnesis.models.message import (
     MessagePart,
     MessageWithParts,
     RecordResult,
+    TextDelta,
     TextPart,
     TokenUsage,
     ToolPart,
+    TurnComplete,
     TurnResult,
 )
 from mnesis.models.snapshot import ContextBreakdown, TurnSnapshot
@@ -129,6 +131,9 @@ class MnesisSession:
         self._pending_compact_result: CompactionResult | None = None
         # Holds the current retry backoff sleep task so close() can cancel it.
         self._retry_sleep_task: asyncio.Task[None] | None = None
+        # Tracks background send() tasks spawned by stream() so close() can
+        # await them, preventing DB-closed errors on abandoned iterators.
+        self._background_send_tasks: set[asyncio.Task[None]] = set()
 
     @classmethod
     async def create(
@@ -642,6 +647,103 @@ class MnesisSession:
         )
         return isinstance(exc, _retryable)
 
+    async def stream(
+        self,
+        message: str | list[MessagePart],
+        *,
+        tools: list[Any] | None = None,
+        system_prompt: str | None = None,
+    ) -> AsyncIterator[TextDelta | TurnComplete]:
+        """
+        Stream a user message and yield text chunks via an async generator.
+
+        A thin async generator wrapper around :meth:`send` that exposes the
+        response text via an ``async for`` loop.  Yields :class:`TextDelta`
+        events carrying the response text and a single :class:`TurnComplete`
+        as the final event.
+
+        Note:
+            Because :meth:`send` buffers ``on_part`` callbacks per attempt and
+            forwards them only after the attempt succeeds, :class:`TextDelta`
+            events are delivered as a batch after the LLM call completes, not
+            as live token-by-token output during generation.
+
+        Args:
+            message: User message text or list of MessagePart objects.
+            tools: Optional list of tool definitions (litellm format dicts).
+            system_prompt: Override the session system prompt for this turn only.
+
+        Yields:
+            :class:`TextDelta` for each streamed text chunk, followed by a
+            single :class:`TurnComplete` carrying the full :class:`TurnResult`.
+
+        Note:
+            **Abandonment safety** — If you ``break`` out of the ``async for``
+            loop or an exception interrupts iteration, the underlying
+            :meth:`send` task still completes in the background.  The turn is
+            fully persisted, token counters are updated, and compaction is
+            triggered if the threshold is crossed.  The :class:`TurnComplete`
+            event may not be consumed by the caller, but completion still
+            happens even if iteration stops early.
+
+        Example::
+
+            async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
+                async for event in session.stream("Explain the GIL in Python."):
+                    if event.type == "text_delta":
+                        print(event.text, end="", flush=True)
+                    elif event.type == "turn_complete":
+                        print()  # newline after streaming ends
+                        print(f"Tokens: {event.result.tokens.effective_total()}")
+        """
+        queue: asyncio.Queue[TextDelta | TurnComplete | None] = asyncio.Queue()
+        abandoned = False
+        send_exc: BaseException | None = None
+
+        def _on_part(part: MessagePart) -> None:
+            if not abandoned and isinstance(part, TextPart):
+                queue.put_nowait(TextDelta(text=part.text))
+
+        async def _run_send() -> None:
+            nonlocal send_exc
+            try:
+                result = await self.send(
+                    message, tools=tools, on_part=_on_part, system_prompt=system_prompt
+                )
+                if not abandoned:
+                    queue.put_nowait(TurnComplete(result=result))
+            except Exception as exc:
+                # Capture the exception so we can re-raise it in the generator.
+                # send() handles any internal persistence cleanup before raising.
+                send_exc = exc
+            finally:
+                queue.put_nowait(None)
+
+        send_task: asyncio.Task[None] = asyncio.create_task(_run_send())
+        self._background_send_tasks.add(send_task)
+        send_task.add_done_callback(self._background_send_tasks.discard)
+
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+        except BaseException:
+            abandoned = True
+            raise
+        finally:
+            # If the caller abandons the iterator, the task runs to completion
+            # in the background — the turn is fully persisted and compaction
+            # fires normally.  We do not cancel it.  close() will await it.
+            pass
+
+        # Re-raise any exception from send() after the generator loop exits
+        # cleanly so the caller learns about failures rather than seeing a
+        # silent empty stream.
+        if send_exc is not None:
+            raise send_exc
+
     async def _stream_response(
         self,
         llm_messages: list[dict[str, Any]],
@@ -1041,6 +1143,10 @@ class MnesisSession:
         # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
         if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
             self._retry_sleep_task.cancel()
+        # Await any background send() tasks spawned by stream() so the DB is
+        # not closed while a turn is still being persisted.
+        if self._background_send_tasks:
+            await asyncio.gather(*self._background_send_tasks, return_exceptions=True)
         await self._compaction_engine.wait_for_pending()
         self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
         await self._store.close()

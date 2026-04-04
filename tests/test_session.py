@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from mnesis.events.bus import MnesisEvent
@@ -876,6 +878,137 @@ class TestSessionHistory:
 
         assert ContextBreakdown.__name__ == "ContextBreakdown"
         assert TurnSnapshot.__name__ == "TurnSnapshot"
+
+    # ── stream() tests ────────────────────────────────────────────────────────
+
+    async def test_stream_yields_text_delta_events(self, tmp_path, mock_llm_env):
+        """stream() yields at least one TextDelta event in mock mode."""
+        from mnesis import MnesisSession, TextDelta, TurnComplete
+
+        deltas = []
+        turn_completes = []
+
+        async with MnesisSession.open(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            async for event in session.stream("Hello!"):
+                if isinstance(event, TextDelta):
+                    deltas.append(event)
+                elif isinstance(event, TurnComplete):
+                    turn_completes.append(event)
+
+        assert len(deltas) > 0
+        assert all(isinstance(d.text, str) and len(d.text) > 0 for d in deltas)
+
+    async def test_stream_yields_turn_complete_as_final_event(self, tmp_path, mock_llm_env):
+        """stream() emits TurnComplete as the last event with a valid TurnResult."""
+        from mnesis import MnesisSession, TurnComplete
+        from mnesis.models.message import TurnResult
+
+        events = []
+
+        async with MnesisSession.open(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            async for event in session.stream("What is 2+2?"):
+                events.append(event)
+
+        assert len(events) > 0
+        last = events[-1]
+        assert isinstance(last, TurnComplete)
+        assert isinstance(last.result, TurnResult)
+        assert last.result.message_id.startswith("msg_")
+        assert isinstance(last.result.text, str) and len(last.result.text) > 0
+
+    async def test_stream_messages_persisted_after_completion(self, tmp_path, mock_llm_env):
+        """After stream() completes, both user and assistant messages are in the store."""
+        from mnesis import MnesisSession
+
+        async with MnesisSession.open(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            async for _ in session.stream("Persist me."):
+                pass
+
+            messages = await session.messages()
+
+        roles = [m.role for m in messages]
+        assert "user" in roles
+        assert "assistant" in roles
+
+    async def test_stream_compaction_triggered_when_threshold_crossed(self, tmp_path, mock_llm_env):
+        """stream() triggers compaction if cumulative tokens exceed the overflow threshold.
+
+        We pre-load the session's cumulative token counter to just below the
+        context limit so the post-turn overflow check in send() fires and the
+        TurnComplete event carries compaction_triggered=True.
+        """
+        from mnesis import MnesisSession, TokenUsage
+
+        turn_complete_result = None
+
+        async with MnesisSession.open(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            # Pre-load cumulative tokens so even a small mock response tips
+            # the overflow check inside send().
+            context_limit = session._model_info.context_limit
+            session._cumulative_tokens = TokenUsage(
+                input=context_limit, output=0, total=context_limit
+            )
+
+            async for event in session.stream("Trigger compaction."):
+                if event.type == "turn_complete":
+                    turn_complete_result = event.result
+
+        assert turn_complete_result is not None
+        assert turn_complete_result.compaction_triggered is True
+
+    async def test_stream_abandonment_still_persists_turn(self, tmp_path, mock_llm_env):
+        """Breaking out of stream() early still results in full message persistence."""
+        from mnesis import MnesisSession
+
+        db = str(tmp_path / "test.db")
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=db,
+        )
+        session_id = session.id
+
+        try:
+            # Consume only the first event then break — abandons the iterator
+            async for _event in session.stream("Abandon me."):
+                break  # immediately abandon
+
+            # Wait deterministically for the background send() task to persist
+            # the full turn rather than relying on a fixed-duration sleep.
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while True:
+                messages = await session.messages()
+                roles = [m.role for m in messages]
+                if "user" in roles and "assistant" in roles:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail(
+                        "Timed out waiting for abandoned stream() to persist both user "
+                        "and assistant messages"
+                    )
+                await asyncio.sleep(0.01)
+        finally:
+            await session.close()
+
+        # Reload the session and verify both messages were persisted
+        reloaded = await MnesisSession.load(session_id, db_path=db)
+        messages = await reloaded.messages()
+        await reloaded.close()
+
+        roles = [m.role for m in messages]
+        assert "user" in roles
+        assert "assistant" in roles
 
 
 class TestRetryResilience:
