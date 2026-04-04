@@ -107,6 +107,38 @@ from mnesis.events.bus import MnesisEvent
 session.subscribe(MnesisEvent.COMPACTION_COMPLETED, lambda e, p: print("Compacted!", p))
 ```
 
+## Streaming
+
+`session.stream()` is an async generator that yields text chunks from the response as `TextDelta` events, followed by a final `TurnComplete` event.  It is a thin wrapper around `send()` — all persistence, compaction, and token tracking work exactly as they do with `send()`.  Because it is built on top of `send()`, the `TextDelta` events are surfaced after the underlying LLM attempt completes successfully rather than as live token-by-token output during generation.
+
+```python
+async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
+    async for event in session.stream("Explain the GIL in Python."):
+        if event.type == "text_delta":
+            print(event.text, end="", flush=True)
+        elif event.type == "turn_complete":
+            print()  # newline after streaming ends
+            print(f"Tokens: {event.result.tokens.effective_total()}")
+```
+
+Two event types are yielded:
+
+- `TextDelta` — one or more text chunks with a `text` attribute.
+- `TurnComplete` — the final event, carrying the full `TurnResult` (token counts, finish reason, compaction status).
+
+You can also match on the `type` discriminator string (`"text_delta"`, `"turn_complete"`) instead of using `isinstance`.
+
+### Abandonment safety
+
+If you `break` out of the `async for` loop or an exception interrupts iteration, the underlying `send()` task still completes in the background.  The turn is fully persisted, token counters are updated, and compaction is triggered if the threshold is crossed.  The `TurnComplete` event may not be consumed by the caller, but completion still happens even if iteration stops early.
+
+```python
+# Safe to break early — the turn is still persisted
+async for event in session.stream("Long response..."):
+    if event.type == "text_delta" and "stop" in event.text:
+        break  # stop reading, but send() finishes in background
+```
+
 ## Next steps
 
 - [Providers](providers.md) — configure OpenAI, Gemini, OpenRouter, etc.

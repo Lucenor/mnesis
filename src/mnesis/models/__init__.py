@@ -16,9 +16,11 @@ from mnesis.models.message import (
     MessagePart,
     MessageWithParts,
     RecordResult,
+    TextDelta,
     TextPart,
     TokenUsage,
     ToolPart,
+    TurnComplete,
     TurnResult,
 )
 from mnesis.models.snapshot import ContextBreakdown, TurnSnapshot
@@ -40,9 +42,11 @@ __all__ = [
     "RecordResult",
     "SessionConfig",
     "StoreConfig",
+    "TextDelta",
     "TextPart",
     "TokenUsage",
     "ToolPart",
+    "TurnComplete",
     "TurnResult",
     "TurnSnapshot",
 ]
