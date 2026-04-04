@@ -32,8 +32,10 @@ jobs:
 
       - name: Check version format, ordering, and uniqueness
         id: check
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${{ inputs.version }}"
+          VERSION="${INPUT_VERSION}"
 
           # Must be X.Y.Z (no leading v)
           if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -181,8 +183,10 @@ jobs:
       # ── 3a. Resolve release notes ────────────────────────────────────────
       - name: Resolve release notes
         id: notes
+        env:
+          INPUT_NOTES: ${{ inputs.notes }}
         run: |
-          NOTES="${{ inputs.notes }}"
+          NOTES="${INPUT_NOTES}"
 
           if [ -z "$NOTES" ]; then
             LAST_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
@@ -195,14 +199,17 @@ jobs:
 
           printf '%s' "$NOTES" > /tmp/release_notes.md
 
-          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          DELIM="$(openssl rand -hex 16)"
+          echo "notes<<${DELIM}" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$NOTES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
 
       # ── 3b. Bump version in pyproject.toml ──────────────────────────────
       - name: Bump version in pyproject.toml
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          VERSION="${{ needs.validate.outputs.version }}"
+          VERSION="${RELEASE_VERSION}"
           sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
           grep '^version = ' pyproject.toml
 
@@ -271,9 +278,12 @@ jobs:
 
       # ── 3g. Commit, tag, push ────────────────────────────────────────────
       - name: Commit and tag release
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          VERSION="${{ needs.validate.outputs.version }}"
-          TAG="${{ needs.validate.outputs.tag }}"
+          VERSION="${RELEASE_VERSION}"
+          TAG="${RELEASE_TAG}"
 
           git add pyproject.toml docs/changelog.md
           git commit -m "chore: release ${VERSION}"
@@ -287,8 +297,9 @@ jobs:
       - name: Create GitHub Release (draft)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          TAG="${{ needs.validate.outputs.tag }}"
+          TAG="${RELEASE_TAG}"
           gh release create "$TAG" dist/* \
             --title "mnesis ${TAG}" \
             --notes-file /tmp/release_notes.md \
@@ -304,6 +315,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          TAG="${{ needs.validate.outputs.tag }}"
+          TAG="${RELEASE_TAG}"
           gh release edit "$TAG" --draft=false
