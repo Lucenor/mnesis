@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 — 2026-04-04
+
+- chore(deps): bump codecov/codecov-action from 5.5.3 to 6.0.0 (#88)
+- chore(deps): bump astral-sh/setup-uv from 7.6.0 to 8.0.0 (#87)
+- docs: document read_only=True behavior and model_overrides (Stream 5) (#89)
+- test: improve coverage for pruner, session, store, files, and estimator (#93)
+- feat: complete unfinished API surfaces (Stream 3 of 0.3.0) (#91)
+- feat: async streaming iterator API (session.stream()) (#90)
+- feat: retry & resilience in send() (Mnesis 0.3.0 Stream 1) (#92)
+- chore(deps): bump anchore/sbom-action from 0.23.1 to 0.24.0 (#86)
+- chore(deps): bump github/codeql-action from 4.32.6 to 4.34.1 (#85)
+- chore(deps): bump actions/deploy-pages from 4.0.5 to 5.0.0 (#84)
+- chore(deps): bump codecov/codecov-action from 5.5.2 to 5.5.3 (#83)
+- chore(deps): bump actions/attest-sbom from 4.0.0 to 4.1.0 (#81)
+- chore(deps): bump astral-sh/setup-uv from 7.3.1 to 7.6.0 (#80)
+- chore(deps): bump actions/create-github-app-token from 2.2.1 to 3.0.0 (#82)
+- chore(deps): bump anchore/sbom-action from 0.23.0 to 0.23.1 (#78)
+- chore(deps): bump github/codeql-action from 4.32.4 to 4.32.5 (#77)
+- chore(deps): bump actions/dependency-review-action from 4.8.3 to 4.9.0 (#76)
+- chore(deps): bump astral-sh/setup-uv from 7.3.0 to 7.3.1 (#75)
+- chore(deps): bump anchore/sbom-action from 0.22.2 to 0.23.0 (#74)
+- chore(deps): bump actions/dependency-review-action from 4.6.0 to 4.8.3 (#70)
+- chore(deps): bump actions/attest-build-provenance from 2.4.0 to 4.0.0 (#72)
+- chore(deps): bump actions/upload-artifact from 4.6.2 to 6.0.0 (#73)
+- chore(deps): bump actions/attest-sbom from 2.4.0 to 4.0.0 (#71)
+- chore(deps): bump github/codeql-action from 4.32.3 to 4.32.4 (#69)
+
 ## 0.2.0 — 2026-02-25
 
 - chore: source __version__ from importlib.metadata (#68)
