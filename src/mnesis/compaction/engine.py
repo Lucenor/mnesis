@@ -319,6 +319,15 @@ class CompactionEngine:
 
         # Step 1: Run pruner first to reduce input size
         prune_result = await self._pruner.prune(session_id)
+        if prune_result.pruned_count > 0:
+            self._event_bus.publish(
+                MnesisEvent.PRUNE_COMPLETED,
+                {
+                    "session_id": session_id,
+                    "pruned_count": prune_result.pruned_count,
+                    "pruned_tokens": prune_result.pruned_tokens,
+                },
+            )
 
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
