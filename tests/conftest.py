@@ -101,6 +101,7 @@ def make_raw_part(
     tool_call_id: str | None = None,
     tool_name: str | None = None,
     tool_state: str | None = None,
+    compacted_at: int | None = None,
 ) -> RawMessagePart:
     """Helper to create a test RawMessagePart."""
     import json
@@ -131,4 +132,5 @@ def make_raw_part(
         tool_name=tool_name,
         tool_call_id=tool_call_id,
         tool_state=tool_state,
+        compacted_at=compacted_at,
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -903,3 +904,373 @@ class TestDAGPersistence:
         # Backwards scan exhausts all rows → for-else returns None (line 122).
         latest = await dag_store.get_latest_node(session_id)
         assert latest is None
+
+
+class TestImmutableStoreCoverageGaps:
+    """Additional tests targeting uncovered branches in store/immutable.py."""
+
+    # ── conn_or_raise ─────────────────────────────────────────────────────────
+
+    async def test_conn_or_raise_before_initialize(self, config):
+        """_conn_or_raise() raises MnesisStoreError before initialize() is called."""
+        from mnesis.store.immutable import ImmutableStore, MnesisStoreError
+
+        store = ImmutableStore(config.store)
+        with pytest.raises(MnesisStoreError, match="not initialized"):
+            store._conn_or_raise()
+
+    # ── wal_mode error path ───────────────────────────────────────────────────
+
+    async def test_initialize_closes_conn_on_pragma_error(self, tmp_path):
+        """initialize() closes the connection if a PRAGMA raises after connect.
+
+        Covers lines 240-242: the except-block that closes and re-raises when
+        the WAL pragma (or other post-connect setup) fails.
+        """
+        from mnesis.models.config import StoreConfig
+        from mnesis.store.immutable import ImmutableStore
+
+        cfg = StoreConfig(db_path=str(tmp_path / "wal_err.db"), wal_mode=True)
+        store = ImmutableStore(cfg)
+
+        # Patch aiosqlite.connect to return a connection whose execute raises
+        import unittest.mock as mock
+
+        fake_conn = mock.MagicMock()
+        fake_conn.row_factory = None
+        fake_conn.execute = mock.AsyncMock(side_effect=RuntimeError("simulated WAL failure"))
+        fake_conn.close = mock.AsyncMock()
+        fake_conn.__aenter__ = mock.AsyncMock(return_value=fake_conn)
+        fake_conn.__aexit__ = mock.AsyncMock(return_value=False)
+
+        with mock.patch("aiosqlite.connect", new=mock.AsyncMock(return_value=fake_conn)):
+            with pytest.raises(RuntimeError, match="simulated WAL failure"):
+                await store.initialize()
+
+        fake_conn.close.assert_awaited_once()
+
+    # ── append_message skips context_items for summary messages ──────────────
+
+    async def test_append_summary_message_skips_context_items(self, session_id, store):
+        """Summary messages are NOT inserted into context_items (line 508: if not is_summary).
+
+        The compaction engine inserts context_items for summary nodes separately.
+        This test verifies the guard works — summary rows do not appear in context_items.
+        """
+        from tests.conftest import make_message
+
+        summary = make_message(
+            session_id, role="assistant", msg_id="msg_no_ci_001", is_summary=True
+        )
+        await store.append_message(summary)
+
+        items = await store.get_context_items(session_id)
+        item_ids = [item_id for _, item_id in items]
+        assert "msg_no_ci_001" not in item_ids
+
+    # ── append_part: FK error ─────────────────────────────────────────────────
+
+    async def test_append_part_unknown_message_raises(self, session_id, store):
+        """append_part() raises MessageNotFoundError for unknown message_id.
+
+        Covers line 578: the FK integrity error is translated to MessageNotFoundError.
+        """
+        from mnesis.store.immutable import MessageNotFoundError
+        from tests.conftest import make_raw_part
+
+        part = make_raw_part("msg_nonexistent_000", session_id, part_id="part_fk_001")
+        with pytest.raises(MessageNotFoundError):
+            await store.append_part(part)
+
+    # ── update_part_status: output / error_message paths ─────────────────────
+
+    async def test_update_part_status_output_field(self, session_id, store):
+        """update_part_status() merges output into the content JSON (lines 629-643)."""
+        from tests.conftest import make_message, make_raw_part
+
+        msg = make_message(session_id, role="assistant", msg_id="msg_out_001")
+        await store.append_message(msg)
+        part = make_raw_part(
+            "msg_out_001",
+            session_id,
+            part_type="tool",
+            part_id="part_out_001",
+            tool_call_id="call_out",
+            tool_name="run_code",
+            tool_state="running",
+        )
+        await store.append_part(part)
+
+        await store.update_part_status("part_out_001", output="result data here")
+        parts = await store.get_parts("msg_out_001")
+        assert len(parts) == 1
+        assert parts[0].compacted_at is None
+        content = json.loads(parts[0].content)
+        assert content["output"] == "result data here"
+
+    async def test_update_part_status_error_message_field(self, session_id, store):
+        """update_part_status() merges error_message into content JSON."""
+        from tests.conftest import make_message, make_raw_part
+
+        msg = make_message(session_id, role="assistant", msg_id="msg_err_001")
+        await store.append_message(msg)
+        part = make_raw_part(
+            "msg_err_001",
+            session_id,
+            part_type="tool",
+            part_id="part_err_001",
+            tool_call_id="call_err",
+            tool_name="bad_tool",
+            tool_state="running",
+        )
+        await store.append_part(part)
+
+        await store.update_part_status("part_err_001", error_message="something failed")
+        parts = await store.get_parts("msg_err_001")
+        assert len(parts) == 1
+        content = json.loads(parts[0].content)
+        assert content["error_message"] == "something failed"
+        assert content["status"]["state"] == "running"
+
+    async def test_update_part_status_no_fields_is_noop(self, session_id, store):
+        """update_part_status() with no kwargs is a no-op (line 646: early return)."""
+        from tests.conftest import make_message, make_raw_part
+
+        msg = make_message(session_id, role="assistant", msg_id="msg_noop_001")
+        await store.append_message(msg)
+        part = make_raw_part("msg_noop_001", session_id, part_id="part_noop_001")
+        await store.append_part(part)
+
+        # Should not raise; nothing to update
+        await store.update_part_status("part_noop_001")
+
+    async def test_update_part_status_part_not_found_content_path(self, store):
+        """update_part_status() raises PartNotFoundError when content RMW finds no row.
+
+        Covers line 636: the row is None check inside the content RMW block.
+        """
+        from mnesis.store.immutable import PartNotFoundError
+
+        with pytest.raises(PartNotFoundError):
+            await store.update_part_status(
+                "part_does_not_exist",
+                output="will never land",
+            )
+
+    # ── get_messages_with_parts_by_ids ────────────────────────────────────────
+
+    async def test_get_messages_with_parts_by_ids_returns_in_order(self, session_id, store):
+        """get_messages_with_parts_by_ids() returns messages in caller-specified order."""
+        from tests.conftest import make_message, make_raw_part
+
+        ids = []
+        for i in range(3):
+            msg_id = f"msg_byids_{i:03d}"
+            msg = make_message(session_id, msg_id=msg_id)
+            await store.append_message(msg)
+            part = make_raw_part(msg_id, session_id, part_id=f"part_byids_{i:03d}")
+            await store.append_part(part)
+            ids.append(msg_id)
+
+        # Request in reverse order
+        reversed_ids = list(reversed(ids))
+        results = await store.get_messages_with_parts_by_ids(reversed_ids)
+        assert [r.id for r in results] == reversed_ids
+
+    async def test_get_messages_with_parts_by_ids_empty_list(self, store):
+        """get_messages_with_parts_by_ids([]) returns empty list immediately."""
+        results = await store.get_messages_with_parts_by_ids([])
+        assert results == []
+
+    async def test_get_messages_with_parts_by_ids_skips_missing(self, session_id, store):
+        """get_messages_with_parts_by_ids() silently skips IDs not in the DB."""
+        from tests.conftest import make_message
+
+        msg = make_message(session_id, msg_id="msg_skip_001")
+        await store.append_message(msg)
+
+        results = await store.get_messages_with_parts_by_ids(["msg_skip_001", "msg_does_not_exist"])
+        # Only the existing message is returned
+        assert len(results) == 1
+        assert results[0].id == "msg_skip_001"
+
+    # ── get_file_reference_by_path ────────────────────────────────────────────
+
+    async def test_get_file_reference_by_path_returns_latest(self, store):
+        """get_file_reference_by_path() returns the most recently stored ref for a path."""
+        from mnesis.models.summary import FileReference
+
+        ref1 = FileReference(
+            content_id="hash_v1",
+            path="/shared/path.py",
+            file_type="python",
+            token_count=100,
+            exploration_summary="Version 1",
+            created_at=1000,
+        )
+        await store.store_file_reference(ref1)
+
+        ref2 = FileReference(
+            content_id="hash_v2",
+            path="/shared/path.py",
+            file_type="python",
+            token_count=200,
+            exploration_summary="Version 2",
+            created_at=2000,
+        )
+        await store.store_file_reference(ref2)
+
+        result = await store.get_file_reference_by_path("/shared/path.py")
+        assert result is not None
+        # ref2 has the higher created_at so it must be returned as the latest
+        assert result.content_id == "hash_v2"
+        assert result.exploration_summary == "Version 2"
+
+    async def test_get_file_reference_by_path_not_found(self, store):
+        """get_file_reference_by_path() returns None for unknown path."""
+        result = await store.get_file_reference_by_path("/nonexistent/path.py")
+        assert result is None
+
+    # ── swap_context_items edge cases ─────────────────────────────────────────
+
+    async def test_swap_context_items_empty_remove_list_is_noop(self, session_id, store):
+        """swap_context_items() with empty remove_item_ids is a no-op (line 992)."""
+        from tests.conftest import make_message
+
+        msg = make_message(session_id, msg_id="msg_swap_noop_001")
+        await store.append_message(msg)
+
+        # Should not raise, nothing should change
+        await store.swap_context_items(session_id, [], "summary_x")
+        items = await store.get_context_items(session_id)
+        assert any(item_id == "msg_swap_noop_001" for _, item_id in items)
+
+    async def test_swap_context_items_stale_ids_is_noop(self, session_id, store):
+        """swap_context_items() with IDs not in context_items is a no-op (lines 1013-1016).
+
+        When MIN(position) is NULL because none of the remove_item_ids exist,
+        the function returns without inserting a summary row.
+        """
+        from tests.conftest import make_message
+
+        msg = make_message(session_id, msg_id="msg_swap_real_001")
+        await store.append_message(msg)
+
+        # Pass a stale ID that doesn't exist in context_items
+        await store.swap_context_items(session_id, ["stale_id_xyz"], "summary_y")
+
+        items = await store.get_context_items(session_id)
+        item_ids = [item_id for _, item_id in items]
+        # Original item untouched; no summary inserted
+        assert "msg_swap_real_001" in item_ids
+        assert "summary_y" not in item_ids
+
+    async def test_swap_context_items_replaces_with_summary(self, session_id, store):
+        """swap_context_items() atomically removes messages and inserts summary item."""
+        from tests.conftest import make_message
+
+        msg1 = make_message(session_id, msg_id="msg_swap_a_001")
+        msg2 = make_message(session_id, msg_id="msg_swap_a_002")
+        msg3 = make_message(session_id, msg_id="msg_swap_a_003")
+        for m in [msg1, msg2, msg3]:
+            await store.append_message(m)
+
+        await store.swap_context_items(
+            session_id,
+            ["msg_swap_a_001", "msg_swap_a_002"],
+            "sum_node_001",
+        )
+
+        items = await store.get_context_items(session_id)
+        item_ids = [item_id for _, item_id in items]
+        # Compacted messages removed; summary inserted; msg3 retained
+        assert "msg_swap_a_001" not in item_ids
+        assert "msg_swap_a_002" not in item_ids
+        assert "sum_node_001" in item_ids
+        assert "msg_swap_a_003" in item_ids
+
+    # ── Session loading: empty-string model_id edge case ─────────────────────
+
+    async def test_get_session_with_empty_model_id(self, store):
+        """Sessions created with empty-string model_id are loadable via get_session()."""
+        conn = store._conn_or_raise()
+        await conn.execute(
+            "INSERT INTO sessions (id, parent_id, created_at, updated_at, model_id, "
+            "provider_id, agent, is_active) VALUES (?, NULL, 1, 1, '', '', 'default', 1)",
+            ("sess_null_model",),
+        )
+        await conn.commit()
+
+        session = await store.get_session("sess_null_model")
+        assert session.id == "sess_null_model"
+        assert session.model_id == ""
+
+    # ── Concurrent writes via StorePool ──────────────────────────────────────
+
+    async def test_concurrent_writes_via_store_pool(self, config, pool):
+        """Two ImmutableStore instances sharing the same StorePool serialize writes.
+
+        Verifies that concurrent appends via a shared connection pool do not
+        produce 'database is locked' errors (StorePool invariant).
+        """
+        from mnesis.store.immutable import ImmutableStore
+        from tests.conftest import make_message
+
+        store_a = ImmutableStore(config.store, pool=pool)
+        store_b = ImmutableStore(config.store, pool=pool)
+        await store_a.initialize()
+        await store_b.initialize()
+
+        try:
+            # Create a single session used by both stores
+            sid = "sess_concurrent_001"
+            await store_a.create_session(sid, model_id="gpt-4o")
+
+            # Concurrently append messages from both store references
+            async def _append_from_a(i: int) -> None:
+                msg = make_message(sid, msg_id=f"msg_conc_a_{i:03d}")
+                await store_a.append_message(msg)
+
+            async def _append_from_b(i: int) -> None:
+                msg = make_message(sid, msg_id=f"msg_conc_b_{i:03d}")
+                await store_b.append_message(msg)
+
+            tasks = [
+                *[_append_from_a(i) for i in range(5)],
+                *[_append_from_b(i) for i in range(5)],
+            ]
+            await asyncio.gather(*tasks)
+
+            messages = await store_a.get_messages(sid)
+            assert len(messages) == 10
+        finally:
+            await store_a.close()
+            await store_b.close()
+
+    # ── list_sessions with parent_id filter ──────────────────────────────────
+
+    async def test_list_sessions_with_parent_id(self, store):
+        """list_sessions(parent_id=...) filters to child sessions only."""
+        await store.create_session("sess_parent_001")
+        await store.create_session("sess_child_001", parent_id="sess_parent_001")
+        await store.create_session("sess_child_002", parent_id="sess_parent_001")
+        await store.create_session("sess_other_001")
+
+        children = await store.list_sessions(parent_id="sess_parent_001")
+        child_ids = {s.id for s in children}
+        assert "sess_child_001" in child_ids
+        assert "sess_child_002" in child_ids
+        assert "sess_other_001" not in child_ids
+
+    # ── get_messages_with_parts_by_ids: no part rows ─────────────────────────
+
+    async def test_get_messages_with_parts_by_ids_no_parts(self, session_id, store):
+        """get_messages_with_parts_by_ids() returns messages with empty parts lists."""
+        from tests.conftest import make_message
+
+        msg = make_message(session_id, msg_id="msg_noparts_001")
+        await store.append_message(msg)
+
+        results = await store.get_messages_with_parts_by_ids(["msg_noparts_001"])
+        assert len(results) == 1
+        assert results[0].parts == []
