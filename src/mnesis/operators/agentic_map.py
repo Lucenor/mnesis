@@ -141,7 +141,7 @@ class AgenticMap:
             ValueError: If neither ``model`` nor the constructor ``model`` is set,
                 or if ``agent_prompt_template`` does not reference ``item``.
         """
-        if read_only and tools is not None:
+        if read_only and tools:
             self._logger.warning(
                 "read_only_tools_stripped",
                 message=(

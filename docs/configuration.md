@@ -212,11 +212,9 @@ async with MnesisSession.open(model="openai/my-finetuned-gpt4", config=config) a
     result = await session.send("Hello from my fine-tuned model!")
 ```
 
-The same `model_overrides` dict is applied to both the session model and the
-compaction model (if `compaction.compaction_model` is set). Because overrides
-are a single flat dict applied to whichever model is active, they are most
-useful when the session model and compaction model are the same custom model,
-or when both models share the same context and output limits.
+`model_overrides` applies to the session model only. If you configure a
+separate `compaction.compaction_model`, overrides are not applied to it — the
+compaction model's limits are always auto-detected from the model string.
 
 !!! note
     `model_overrides` only affects how Mnesis allocates the context budget and

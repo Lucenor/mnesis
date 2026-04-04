@@ -280,13 +280,19 @@ class TestPruneCompletedEvent:
             msg = make_message(session_id, role=role, msg_id=msg_id)
             await store.append_message(msg)
 
+        _ctr: list[int] = [0]
+
+        def _id_gen_nopev(prefix: str) -> str:
+            _ctr[0] += 1
+            return f"{prefix}_nopev_{_ctr[0]:04d}"
+
         engine = CompactionEngine(
             store,
             dag_store,
             estimator,
             event_bus,
             cfg,
-            id_generator=lambda p: f"{p}_no_prune_ev",
+            id_generator=_id_gen_nopev,
             session_model="nonexistent-model-xyz",
         )
         await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
@@ -322,13 +328,19 @@ class TestPruneCompletedEvent:
                 )
                 await store.append_part(part)
 
+        _ctr2: list[int] = [0]
+
+        def _id_gen_pl(prefix: str) -> str:
+            _ctr2[0] += 1
+            return f"{prefix}_pl_{_ctr2[0]:04d}"
+
         engine = CompactionEngine(
             store,
             dag_store,
             estimator,
             event_bus,
             cfg,
-            id_generator=lambda p: f"{p}_payload_test",
+            id_generator=_id_gen_pl,
             session_model="nonexistent-model-xyz",
         )
         await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
