@@ -45,7 +45,15 @@ jobs:
         run: uv sync --group docs
 
       - name: Install D2
-        run: curl -fsSL https://d2lang.com/install.sh | sh -s --
+        env:
+          D2_VERSION: "0.7.1"
+          D2_SHA256: "eb172adf59f38d1e5a70ab177591356754ffaf9bebb84e0ca8b767dfb421dad7"
+        run: |
+          curl -fsSL "https://github.com/terrastruct/d2/releases/download/v${D2_VERSION}/d2-v${D2_VERSION}-linux-amd64.tar.gz" -o d2.tar.gz
+          echo "${D2_SHA256}  d2.tar.gz" | sha256sum -c -
+          tar -xzf d2.tar.gz
+          sudo install -m 755 "d2-v${D2_VERSION}-linux-amd64/bin/d2" /usr/local/bin/d2
+          rm -rf d2.tar.gz "d2-v${D2_VERSION}-linux-amd64"
 
       - name: Build docs
         run: uv run mkdocs build
