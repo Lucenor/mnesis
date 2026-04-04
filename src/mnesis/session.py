@@ -131,6 +131,9 @@ class MnesisSession:
         self._pending_compact_result: CompactionResult | None = None
         # Holds the current retry backoff sleep task so close() can cancel it.
         self._retry_sleep_task: asyncio.Task[None] | None = None
+        # Tracks background send() tasks spawned by stream() so close() can
+        # await them, preventing DB-closed errors on abandoned iterators.
+        self._background_send_tasks: set[asyncio.Task[None]] = set()
 
     @classmethod
     async def create(
@@ -652,12 +655,18 @@ class MnesisSession:
         system_prompt: str | None = None,
     ) -> AsyncIterator[TextDelta | TurnComplete]:
         """
-        Stream a user message and yield text chunks as they arrive.
+        Stream a user message and yield text chunks via an async generator.
 
         A thin async generator wrapper around :meth:`send` that exposes the
-        streamed text via an ``async for`` loop.  Yields :class:`TextDelta`
-        events for each text chunk and a single :class:`TurnComplete` as the
-        final event.
+        response text via an ``async for`` loop.  Yields :class:`TextDelta`
+        events carrying the response text and a single :class:`TurnComplete`
+        as the final event.
+
+        Note:
+            Because :meth:`send` buffers ``on_part`` callbacks per attempt and
+            forwards them only after the attempt succeeds, :class:`TextDelta`
+            events are delivered as a batch after the LLM call completes, not
+            as live token-by-token output during generation.
 
         Args:
             message: User message text or list of MessagePart objects.
@@ -710,7 +719,9 @@ class MnesisSession:
             finally:
                 queue.put_nowait(None)
 
-        send_task = asyncio.ensure_future(_run_send())
+        send_task: asyncio.Task[None] = asyncio.create_task(_run_send())
+        self._background_send_tasks.add(send_task)
+        send_task.add_done_callback(self._background_send_tasks.discard)
 
         try:
             while True:
@@ -724,8 +735,8 @@ class MnesisSession:
         finally:
             # If the caller abandons the iterator, the task runs to completion
             # in the background — the turn is fully persisted and compaction
-            # fires normally.  We do not cancel it.
-            _ = send_task  # keep reference; task will complete independently
+            # fires normally.  We do not cancel it.  close() will await it.
+            pass
 
         # Re-raise any exception from send() after the generator loop exits
         # cleanly so the caller learns about failures rather than seeing a
@@ -1132,6 +1143,10 @@ class MnesisSession:
         # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
         if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
             self._retry_sleep_task.cancel()
+        # Await any background send() tasks spawned by stream() so the DB is
+        # not closed while a turn is still being persisted.
+        if self._background_send_tasks:
+            await asyncio.gather(*self._background_send_tasks, return_exceptions=True)
         await self._compaction_engine.wait_for_pending()
         self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
         await self._store.close()

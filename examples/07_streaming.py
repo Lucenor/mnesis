@@ -3,8 +3,13 @@ Example 07: Streaming Iterator API
 ===================================
 
 Demonstrates ``MnesisSession.stream()`` — an async generator that yields
-``TextDelta`` events for progressive rendering and a final ``TurnComplete``
+``TextDelta`` events carrying the response text and a final ``TurnComplete``
 event with the full ``TurnResult``.
+
+Note: ``stream()`` is a thin wrapper around ``send()``.  Because ``send()``
+buffers ``on_part`` callbacks per attempt and forwards them only after the
+attempt succeeds, ``TextDelta`` events are delivered as a batch after the
+LLM call completes, not as live token-by-token output during generation.
 
 Run without an API key:
     MNESIS_MOCK_LLM=1 uv run python examples/07_streaming.py

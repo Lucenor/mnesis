@@ -109,7 +109,7 @@ session.subscribe(MnesisEvent.COMPACTION_COMPLETED, lambda e, p: print("Compacte
 
 ## Streaming
 
-`session.stream()` is an async generator that yields text chunks as they arrive, making it ideal for chat UIs and progressive rendering.  It is a thin wrapper around `send()` — all persistence, compaction, and token tracking work exactly as they do with `send()`.
+`session.stream()` is an async generator that yields text chunks from the response as `TextDelta` events, followed by a final `TurnComplete` event.  It is a thin wrapper around `send()` — all persistence, compaction, and token tracking work exactly as they do with `send()`.  Because it is built on top of `send()`, the `TextDelta` events are surfaced after the underlying LLM attempt completes successfully rather than as live token-by-token output during generation.
 
 ```python
 async with MnesisSession.open(model="anthropic/claude-opus-4-6") as session:
