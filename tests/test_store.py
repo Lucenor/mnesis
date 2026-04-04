@@ -1189,7 +1189,7 @@ class TestImmutableStoreCoverageGaps:
         assert "sum_node_001" in item_ids
         assert "msg_swap_a_003" in item_ids
 
-    # ── Session loading: model_id NULL edge case ──────────────────────────────
+    # ── Session loading: empty-string model_id edge case ─────────────────────
 
     async def test_get_session_with_empty_model_id(self, store):
         """Sessions created with empty-string model_id are loadable via get_session()."""

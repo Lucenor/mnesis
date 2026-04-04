@@ -227,7 +227,8 @@ async def async_func():
         monkeypatch.setitem(sys.modules, "tomllib", None)  # type: ignore[arg-type]
         content = "[section1]\nkey = 1\n\n[section2]\nkey = 2\n"
         summary = handler._summarise_toml(content)
-        assert "section1" in summary or "section2" in summary or isinstance(summary, str)
+        assert len(summary) > 0
+        assert "section1" in summary or "section2" in summary or "toml" in summary.lower()
 
     # ── TypeScript/JavaScript summary ─────────────────────────────────────────
 
@@ -280,7 +281,8 @@ export default function App() {}
         # Patch the static method to raise so _generate_exploration_summary catches it
         monkeypatch.setattr(handler.__class__, "_summarise_python", staticmethod(_raise))
         result = handler._generate_exploration_summary("/x.py", "class Foo: pass", "python")
-        assert "Summary generation failed" in result or isinstance(result, str)
+        assert "Summary generation failed" in result
+        assert "python" in result.lower()
 
     # ── bytes content normalization ───────────────────────────────────────────
 

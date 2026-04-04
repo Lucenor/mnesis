@@ -1395,10 +1395,11 @@ class TestSessionCoverageGaps:
     # ── close() with in-flight compaction ───────────────────────────────────
 
     async def test_close_waits_for_in_flight_compaction(self, tmp_path, monkeypatch):
-        """close() waits for a pending background compaction task before closing DB.
+        """close() calls wait_for_pending() before closing the DB.
 
-        Exercises the wait_for_pending() call inside close() and verifies that
-        the session cleans up cleanly even when compaction is triggered.
+        Exercises the wait_for_pending() call inside close() by spying on it
+        and verifying it was invoked, regardless of whether compaction actually
+        triggered (which is non-deterministic with mock responses).
         """
 
         from mnesis import MnesisConfig, MnesisSession
@@ -1406,12 +1407,11 @@ class TestSessionCoverageGaps:
 
         monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
 
-        # Tiny budget to ensure compaction triggers immediately after the first turn.
         cfg = MnesisConfig(
             compaction=CompactionConfig(
                 auto=True,
                 compaction_output_budget=1_000,
-                soft_threshold_fraction=0.1,  # trigger at 10% — effectively every turn
+                soft_threshold_fraction=0.1,
             )
         )
 
@@ -1420,9 +1420,22 @@ class TestSessionCoverageGaps:
             db_path=str(tmp_path / "test.db"),
             config=cfg,
         )
+
+        # Spy on wait_for_pending so we can assert it was called by close().
+        wait_called = [0]
+        original_wait = session._compaction_engine.wait_for_pending
+
+        async def _spy_wait():
+            wait_called[0] += 1
+            return await original_wait()
+
+        session._compaction_engine.wait_for_pending = _spy_wait  # type: ignore[method-assign]
+
         await session.send("Trigger compaction")
-        # close() must not raise even if a compaction task is in flight
         await session.close()
+
+        # close() must have called wait_for_pending() at least once.
+        assert wait_called[0] >= 1
 
     # ── load() for existing session ─────────────────────────────────────────
 
