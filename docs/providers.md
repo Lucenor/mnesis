@@ -106,8 +106,8 @@ config = MnesisConfig(
     }
 )
 
-async with MnesisSession.open(model="openai/my-finetuned-gpt4o", config=config) as session:
-    result = await session.send("Hello!")
+session = await MnesisSession.create(model="openai/acme-support-ft-v1", config=config)
+result = await session.send("Hello!")
 ```
 
 Both `context_limit` and `max_output_tokens` affect the compaction budget, so

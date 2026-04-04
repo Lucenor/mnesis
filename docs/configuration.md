@@ -213,19 +213,19 @@ config = MnesisConfig(
     }
 )
 
-async with MnesisSession.open(model="openai/my-finetuned-gpt4o", config=config) as session:
+async with MnesisSession.open(model="openai/acme-support-ft-v1", config=config) as session:
     result = await session.send("Hello!")
     print(result.text)
 ```
 
 ### Example — correcting an underestimated limit
 
-If Mnesis picks a conservative default for a newly released model, override it
-without touching any other configuration:
+If Mnesis falls back to conservative defaults for a model it does not recognise,
+override just the field that is wrong without touching any other configuration:
 
 ```python
 config = MnesisConfig(
-    model_overrides={"context_limit": 1_000_000},  # Gemini 1.5 Pro 1M variant
+    model_overrides={"max_output_tokens": 32_768},  # provider raised the output limit
 )
 ```
 
