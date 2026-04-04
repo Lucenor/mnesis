@@ -189,28 +189,52 @@ session.event_bus.subscribe(MnesisEvent.LLM_RETRY, on_retry)  # type: ignore[arg
 
 ## model_overrides
 
-`MnesisConfig.model_overrides` is a `dict[str, int]` that lets you override
-the auto-detected `context_limit` and `max_output_tokens` for the model being
-used in a session. This is useful for custom fine-tuned models, private
-deployments, or models that litellm does not yet know about.
+`MnesisConfig.model_overrides` lets you correct or override the context and
+output token limits that Mnesis auto-detects from the model string. This is
+useful when you are using a fine-tuned model, a custom deployment, or a model
+that litellm does not yet know about.
 
-Supported keys: `context_limit` and `max_output_tokens`. Only the fields you
-provide are overridden; omitted fields retain their auto-detected values.
+**Supported keys:**
+
+| Key | Type | Description |
+|---|---|---|
+| `context_limit` | `int` | Total input + output token limit for the model |
+| `max_output_tokens` | `int` | Maximum tokens the model can generate per response |
+
+### Example — custom or fine-tuned model
 
 ```python
 from mnesis import MnesisSession, MnesisConfig
 
 config = MnesisConfig(
-    # A fine-tuned model served on a custom endpoint with a 32K context.
     model_overrides={
-        "context_limit": 32_768,
-        "max_output_tokens": 4_096,
-    },
+        "context_limit": 128_000,
+        "max_output_tokens": 16_384,
+    }
 )
 
-async with MnesisSession.open(model="openai/my-finetuned-gpt4", config=config) as session:
-    result = await session.send("Hello from my fine-tuned model!")
+async with MnesisSession.open(model="openai/acme-support-ft-v1", config=config) as session:
+    result = await session.send("Hello!")
+    print(result.text)
 ```
+
+### Example — correcting an underestimated limit
+
+If Mnesis falls back to conservative defaults for a model it does not recognise,
+override just the field that is wrong without touching any other configuration:
+
+```python
+config = MnesisConfig(
+    model_overrides={"max_output_tokens": 32_768},  # provider raised the output limit
+)
+```
+
+The overrides are applied after `ModelInfo.from_model_string()` resolves the
+base limits, so only the keys you specify are changed — the rest (encoding,
+provider, etc.) are inferred normally. Both `context_limit` and
+`max_output_tokens` affect how Mnesis sizes the compaction budget, so incorrect
+values can cause over-limit contexts to reach the provider or leave headroom
+unused. Always set them to match the model's true limits.
 
 `model_overrides` applies to the session model only. If you configure a
 separate `compaction.compaction_model`, overrides are not applied to it — the
@@ -220,4 +244,5 @@ compaction model's limits are always auto-detected from the model string.
     `model_overrides` only affects how Mnesis allocates the context budget and
     compaction thresholds — it does not change how litellm routes the request.
     You still need to configure litellm (API base, headers, etc.) separately
-    for non-standard endpoints.
+    for non-standard endpoints. See [LLM Providers](providers.md) for the full
+    list of supported providers and model string formats.
