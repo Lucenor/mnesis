@@ -199,9 +199,10 @@ jobs:
 
           printf '%s' "$NOTES" > /tmp/release_notes.md
 
-          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          DELIM="$(openssl rand -hex 16)"
+          echo "notes<<${DELIM}" >> "$GITHUB_OUTPUT"
           printf '%s\n' "$NOTES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
 
       # ── 3b. Bump version in pyproject.toml ──────────────────────────────
       - name: Bump version in pyproject.toml
