@@ -1336,3 +1336,351 @@ class TestRetryResilience:
                 pass  # DB-closed or other error after cancellation — expected
 
         # If we reach here without timing out, cancellation worked correctly.
+
+
+class TestSessionCoverageGaps:
+    """Additional tests targeting uncovered branches in session.py."""
+
+    # ── _stream_response error path ─────────────────────────────────────────
+
+    async def test_send_handles_llm_exception_gracefully(self, tmp_path, monkeypatch):
+        """send() returns finish_reason='error' when the LLM call raises an exception.
+
+        Covers the except-branch in send() (lines 478-481) that catches any
+        exception from _stream_response/_mock_response and stores an error message.
+        """
+        from mnesis import MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        db = str(tmp_path / "test.db")
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=db,
+        ) as session:
+            # Patch _mock_response to raise so we exercise the error path without
+            # requiring a real API key.
+            async def _raise(*args, **kwargs):
+                raise RuntimeError("simulated LLM failure")
+
+            session._mock_response = _raise  # type: ignore[method-assign]
+            result = await session.send("Trigger error")
+
+        assert result.finish_reason == "error"
+        assert "[Error:" in result.text
+
+    # ── _stream_response async on_part callback ─────────────────────────────
+
+    async def test_send_async_on_part_callback(self, tmp_path, monkeypatch):
+        """send() awaits on_part when it returns a coroutine (line 564-565)."""
+        from mnesis import MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        received: list[str] = []
+
+        async def async_on_part(part):
+            from mnesis.models.message import TextPart
+
+            if isinstance(part, TextPart):
+                received.append(part.text)
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            await session.send("Hello", on_part=async_on_part)
+
+        assert len(received) > 0
+
+    # ── close() with in-flight compaction ───────────────────────────────────
+
+    async def test_close_waits_for_in_flight_compaction(self, tmp_path, monkeypatch):
+        """close() calls wait_for_pending() before closing the DB.
+
+        Exercises the wait_for_pending() call inside close() by spying on it
+        and verifying it was invoked, regardless of whether compaction actually
+        triggered (which is non-deterministic with mock responses).
+        """
+
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import CompactionConfig
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                auto=True,
+                compaction_output_budget=1_000,
+                soft_threshold_fraction=0.1,
+            )
+        )
+
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+            config=cfg,
+        )
+
+        # Spy on wait_for_pending so we can assert it was called by close().
+        wait_called = [0]
+        original_wait = session._compaction_engine.wait_for_pending
+
+        async def _spy_wait():
+            wait_called[0] += 1
+            return await original_wait()
+
+        session._compaction_engine.wait_for_pending = _spy_wait  # type: ignore[method-assign]
+
+        await session.send("Trigger compaction")
+        await session.close()
+
+        # close() must have called wait_for_pending() at least once.
+        assert wait_called[0] >= 1
+
+    # ── load() for existing session ─────────────────────────────────────────
+
+    async def test_load_resumes_and_sends(self, tmp_path, monkeypatch):
+        """load() reopens an existing session and send() appends more turns."""
+        from mnesis import MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        db = str(tmp_path / "test.db")
+
+        session1 = await MnesisSession.create(model="anthropic/claude-opus-4-6", db_path=db)
+        sid = session1.id
+        await session1.send("First turn")
+        await session1.close()
+
+        session2 = await MnesisSession.load(sid, db_path=db)
+        result = await session2.send("Second turn")
+        msgs = await session2.messages()
+        await session2.close()
+
+        assert result.finish_reason in ("stop", "end_turn")
+        # 2 user + 2 assistant messages
+        assert len(msgs) >= 4
+
+    # ── load() raises on db_path + config.store.db_path conflict ────────────
+
+    async def test_load_raises_on_db_path_conflict(self, tmp_path):
+        """load() raises ValueError when db_path AND config.store.db_path are both set."""
+        import pytest
+
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import StoreConfig
+
+        cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "other.db")))
+        with pytest.raises(ValueError, match="Specify db_path either via"):
+            await MnesisSession.load(
+                "sess_fake",
+                config=cfg,
+                db_path=str(tmp_path / "conflict.db"),
+            )
+
+    # ── create() raises on db_path conflict ─────────────────────────────────
+
+    async def test_create_raises_on_db_path_conflict(self, tmp_path):
+        """create() raises ValueError when both db_path and config.store.db_path are given."""
+        import pytest
+
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import StoreConfig
+
+        cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "other.db")))
+        with pytest.raises(ValueError, match="Specify db_path either via"):
+            await MnesisSession.create(
+                model="anthropic/claude-opus-4-6",
+                config=cfg,
+                db_path=str(tmp_path / "conflict.db"),
+            )
+
+    # ── context_for_next_turn() after record() ───────────────────────────────
+
+    async def test_context_for_next_turn_after_record(self, tmp_path):
+        """context_for_next_turn() returns a non-empty message list after record()."""
+        from mnesis import MnesisSession
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            await session.record(
+                user_message="What is 1+1?",
+                assistant_response="It is 2.",
+            )
+            messages = await session.context_for_next_turn()
+
+        assert len(messages) >= 2
+        roles = [m["role"] for m in messages]
+        assert "user" in roles
+        assert "assistant" in roles
+
+    # ── context_for_next_turn() with custom system_prompt ───────────────────
+
+    async def test_context_for_next_turn_custom_system_prompt(self, tmp_path):
+        """context_for_next_turn() accepts an override system_prompt."""
+        from mnesis import MnesisSession
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            # Works even on an empty session
+            messages = await session.context_for_next_turn(system_prompt="Override prompt")
+
+        # Empty session has no conversation messages — just an empty list
+        assert isinstance(messages, list)
+
+    # ── model_overrides applied during create() ──────────────────────────────
+
+    async def test_create_applies_model_overrides(self, tmp_path, monkeypatch):
+        """create() applies model_overrides from MnesisConfig to ModelInfo."""
+        from mnesis import MnesisConfig, MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        cfg = MnesisConfig(model_overrides={"context_limit": 8192})
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+            config=cfg,
+        )
+        try:
+            assert session._model_info.context_limit == 8192
+        finally:
+            await session.close()
+
+    # ── doom loop detection ──────────────────────────────────────────────────
+
+    async def test_doom_loop_detected_after_threshold(self, tmp_path, monkeypatch):
+        """doom_loop_detected=True when the same tool call repeats >= threshold times."""
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import SessionConfig
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        cfg = MnesisConfig(session=SessionConfig(doom_loop_threshold=2))
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+            config=cfg,
+        ) as session:
+            # Inject repeated tool calls directly into _recent_tool_calls
+            session._recent_tool_calls = [
+                ("read_file", '{"path":"/x"}'),
+                ("read_file", '{"path":"/x"}'),
+            ]
+            result = await session.send("Do something")
+
+        assert result.doom_loop_detected is True
+
+    # ── subscribe() convenience wrapper ──────────────────────────────────────
+
+    async def test_subscribe_registers_event_handler(self, tmp_path, monkeypatch):
+        """subscribe() registers a handler that fires on subsequent events."""
+        from mnesis import MnesisSession
+        from mnesis.events.bus import MnesisEvent
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        received = []
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            session.subscribe(
+                MnesisEvent.MESSAGE_CREATED,
+                lambda event, payload: received.append(payload),
+            )
+            await session.send("Hi")
+
+        assert len(received) > 0
+
+    # ── hard overflow path ───────────────────────────────────────────────────
+
+    async def test_send_hard_overflow_triggers_synchronous_compaction(self, tmp_path, monkeypatch):
+        """Hard overflow causes blocking compaction before the LLM call (lines 429-435).
+
+        We set the compaction budget so small that even a single send() pushes
+        the cumulative token count past the hard limit on the *next* call, forcing
+        the synchronous wait path.
+        """
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import CompactionConfig
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        # Absurdly tight budget: context limit == output budget so usable == 0
+        # which means is_hard_overflow is always True after the first turn.
+        cfg = MnesisConfig(
+            compaction=CompactionConfig(
+                auto=True,
+                compaction_output_budget=1_000,
+            )
+        )
+
+        session = await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+            config=cfg,
+        )
+        try:
+            # Manually override is_hard_overflow to return True on second call
+            call_count = [0]
+            original = session._compaction_engine.is_hard_overflow
+            original_wait = session._compaction_engine.wait_for_pending
+            wait_calls = [0]
+
+            def patched_overflow(tokens, model_info):
+                call_count[0] += 1
+                if call_count[0] >= 2:
+                    return True
+                return original(tokens, model_info)
+
+            async def patched_wait():
+                wait_calls[0] += 1
+                return await original_wait()
+
+            session._compaction_engine.is_hard_overflow = patched_overflow  # type: ignore[method-assign]
+            session._compaction_engine.wait_for_pending = patched_wait  # type: ignore[method-assign]
+            await session.send("First message")
+            result = await session.send("Second message — should trigger sync compaction")
+            assert result.finish_reason in ("stop", "end_turn", "error")
+            # The synchronous compaction path must have awaited wait_for_pending
+            assert wait_calls[0] >= 1
+        finally:
+            await session.close()
+
+    # ── compaction_in_progress property ─────────────────────────────────────
+
+    async def test_compaction_in_progress_property(self, tmp_path, monkeypatch):
+        """compaction_in_progress returns False when no task is pending."""
+        from mnesis import MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            assert session.compaction_in_progress is False
+
+    # ── conversation_messages() ──────────────────────────────────────────────
+
+    async def test_conversation_messages_excludes_summaries(self, tmp_path, monkeypatch):
+        """conversation_messages() returns only non-summary messages."""
+        from mnesis import MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6",
+            db_path=str(tmp_path / "test.db"),
+        ) as session:
+            await session.send("Hello")
+            conv = await session.conversation_messages()
+            all_msgs = await session.messages()
+
+        assert all(not m.is_summary for m in conv)
+        assert len(conv) <= len(all_msgs)
