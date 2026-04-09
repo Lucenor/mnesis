@@ -37,14 +37,14 @@ from mnesis.tokens.estimator import TokenEstimator
 logger = structlog.get_logger("mnesis.compaction.levels")
 
 # 75 % of the compaction model's context window may be used for summarisation
-# input — mirrors Mnesis's ``maxSummarizationInputTokens``.
+# input cap for summarisation.
 MAX_SUMMARISATION_INPUT_FRACTION: float = 0.75
 
 # Minimum number of messages that must be passed to the summariser even when
-# the input cap would exclude them — mirrors Mnesis's ``MIN_MESSAGES_TO_SUMMARIZE``.
+# the input cap would exclude them.
 MIN_MESSAGES_TO_SUMMARISE: int = 3
 
-# Maximum tokens for a level 3 condensation fallback (mirrors Mnesis's 512-token cap).
+# Maximum tokens for a level 3 condensation fallback.
 _CONDENSE_LEVEL3_MAX_TOKENS: int = 512
 
 LEVEL1_PROMPT = """\
@@ -203,7 +203,7 @@ def _apply_input_cap(
     input cap (``MAX_SUMMARISATION_INPUT_FRACTION`` of *model_context_limit*).
 
     At least :data:`MIN_MESSAGES_TO_SUMMARISE` messages are always included
-    even if they exceed the cap, mirroring Mnesis's guard.
+    even if they exceed the cap.
 
     Args:
         messages: Messages to cap (already filtered by ``_messages_to_summarise``).

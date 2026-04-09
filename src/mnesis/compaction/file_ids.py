@@ -23,7 +23,7 @@ from mnesis.models.summary import SummaryNode
 # The pattern is intentionally broad to catch variations across providers.
 _FILE_ID_RE = re.compile(r"\bfile_[0-9a-fA-F]{8,32}\b")
 
-# Footer template — mirrors Mnesis's ``[LCM File IDs: ...]`` format.
+# Footer template for the ``[LCM File IDs: ...]`` footer.
 _FILE_IDS_FOOTER_TEMPLATE = "\n\n[LCM File IDs: {ids}]"
 
 
