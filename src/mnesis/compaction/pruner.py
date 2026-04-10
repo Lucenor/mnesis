@@ -48,8 +48,8 @@ class ToolOutputPruner:
         1. Fetch all messages (including summaries) in chronological order.
         2. Pre-fetch all raw parts to build a (message_id, tool_call_id) → part_id map.
         3. Walk backward, tracking user turn count.
-        4. Skip the most recent 2 user turns (protect recent content).
-        5. Stop at any is_summary message (compaction boundary).
+        4. Stop at any is_summary message (compaction boundary).
+        5. Skip the most recent 2 user turns (protect recent content).
         6. For each completed, non-protected, non-already-pruned tool part:
            - Accumulate output tokens.
            - Once outside the protect window (>40K tokens), add to candidates.
@@ -87,6 +87,11 @@ class ToolOutputPruner:
         user_turn_count = 0
 
         for msg in reversed(messages):
+            # Stop at a compaction boundary (summary message) — always, even
+            # when inside the recent-turn protection window.
+            if msg.is_summary:
+                break
+
             # Count user turns as we scan backward
             if msg.role == "user":
                 user_turn_count += 1
@@ -94,10 +99,6 @@ class ToolOutputPruner:
             # Protect the most recent 2 user turns
             if user_turn_count < 2:
                 continue
-
-            # Stop at a compaction boundary (summary message)
-            if msg.is_summary:
-                break
 
             # Process tool parts backward within the message
             for part in reversed(msg.parts):
