@@ -11,9 +11,6 @@ from mnesis.models.message import PruneResult, ToolPart
 from mnesis.store.immutable import ImmutableStore
 from mnesis.tokens.estimator import TokenEstimator
 
-# Tools that should never be pruned
-_PROTECTED_TOOLS: frozenset[str] = frozenset({"skill"})
-
 
 class ToolOutputPruner:
     """
@@ -76,13 +73,12 @@ class ToolOutputPruner:
             return PruneResult(pruned_count=0, pruned_tokens=0, candidates_scanned=0)
 
         # Build a part_id lookup: (message_id, tool_call_id) -> part_id
-        # Fetch all raw parts for all messages in one pass
+        # Single IN query fetches all raw parts for all messages at once (no N+1).
+        message_ids = [m.id for m in messages]
         part_id_map: dict[tuple[str, str], str] = {}
-        for msg in messages:
-            raw_parts = await self._store.get_parts(msg.id)
-            for raw in raw_parts:
-                if raw.tool_call_id:
-                    part_id_map[(msg.id, raw.tool_call_id)] = raw.id
+        for raw in await self._store.get_raw_parts_for_messages(message_ids):
+            if raw.tool_call_id:
+                part_id_map[(raw.message_id, raw.tool_call_id)] = raw.id
 
         candidates: list[str] = []  # part IDs to tombstone
         total_tool_tokens = 0  # cumulative tokens seen scanning backward
@@ -113,7 +109,7 @@ class ToolOutputPruner:
                 # Skip non-completed, protected, or already-pruned parts
                 if part.status.state != "completed":
                     continue
-                if part.tool_name in _PROTECTED_TOOLS:
+                if part.is_protected:
                     continue
                 if part.compacted_at is not None:
                     # Hit a prior compaction boundary within this message — stop

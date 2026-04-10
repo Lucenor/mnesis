@@ -757,6 +757,29 @@ class ImmutableStore:
             rows = await cursor.fetchall()
         return [self._row_to_raw_part(r) for r in rows]
 
+    async def get_raw_parts_for_messages(
+        self, message_ids: list[str]
+    ) -> list[RawMessagePart]:
+        """Fetch raw parts for a set of messages in a single IN query (no N+1).
+
+        Args:
+            message_ids: The message IDs whose parts should be fetched.
+
+        Returns:
+            All parts for the given messages, ordered by message_id then part_index.
+        """
+        if not message_ids:
+            return []
+        conn = self._conn_or_raise()
+        placeholders = ",".join("?" * len(message_ids))
+        async with conn.execute(
+            f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
+            " ORDER BY message_id, part_index ASC",
+            message_ids,
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_raw_part(r) for r in rows]
+
     async def get_messages_with_parts(
         self,
         session_id: str,
