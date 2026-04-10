@@ -654,6 +654,25 @@ class ImmutableStore:
         if result.rowcount == 0:
             raise PartNotFoundError(part_id)
 
+    async def batch_set_compacted_at(
+        self, part_ids: list[str], compacted_at: int
+    ) -> None:
+        """Set ``compacted_at`` on multiple parts in a single query and commit.
+
+        Args:
+            part_ids: IDs of the parts to tombstone.
+            compacted_at: Unix ms timestamp to write into ``compacted_at``.
+        """
+        if not part_ids:
+            return
+        conn = self._conn_or_raise()
+        placeholders = ",".join("?" * len(part_ids))
+        await conn.execute(
+            f"UPDATE message_parts SET compacted_at = ? WHERE id IN ({placeholders})",
+            [compacted_at, *part_ids],
+        )
+        await conn.commit()
+
     async def update_message_tokens(
         self,
         message_id: str,

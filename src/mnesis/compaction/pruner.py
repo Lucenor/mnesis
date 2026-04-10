@@ -54,7 +54,7 @@ class ToolOutputPruner:
            - Accumulate output tokens.
            - Once outside the protect window (>40K tokens), add to candidates.
         7. If total prunable volume < minimum threshold (20K): no-op.
-        8. Apply tombstones in a batch.
+        8. Apply tombstones in a single batch UPDATE.
 
         Args:
             session_id: The session to prune.
@@ -140,10 +140,9 @@ class ToolOutputPruner:
                 candidates_scanned=candidates_scanned,
             )
 
-        # Apply tombstones
+        # Apply tombstones in a single batch UPDATE
         now_ms = int(time.time() * 1000)
-        for part_id in candidates:
-            await self._store.update_part_status(part_id, compacted_at=now_ms)
+        await self._store.batch_set_compacted_at(candidates, now_ms)
 
         self._logger.info(
             "prune_completed",
