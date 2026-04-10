@@ -665,10 +665,12 @@ class ImmutableStore:
             return
         conn = self._conn_or_raise()
         placeholders = ",".join("?" * len(part_ids))
-        await conn.execute(
+        result = await conn.execute(
             f"UPDATE message_parts SET compacted_at = ? WHERE id IN ({placeholders})",
             [compacted_at, *part_ids],
         )
+        if result.rowcount == 0:
+            raise PartNotFoundError(part_ids[0])
         await conn.commit()
 
     async def update_message_tokens(
