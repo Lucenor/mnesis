@@ -654,9 +654,7 @@ class ImmutableStore:
         if result.rowcount == 0:
             raise PartNotFoundError(part_id)
 
-    async def batch_set_compacted_at(
-        self, part_ids: list[str], compacted_at: int
-    ) -> None:
+    async def batch_set_compacted_at(self, part_ids: list[str], compacted_at: int) -> None:
         """Set ``compacted_at`` on multiple parts in a single query and commit.
 
         Args:
@@ -776,9 +774,7 @@ class ImmutableStore:
             rows = await cursor.fetchall()
         return [self._row_to_raw_part(r) for r in rows]
 
-    async def get_raw_parts_for_messages(
-        self, message_ids: list[str]
-    ) -> list[RawMessagePart]:
+    async def get_raw_parts_for_messages(self, message_ids: list[str]) -> list[RawMessagePart]:
         """Fetch raw parts for a set of messages in a single IN query (no N+1).
 
         Args:
