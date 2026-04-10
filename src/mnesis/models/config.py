@@ -349,7 +349,7 @@ class ModelInfo(BaseModel):
                 max_output_tokens=100_000,
                 encoding="o200k_base",
             )
-        # gpt-4o-mini is a substring of "gpt-4o" so it is matched here too
+        # "gpt-4o" is a substring of "gpt-4o-mini", so that variant matches here too.
         if "gpt-4o" in model_name:
             return cls(
                 model_id=model,
