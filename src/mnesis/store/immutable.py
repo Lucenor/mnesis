@@ -670,6 +670,7 @@ class ImmutableStore:
             [compacted_at, *part_ids],
         )
         if result.rowcount == 0:
+            await conn.commit()
             raise PartNotFoundError(part_ids[0])
         await conn.commit()
 
