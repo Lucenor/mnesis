@@ -77,7 +77,7 @@ class ToolOutputPruner:
         message_ids = [m.id for m in messages]
         part_id_map: dict[tuple[str, str], str] = {}
         for raw in await self._store.get_raw_parts_for_messages(message_ids):
-            if raw.tool_call_id:
+            if raw.part_type == "tool" and raw.tool_call_id:
                 part_id_map[(raw.message_id, raw.tool_call_id)] = raw.id
 
         candidates: list[str] = []  # part IDs to tombstone
