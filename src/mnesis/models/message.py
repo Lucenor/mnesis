@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-# Tools that should never be pruned (mirrors pruner._PROTECTED_TOOLS)
+# Tool names treated as protected by ToolPart.is_protected and never pruned.
 _PROTECTED_TOOLS: frozenset[str] = frozenset({"skill"})
 
 # ── FinishReason ───────────────────────────────────────────────────────────────
