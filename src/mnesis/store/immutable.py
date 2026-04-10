@@ -654,6 +654,26 @@ class ImmutableStore:
         if result.rowcount == 0:
             raise PartNotFoundError(part_id)
 
+    async def batch_set_compacted_at(self, part_ids: list[str], compacted_at: int) -> None:
+        """Set ``compacted_at`` on multiple parts in a single query and commit.
+
+        Args:
+            part_ids: IDs of the parts to mark as compacted.
+            compacted_at: Unix ms timestamp to write into ``compacted_at``.
+        """
+        if not part_ids:
+            return
+        conn = self._conn_or_raise()
+        placeholders = ",".join("?" * len(part_ids))
+        result = await conn.execute(
+            f"UPDATE message_parts SET compacted_at = ? WHERE id IN ({placeholders})",
+            [compacted_at, *part_ids],
+        )
+        if result.rowcount == 0:
+            await conn.commit()
+            raise PartNotFoundError(part_ids[0])
+        await conn.commit()
+
     async def update_message_tokens(
         self,
         message_id: str,
@@ -753,6 +773,27 @@ class ImmutableStore:
         async with conn.execute(
             "SELECT * FROM message_parts WHERE message_id=? ORDER BY part_index ASC",
             (message_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_raw_part(r) for r in rows]
+
+    async def get_raw_parts_for_messages(self, message_ids: list[str]) -> list[RawMessagePart]:
+        """Fetch raw parts for a set of messages in a single IN query (no N+1).
+
+        Args:
+            message_ids: The message IDs whose parts should be fetched.
+
+        Returns:
+            All parts for the given messages, ordered by message_id then part_index.
+        """
+        if not message_ids:
+            return []
+        conn = self._conn_or_raise()
+        placeholders = ",".join("?" * len(message_ids))
+        async with conn.execute(
+            f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
+            " ORDER BY message_id, part_index ASC",
+            message_ids,
         ) as cursor:
             rows = await cursor.fetchall()
         return [self._row_to_raw_part(r) for r in rows]

@@ -7,7 +7,7 @@ from mnesis.compaction.levels import (
     level2_summarise,
     level3_deterministic,
 )
-from mnesis.compaction.pruner import ToolOutputPrunerAsync as ToolOutputPruner
+from mnesis.compaction.pruner import ToolOutputPruner
 
 __all__ = [
     "CompactionEngine",

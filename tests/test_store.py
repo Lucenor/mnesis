@@ -131,6 +131,69 @@ class TestImmutableStore:
         with pytest.raises(PartNotFoundError):
             await store.update_part_status("part_nonexistent", tool_state="running")
 
+    async def test_batch_set_compacted_at_empty_is_noop(self, store):
+        """batch_set_compacted_at with an empty list is a no-op (early-return path)."""
+        # Should not raise and should return without touching the DB.
+        await store.batch_set_compacted_at([], compacted_at=1_000_000)
+
+    async def test_batch_set_compacted_at_marks_parts(self, session_id, store):
+        """batch_set_compacted_at stamps compacted_at on every supplied part ID."""
+        msg = make_message(session_id, role="assistant", msg_id="msg_batch_ca_001")
+        await store.append_message(msg)
+        for i in range(3):
+            await store.append_part(
+                make_raw_part(
+                    "msg_batch_ca_001",
+                    session_id,
+                    part_type="tool",
+                    part_id=f"part_batch_ca_{i:03d}",
+                    tool_call_id=f"call_{i:03d}",
+                )
+            )
+
+        now_ms = int(time.time() * 1000)
+        await store.batch_set_compacted_at(
+            ["part_batch_ca_000", "part_batch_ca_001", "part_batch_ca_002"],
+            compacted_at=now_ms,
+        )
+
+        parts = await store.get_parts("msg_batch_ca_001")
+        assert all(p.compacted_at == now_ms for p in parts)
+
+    async def test_batch_set_compacted_at_not_found(self, store):
+        """batch_set_compacted_at raises PartNotFoundError when no rows match."""
+        with pytest.raises(PartNotFoundError):
+            await store.batch_set_compacted_at(
+                ["part_nonexistent_x", "part_nonexistent_y"],
+                compacted_at=1_000_000,
+            )
+
+    async def test_get_raw_parts_for_messages_empty_is_noop(self, store):
+        """get_raw_parts_for_messages with an empty list returns [] (early-return path)."""
+        result = await store.get_raw_parts_for_messages([])
+        assert result == []
+
+    async def test_get_raw_parts_for_messages_returns_all_parts(self, session_id, store):
+        """get_raw_parts_for_messages fetches parts for all supplied message IDs."""
+        for i in range(2):
+            msg_id = f"msg_bulk_parts_{i:03d}"
+            await store.append_message(make_message(session_id, msg_id=msg_id))
+            for j in range(2):
+                await store.append_part(
+                    make_raw_part(
+                        msg_id,
+                        session_id,
+                        part_id=f"part_bulk_{i:03d}_{j:03d}",
+                    )
+                )
+
+        results = await store.get_raw_parts_for_messages(
+            ["msg_bulk_parts_000", "msg_bulk_parts_001"]
+        )
+        assert len(results) == 4
+        msg_ids = {r.message_id for r in results}
+        assert msg_ids == {"msg_bulk_parts_000", "msg_bulk_parts_001"}
+
     async def test_get_messages_with_parts_two_queries(self, session_id, store):
         """get_messages_with_parts uses batch loading (correctness check)."""
         for i in range(5):

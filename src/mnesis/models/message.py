@@ -8,6 +8,9 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+# Tool names treated as protected by ToolPart.is_protected and never pruned.
+_PROTECTED_TOOLS: frozenset[str] = frozenset({"skill"})
+
 # ── FinishReason ───────────────────────────────────────────────────────────────
 
 
@@ -79,8 +82,7 @@ class ToolPart(BaseModel):
     @property
     def is_protected(self) -> bool:
         """Protected tools are never pruned by ToolOutputPruner."""
-        _PROTECTED: frozenset[str] = frozenset({"skill"})
-        return self.tool_name in _PROTECTED
+        return self.tool_name in _PROTECTED_TOOLS
 
 
 class CompactionMarkerPart(BaseModel):

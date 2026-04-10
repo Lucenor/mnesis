@@ -38,7 +38,7 @@ from mnesis.compaction.levels import (
     level2_summarise,
     level3_deterministic,
 )
-from mnesis.compaction.pruner import ToolOutputPrunerAsync
+from mnesis.compaction.pruner import ToolOutputPruner
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, ModelInfo
 from mnesis.models.message import CompactionResult, ContextBudget, TokenUsage
@@ -128,7 +128,7 @@ class CompactionEngine:
         self._event_bus = event_bus
         self._config = config
         self._session_model = session_model
-        self._pruner = ToolOutputPrunerAsync(store, token_estimator, config)
+        self._pruner = ToolOutputPruner(store, token_estimator, config)
         self._id_gen = id_generator or _default_id_generator
         self._logger = structlog.get_logger("mnesis.compaction")
         self._pending_task: asyncio.Task[CompactionResult] | None = None

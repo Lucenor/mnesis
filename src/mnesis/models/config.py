@@ -341,7 +341,7 @@ class ModelInfo(BaseModel):
                 max_output_tokens=8_192,
                 encoding="claude_heuristic",
             )
-        if "o1" in model_name or "o3" in model_name:
+        if any(f"o{n}" in model_name for n in (1, 2, 3, 4)):
             return cls(
                 model_id=model,
                 provider_id=provider or "openai",
@@ -349,15 +349,7 @@ class ModelInfo(BaseModel):
                 max_output_tokens=100_000,
                 encoding="o200k_base",
             )
-        # gpt-4o-mini must be checked before gpt-4o to avoid prefix match
-        if "gpt-4o-mini" in model_name:
-            return cls(
-                model_id=model,
-                provider_id=provider or "openai",
-                context_limit=128_000,
-                max_output_tokens=16_384,
-                encoding="o200k_base",
-            )
+        # "gpt-4o" is a substring of "gpt-4o-mini", so that variant matches here too.
         if "gpt-4o" in model_name:
             return cls(
                 model_id=model,

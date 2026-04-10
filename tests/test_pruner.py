@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from mnesis.compaction.engine import CompactionEngine
-from mnesis.compaction.pruner import ToolOutputPrunerAsync
+from mnesis.compaction.pruner import ToolOutputPruner
 from mnesis.events.bus import MnesisEvent
 from mnesis.models.config import CompactionConfig, MnesisConfig
 from mnesis.store.immutable import RawMessagePart
@@ -51,13 +51,13 @@ class TestToolOutputPruner:
     async def test_prune_noop_when_disabled(self, session_id, store, estimator, config):
         """Pruner is a no-op when compaction.prune is False."""
         cfg = config.model_copy(update={"compaction": CompactionConfig(prune=False)})
-        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        pruner = ToolOutputPruner(store, estimator, cfg)
         result = await pruner.prune(session_id)
         assert result.pruned_count == 0
 
     async def test_prune_noop_when_no_messages(self, session_id, store, estimator, config):
         """Pruner returns zero results for an empty session."""
-        pruner = ToolOutputPrunerAsync(store, estimator, config)
+        pruner = ToolOutputPruner(store, estimator, config)
         result = await pruner.prune(session_id)
         assert result.pruned_count == 0
         assert result.pruned_tokens == 0
@@ -81,7 +81,7 @@ class TestToolOutputPruner:
                 )
                 await store.append_part(part)
 
-        pruner = ToolOutputPrunerAsync(store, estimator, config)
+        pruner = ToolOutputPruner(store, estimator, config)
         result = await pruner.prune(session_id)
         # Protected tools should never be pruned
         assert result.pruned_count == 0
@@ -113,7 +113,7 @@ class TestToolOutputPruner:
                 )
                 await store.append_part(part)
 
-        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        pruner = ToolOutputPruner(store, estimator, cfg)
         result = await pruner.prune(session_id)
 
         if result.pruned_count > 0:
@@ -152,7 +152,7 @@ class TestToolOutputPruner:
                 )
                 await store.append_part(part)
 
-        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        pruner = ToolOutputPruner(store, estimator, cfg)
         result = await pruner.prune(session_id)
         # Recent 2 user turns protect all these tool outputs
         assert result.pruned_count == 0
@@ -198,7 +198,7 @@ class TestToolOutputPruner:
             msg = make_message(session_id, role=role, msg_id=msg_id)
             await store.append_message(msg)
 
-        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        pruner = ToolOutputPruner(store, estimator, cfg)
         # The pruner should stop at the summary and not go back further
         result = await pruner.prune(session_id)
         # No tool parts after the summary, so nothing to prune
@@ -233,7 +233,7 @@ class TestToolOutputPruner:
                 )
                 await store.append_part(part)
 
-        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        pruner = ToolOutputPruner(store, estimator, cfg)
         result = await pruner.prune(session_id)
 
         assert result.pruned_count == 0
@@ -243,10 +243,7 @@ class TestToolOutputPruner:
         assert result.candidates_scanned > 0
 
     async def test_prune_all_tool_outputs_already_compacted(self, session_id, store, estimator):
-        """Pruner is a no-op when all tool outputs already have compacted_at set.
-
-        Covers the break-on-compacted_at path (line 219-220 in ToolOutputPrunerAsync).
-        """
+        """Pruner is a no-op when all tool outputs already have compacted_at set."""
         import time as _time
 
         cfg = MnesisConfig(
@@ -275,17 +272,14 @@ class TestToolOutputPruner:
                 )
                 await store.append_part(part)
 
-        pruner = ToolOutputPrunerAsync(store, estimator, cfg)
+        pruner = ToolOutputPruner(store, estimator, cfg)
         result = await pruner.prune(session_id)
 
         # All outputs already compacted — nothing new to tombstone
         assert result.pruned_count == 0
 
     async def test_base_pruner_prune_noop_when_disabled(self, session_id, store, estimator):
-        """Base ToolOutputPruner.prune() returns early when prune=False.
-
-        Covers lines 67-68 of the base class implementation.
-        """
+        """ToolOutputPruner.prune() returns early when prune=False."""
         from mnesis.compaction.pruner import ToolOutputPruner
 
         cfg = MnesisConfig(compaction=CompactionConfig(prune=False))
@@ -295,10 +289,7 @@ class TestToolOutputPruner:
         assert result.pruned_tokens == 0
 
     async def test_base_pruner_prune_empty_session(self, session_id, store, estimator):
-        """Base ToolOutputPruner.prune() returns zeros for an empty session.
-
-        Covers lines 73-75 (early return on empty messages).
-        """
+        """ToolOutputPruner.prune() returns zeros for an empty session."""
         from mnesis.compaction.pruner import ToolOutputPruner
 
         cfg = MnesisConfig(compaction=CompactionConfig(prune=True))
@@ -308,11 +299,7 @@ class TestToolOutputPruner:
         assert result.candidates_scanned == 0
 
     async def test_base_pruner_prune_applies_tombstones(self, session_id, store, estimator):
-        """Base ToolOutputPruner.prune() tombstones outputs outside protect window.
-
-        Covers lines 83-150 of the base class (full pruning loop including
-        _get_part_id lookup).
-        """
+        """ToolOutputPruner.prune() tombstones outputs outside protect window."""
         cfg = MnesisConfig(
             compaction=CompactionConfig(
                 prune_protect_tokens=50,
@@ -341,38 +328,9 @@ class TestToolOutputPruner:
         result = await pruner.prune(session_id)
 
         # With 4 assistant messages each carrying ~300-char output (>> 50-token protect window),
-        # the base pruner must tombstone at least one part outside that window.
+        # the pruner must tombstone at least one part outside that window.
         assert result.pruned_count > 0
         assert result.candidates_scanned > 0
-
-    async def test_base_pruner_get_part_id_sync_returns_empty(self, session_id, store, estimator):
-        """_get_part_id_sync always returns empty string (sentinel).
-
-        Covers line 165 of pruner.py.
-        """
-        from mnesis.compaction.pruner import ToolOutputPruner
-        from mnesis.models.message import ToolPart, ToolStatus
-
-        cfg = MnesisConfig()
-        pruner = ToolOutputPruner(store, estimator, cfg)
-
-        # Create a minimal MessageWithParts and ToolPart to pass in
-        from mnesis.models.message import Message, MessageWithParts
-
-        msg = Message(
-            id="msg_sync_001",
-            session_id=session_id,
-            role="assistant",
-        )
-        tool_part = ToolPart(
-            tool_name="test_tool",
-            tool_call_id="call_sync_001",
-            input={},
-            status=ToolStatus(state="completed"),
-        )
-        mwp = MessageWithParts(message=msg, parts=[tool_part])
-        result = pruner._get_part_id_sync(mwp, tool_part)
-        assert result == ""
 
 
 class TestPruneCompletedEvent:
