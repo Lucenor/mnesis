@@ -660,7 +660,7 @@ class ImmutableStore:
         """Set ``compacted_at`` on multiple parts in a single query and commit.
 
         Args:
-            part_ids: IDs of the parts to tombstone.
+            part_ids: IDs of the parts to mark as compacted.
             compacted_at: Unix ms timestamp to write into ``compacted_at``.
         """
         if not part_ids:
