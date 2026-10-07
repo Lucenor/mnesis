@@ -71,6 +71,7 @@ session.event_bus.subscribe_all(log_all)
 | `COMPACTION_TRIGGERED` | `compaction.triggered` | Token usage crosses the soft or hard threshold | `CompactionTriggeredPayload` |
 | `COMPACTION_COMPLETED` | `compaction.completed` | A compaction pass finishes (success or partial) | `CompactionCompletedPayload` |
 | `COMPACTION_FAILED` | `compaction.failed` | Compaction raises an unhandled exception | `CompactionFailedPayload` |
+| `PRUNE_COMPLETED` | `prune.completed` | A compaction run's pruning step tombstoned at least one tool output (not published when nothing was pruned) | `PruneCompletedPayload` |
 | `DOOM_LOOP_DETECTED` | `doom_loop.detected` | The same tool call repeats past the threshold | `DoomLoopDetectedPayload` |
 | `LLM_RETRY` | `llm.retry` | `send()` is about to retry after a transient LLM error | `LlmRetryPayload` |
 | `MAP_STARTED` | `map.started` | An operator begins processing its item list | `MapStartedPayload` |
@@ -86,7 +87,6 @@ session.event_bus.subscribe_all(log_all)
 | `MESSAGE_UPDATED` | `message.updated` | Reserved for future use |
 | `PART_CREATED` | `part.created` | Reserved for streaming granularity |
 | `PART_UPDATED` | `part.updated` | Reserved for streaming granularity |
-| `PRUNE_COMPLETED` | `prune.completed` | Reserved for future pruning events |
 
 ---
 
@@ -154,6 +154,18 @@ Fired by: `MnesisEvent.COMPACTION_FAILED`
 |---|---|---|
 | `session_id` | `str` | The session whose compaction failed |
 | `error` | `str` | Human-readable error description |
+
+### `PruneCompletedPayload`
+
+Fired by: `MnesisEvent.PRUNE_COMPLETED`
+
+Published by the compaction engine's pruning step, only when at least one tool output was tombstoned.
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | `str` | The session whose tool outputs were pruned |
+| `pruned_count` | `int` | Number of tool output parts tombstoned in this prune pass |
+| `pruned_tokens` | `int` | Estimated tokens reclaimed by this prune pass |
 
 ### `DoomLoopDetectedPayload`
 

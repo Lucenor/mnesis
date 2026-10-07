@@ -105,6 +105,33 @@ class TestImmutableStore:
         parts = await store.get_parts("msg_parts_001")
         assert [p.part_index for p in parts] == [0, 1, 2]
 
+    async def test_append_part_concurrent_unique_indexes(self, session_id, store):
+        """Concurrent appends to one message get distinct, gap-free part indexes."""
+        msg = make_message(session_id, role="assistant", msg_id="msg_conc_001")
+        await store.append_message(msg)
+
+        raw_parts = [
+            make_raw_part("msg_conc_001", session_id, part_id=f"part_conc_{i:03d}")
+            for i in range(25)
+        ]
+        stored = await asyncio.gather(*(store.append_part(p) for p in raw_parts))
+
+        returned = sorted(p.part_index for p in stored)
+        assert returned == list(range(25))
+        persisted = await store.get_parts("msg_conc_001")
+        assert [p.part_index for p in persisted] == list(range(25))
+        # Each returned part reports the index it was actually stored with.
+        by_id = {p.id: p.part_index for p in persisted}
+        assert all(by_id[p.id] == p.part_index for p in stored)
+
+    async def test_append_part_unknown_message_raises(self, session_id, store):
+        """append_part for a nonexistent message raises MessageNotFoundError."""
+        from mnesis.store.immutable import MessageNotFoundError
+
+        part = make_raw_part("msg_missing", session_id, part_id="part_orphan")
+        with pytest.raises(MessageNotFoundError):
+            await store.append_part(part)
+
     async def test_update_part_status_compacted_at(self, session_id, store):
         """update_part_status sets the compacted_at tombstone."""
         msg = make_message(session_id, role="assistant", msg_id="msg_prune_001")
@@ -1340,6 +1367,19 @@ class TestImmutableStoreCoverageGaps:
         assert "sess_child_001" in child_ids
         assert "sess_child_002" in child_ids
         assert "sess_other_001" not in child_ids
+
+    async def test_list_sessions_parent_id_respects_active_only(self, store):
+        """active_only still excludes soft-deleted children when parent_id is given."""
+        await store.create_session("sess_parent_ao")
+        await store.create_session("sess_child_live", parent_id="sess_parent_ao")
+        await store.create_session("sess_child_dead", parent_id="sess_parent_ao")
+        await store.soft_delete_session("sess_child_dead")
+
+        active = await store.list_sessions(parent_id="sess_parent_ao")
+        assert {s.id for s in active} == {"sess_child_live"}
+
+        everything = await store.list_sessions(parent_id="sess_parent_ao", active_only=False)
+        assert {s.id for s in everything} == {"sess_child_live", "sess_child_dead"}
 
     # ── get_messages_with_parts_by_ids: no part rows ─────────────────────────
 

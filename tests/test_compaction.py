@@ -237,6 +237,68 @@ class TestCompactionLevels:
         assert "important file content" in candidate.text
 
 
+class TestLevel3FileIdBound:
+    @staticmethod
+    def _msgs_with_ids(n_ids: int, n_msgs: int = 4) -> list[MessageWithParts]:
+        ids = " ".join(f"file_{i:016x}" for i in range(n_ids))
+        msgs = []
+        for i in range(n_msgs):
+            text = ids if i == 0 else f"plain message {i}"
+            msgs.append(
+                MessageWithParts(
+                    message=make_message(
+                        "sess_l3b", role="user" if i % 2 == 0 else "assistant", msg_id=f"m{i}"
+                    ),
+                    parts=[TextPart(text=text)],
+                )
+            )
+        return msgs
+
+    def test_oversized_file_id_set_fits_budget(self, estimator):
+        """A file-ID set larger than the whole budget is bounded, not emitted verbatim."""
+        small = ContextBudget(
+            model_context_limit=3_000, reserved_output_tokens=500, compaction_buffer=500
+        )  # usable = 2000
+        msgs = self._msgs_with_ids(2_000)
+        candidate = level3_deterministic(msgs, small, estimator)
+        assert candidate.token_count <= small.usable
+        assert estimator.estimate(candidate.text) <= small.usable
+        assert "[LCM File IDs:" in candidate.text
+        # Truncation keeps first-occurrence order: a prefix survives, the tail does not.
+        assert "file_0000000000000000" in candidate.text
+        assert f"file_{1999:016x}" not in candidate.text
+
+    def test_file_ids_win_over_prose(self, estimator):
+        """When IDs fit but leave little room, messages are shed before any ID."""
+        budget = ContextBudget(
+            model_context_limit=2_000, reserved_output_tokens=300, compaction_buffer=300
+        )  # usable = 1400
+        msgs = self._msgs_with_ids(40)
+        candidate = level3_deterministic(msgs, budget, estimator)
+        assert candidate.token_count <= budget.usable
+        for i in range(40):
+            assert f"file_{i:016x}" in candidate.text
+
+    def test_header_larger_than_budget_uses_minimal_header(self, estimator):
+        """A budget smaller than the full header still yields a bounded result."""
+        tiny = ContextBudget(
+            model_context_limit=90, reserved_output_tokens=50, compaction_buffer=30
+        )  # usable = 10, cap = 8 < full header
+        candidate = level3_deterministic(self._msgs_with_ids(0), tiny, estimator)
+        assert "Kept Messages" not in candidate.text
+        assert candidate.token_count <= tiny.usable
+        assert candidate.compaction_level == 3
+
+    def test_non_positive_budget_keeps_all_file_ids(self, estimator):
+        """No output can satisfy a non-positive budget, so the lossless invariant wins."""
+        degenerate = ContextBudget(
+            model_context_limit=10, reserved_output_tokens=10, compaction_buffer=10
+        )
+        candidate = level3_deterministic(self._msgs_with_ids(5), degenerate, estimator)
+        for i in range(5):
+            assert f"file_{i:016x}" in candidate.text
+
+
 class TestIsOverflow:
     def test_overflow_false_when_auto_disabled(
         self, estimator, event_bus, store, dag_store, config

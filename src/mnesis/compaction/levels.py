@@ -461,6 +461,41 @@ async def level2_summarise(
     )
 
 
+_LEVEL3_HEADER = "[CONTEXT TRUNCATED — DETERMINISTIC FALLBACK]\n\n## Kept Messages\n\n"
+# Used only when even the full header exceeds the level-3 budget.
+_LEVEL3_MINIMAL_HEADER = "[TRUNCATED]\n"
+# Fraction of ``budget.usable`` that level-3 output may occupy, leaving slack
+# for estimator error.
+_LEVEL3_BUDGET_FRACTION: float = 0.85
+
+
+def _fit_file_ids(
+    file_ids: list[str],
+    reserved_tokens: int,
+    cap: int,
+    estimator: TokenEstimator,
+) -> list[str]:
+    """Return the longest prefix of *file_ids* whose footer fits in ``cap - reserved_tokens``.
+
+    Binary search over the prefix length: O(log n) estimator calls, so a very
+    large ID set cannot make level 3 slow.  Order (first occurrence) is kept.
+    """
+
+    def cost(k: int) -> int:
+        return estimator.estimate(append_file_ids_footer("", file_ids[:k])) if k else 0
+
+    if reserved_tokens + cost(len(file_ids)) <= cap:
+        return file_ids
+    lo, hi = 0, len(file_ids)  # lo always fits (empty footer), hi never does
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if reserved_tokens + cost(mid) <= cap:
+            lo = mid
+        else:
+            hi = mid
+    return file_ids[:lo]
+
+
 def level3_deterministic(
     messages: list[MessageWithParts],
     budget: ContextBudget,
@@ -476,25 +511,49 @@ def level3_deterministic(
     in a ``[LCM File IDs: ...]`` footer even when their surrounding context is
     truncated — this is the lossless guarantee.
 
+    Precedence when the budget is tight: file IDs are reserved first, then
+    prose fills what remains, so messages are dropped before any file ID is.
+    Only if the ID footer by itself cannot fit in 85% of ``budget.usable`` is
+    it truncated to the longest prefix that fits (a warning with the dropped
+    count is logged; the raw files stay addressable in the immutable store).
+    Truncating there is the only way to keep the "always fits the budget"
+    guarantee that lets compaction make progress.  If ``budget.usable`` is not
+    positive, no output can fit, so all IDs are kept (lossless wins).
+
     Args:
         messages: All non-summary messages in the session.
         budget: Token budget — result is guaranteed to fit within usable.
         estimator: Token estimator.
 
     Returns:
-        SummaryCandidate that always fits within budget.usable.
+        SummaryCandidate that fits within budget.usable (barring a
+        non-positive budget).
     """
     # Collect file IDs from ALL messages before truncation — the whole point of
     # level 3 is that we never lose file pointers even when prose is discarded.
     all_file_ids = extract_file_ids_from_messages(messages)
 
-    header = "[CONTEXT TRUNCATED — DETERMINISTIC FALLBACK]\n\n## Kept Messages\n\n"
+    cap = int(budget.usable * _LEVEL3_BUDGET_FRACTION)
+
+    header = _LEVEL3_HEADER
     header_tokens = estimator.estimate(header)
+    if header_tokens > cap:
+        header = _LEVEL3_MINIMAL_HEADER
+        header_tokens = estimator.estimate(header)
+
     # Reserve space for the file IDs footer upfront so it never overflows.
-    footer_tokens = (
-        estimator.estimate(append_file_ids_footer("", all_file_ids)) if all_file_ids else 0
+    file_ids = (
+        all_file_ids if cap <= 0 else _fit_file_ids(all_file_ids, header_tokens, cap, estimator)
     )
-    target = int(budget.usable * 0.85) - footer_tokens
+    if len(file_ids) < len(all_file_ids):
+        logger.warning(
+            "level3_file_ids_truncated",
+            kept=len(file_ids),
+            dropped=len(all_file_ids) - len(file_ids),
+            budget_usable=budget.usable,
+        )
+    footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
+    target = cap - footer_tokens
 
     kept: list[MessageWithParts] = []
     tokens_used = header_tokens
@@ -510,18 +569,24 @@ def level3_deterministic(
 
     kept.reverse()
 
-    lines = [header]
-    for msg in kept:
-        text = _extract_text(msg, max_chars=_LEVEL3_MESSAGE_MAX_CHARS)
-        role = "USER" if msg.role == "user" else "ASSISTANT"
-        lines.append(f"[{role}]: {text}\n")
+    def render(kept_msgs: list[MessageWithParts]) -> str:
+        lines = [header]
+        for m in kept_msgs:
+            role = "USER" if m.role == "user" else "ASSISTANT"
+            lines.append(f"[{role}]: {_extract_text(m, max_chars=_LEVEL3_MESSAGE_MAX_CHARS)}\n")
+        # Footer preserves file references even for truncated content.
+        return append_file_ids_footer("\n".join(lines), file_ids)
 
-    summary_text = "\n".join(lines)
-
-    # Append file IDs footer — preserves all file references even for truncated content.
-    summary_text = append_file_ids_footer(summary_text, all_file_ids)
-
+    summary_text = render(kept)
     token_count = estimator.estimate(summary_text)
+
+    # The per-line sizing above ignores the "\n" joiners and footer separators;
+    # validate the assembled text against the hard budget and shed the oldest
+    # kept messages until it fits.
+    while kept and token_count > budget.usable:
+        kept.pop(0)
+        summary_text = render(kept)
+        token_count = estimator.estimate(summary_text)
 
     # All messages if nothing was kept
     if not messages:
