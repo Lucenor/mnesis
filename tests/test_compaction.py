@@ -686,3 +686,103 @@ class TestConvergenceEscalation:
         assert result is not None
         assert isinstance(result, SummaryCandidate)
         assert result.compaction_level == 2
+
+
+class TestExtractText:
+    """_extract_text honors a single cumulative max_chars budget."""
+
+    @staticmethod
+    def _msg(*parts) -> MessageWithParts:
+        return MessageWithParts(
+            message=make_message("sess_et", role="assistant", msg_id="msg_et"), parts=list(parts)
+        )
+
+    def test_total_never_exceeds_max_chars(self):
+        from mnesis.compaction.levels import _extract_text
+
+        msg = self._msg(*[TextPart(text="a" * 90) for _ in range(5)])
+        for limit in (1, 50, 91, 92, 100, 250):
+            assert len(_extract_text(msg, max_chars=limit)) <= limit
+
+    def test_matches_join_then_truncate_semantics(self):
+        from mnesis.compaction.levels import _extract_text
+
+        parts = [TextPart(text="x" * 30), TextPart(text="y" * 30), TextPart(text="z" * 30)]
+        msg = self._msg(*parts)
+        expected = "\n".join(p.text for p in parts)[:70]
+        assert _extract_text(msg, max_chars=70) == expected
+
+    def test_tool_output_excerpt_capped(self):
+        from mnesis.compaction.levels import _TOOL_OUTPUT_EXCERPT_CHARS, _extract_text
+
+        msg = self._msg(ToolPart(tool_name="t", tool_call_id="c", output="o" * 5000))
+        text = _extract_text(msg)
+        assert text == "[Tool t]: " + "o" * _TOOL_OUTPUT_EXCERPT_CHARS
+
+    def test_empty_message(self):
+        from mnesis.compaction.levels import _extract_text
+
+        assert _extract_text(self._msg()) == ""
+
+
+class TestLevel3Consistency:
+    def test_sizing_and_rendered_text_use_same_cap(self, estimator):
+        """A kept message is rendered with exactly the text that was measured against the budget."""
+        from mnesis.compaction.levels import _LEVEL3_MESSAGE_MAX_CHARS
+
+        big = ContextBudget(
+            model_context_limit=200_000, reserved_output_tokens=1000, compaction_buffer=1000
+        )
+        long_text = "w" * (_LEVEL3_MESSAGE_MAX_CHARS * 3)
+        msg = MessageWithParts(
+            message=make_message("sess_l3c", role="user", msg_id="msg_l3c"),
+            parts=[TextPart(text=long_text)],
+        )
+        candidate = level3_deterministic([msg], big, estimator)
+        assert "[USER]: " + "w" * _LEVEL3_MESSAGE_MAX_CHARS + "\n" in candidate.text
+        assert "w" * (_LEVEL3_MESSAGE_MAX_CHARS + 1) not in candidate.text
+
+
+class TestWaitForPending:
+    async def test_returns_result_of_running_task(
+        self, store, dag_store, estimator, event_bus, config
+    ):
+        from mnesis.models.message import CompactionResult
+
+        engine = CompactionEngine(store, dag_store, estimator, event_bus, config)
+        expected = CompactionResult(
+            session_id="s",
+            summary_message_id="m",
+            level_used=3,
+            compacted_message_count=1,
+            summary_token_count=1,
+            tokens_before=2,
+            tokens_after=1,
+            elapsed_ms=0.0,
+        )
+
+        async def _run() -> CompactionResult:
+            await asyncio.sleep(0.01)
+            return expected
+
+        engine._pending_task = asyncio.ensure_future(_run())
+        assert await engine.wait_for_pending() == expected
+        assert engine._pending_task is None
+
+    async def test_returns_none_when_nothing_pending(
+        self, store, dag_store, estimator, event_bus, config
+    ):
+        engine = CompactionEngine(store, dag_store, estimator, event_bus, config)
+        assert await engine.wait_for_pending() is None
+
+    async def test_failed_task_returns_none_and_clears(
+        self, store, dag_store, estimator, event_bus, config
+    ):
+        engine = CompactionEngine(store, dag_store, estimator, event_bus, config)
+
+        async def _boom():
+            raise RuntimeError("x")
+
+        engine._pending_task = asyncio.ensure_future(_boom())
+        assert await engine.wait_for_pending() is None
+        assert engine._pending_task is None

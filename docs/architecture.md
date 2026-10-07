@@ -81,7 +81,8 @@ Each `TurnSnapshot` contains:
   (raw non-summary messages), `tool_outputs` (subset of `messages` from tool
   parts), and `total` (equals `system_prompt + summary + messages`).
 - **`compaction_triggered`** — whether background compaction was scheduled
-  during this turn.
+  during this turn. (`TurnResult.compaction_result` is separate: it is set only
+  when a hard-threshold compaction blocked the turn before the LLM call.)
 - **`compact_result`** — the `CompactionResult` from the most recent
   `compact()` call that completed before this snapshot was captured, or `None`.
 

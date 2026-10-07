@@ -337,7 +337,15 @@ class TurnResult(BaseModel):
     cost: float
     """Estimated USD cost of this turn. **Always ``0.0`` — not yet implemented.**"""
     compaction_triggered: bool = False
+    """``True`` if this turn's token usage crossed the soft threshold and a
+    *background* compaction was scheduled. The turn does not wait for it."""
     compaction_result: CompactionResult | None = None
+    """Result of a compaction that ran **before** this turn's LLM call.
+
+    Populated only when the context was over the hard threshold, so ``send()``
+    had to wait for compaction to finish. It is ``None`` otherwise: background
+    (soft-threshold) compactions never block a turn, so their results arrive
+    later via the ``COMPACTION_COMPLETED`` event instead."""
     doom_loop_detected: bool = False
 
 
@@ -384,6 +392,9 @@ class RecordResult(BaseModel):
     assistant_message_id: str
     tokens: TokenUsage
     compaction_triggered: bool = False
+    doom_loop_detected: bool = False
+    """``True`` if the same tool call (name and input) has now been recorded
+    ``doom_loop_threshold`` times consecutively."""
 
 
 # ── Streaming Event Types ──────────────────────────────────────────────────────

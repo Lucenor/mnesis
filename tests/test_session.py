@@ -145,23 +145,19 @@ class TestMnesisSession:
             await MnesisSession.load("sess_no_model_id", db_path=db)
 
     async def test_context_manager_closes_on_exception(self, tmp_path, mock_llm_env):
-        """Session is closed even when send() raises."""
+        """The async context manager closes the session when the body raises."""
         from mnesis import MnesisSession
 
-        closed = []
-
-        class TestSession(MnesisSession):
-            async def close(self):
-                closed.append(True)
-                await super().close()
-
-        # We can't easily inject TestSession, so just verify close() is idempotent
         session = await MnesisSession.create(
             model="anthropic/claude-opus-4-6",
             db_path=str(tmp_path / "test.db"),
         )
-        await session.close()
-        # Calling close again should not raise
+        with pytest.raises(RuntimeError, match="boom"):
+            async with session:
+                raise RuntimeError("boom")
+
+        # close() is idempotent, so a second call after the context manager
+        # already closed the session must not raise.
         await session.close()
 
     async def test_event_bus_session_created(self, tmp_path, mock_llm_env):
@@ -1268,7 +1264,6 @@ class TestRetryResilience:
         the task must complete well within the 60-second sleep window, even if
         the DB is already closed by the time send() tries to persist results.
         """
-        import asyncio
         import contextlib
         import os
         from unittest.mock import AsyncMock, patch
@@ -1651,6 +1646,161 @@ class TestSessionCoverageGaps:
             assert wait_calls[0] >= 1
         finally:
             await session.close()
+
+    async def test_send_hard_overflow_populates_compaction_result(self, tmp_path, monkeypatch):
+        """TurnResult.compaction_result carries the result of the blocking hard-threshold run."""
+        from mnesis import MnesisSession
+        from mnesis.models.message import CompactionResult
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        expected = CompactionResult(
+            session_id="s",
+            summary_message_id="msg_summary",
+            level_used=3,
+            compacted_message_count=4,
+            summary_token_count=10,
+            tokens_before=1000,
+            tokens_after=10,
+            elapsed_ms=1.0,
+        )
+
+        async def _fake_compaction() -> CompactionResult:
+            await asyncio.sleep(0)
+            return expected
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db")
+        ) as session:
+            engine = session._compaction_engine
+            engine.is_hard_overflow = lambda tokens, model: True  # type: ignore[method-assign]
+            engine._pending_task = asyncio.ensure_future(_fake_compaction())
+            result = await session.send("Over the hard limit")
+
+        assert result.compaction_result == expected
+
+    async def test_send_without_hard_overflow_has_no_compaction_result(self, tmp_path, monkeypatch):
+        """Background (soft) compaction never populates TurnResult.compaction_result."""
+        from mnesis import MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db")
+        ) as session:
+            result = await session.send("Hello")
+
+        assert result.compaction_result is None
+
+    # ── load() rebuilds cumulative token usage ──────────────────────────────
+
+    async def test_load_rebuilds_cumulative_token_usage(self, tmp_path, monkeypatch):
+        """load() restores token_usage from persisted turns so overflow checks see them."""
+        from mnesis import MnesisSession
+        from mnesis.models.message import TokenUsage
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        db = str(tmp_path / "test.db")
+
+        s1 = await MnesisSession.create(model="anthropic/claude-opus-4-6", db_path=db)
+        await s1.send("First message.")
+        await s1.record("Second", "Reply", tokens=TokenUsage(input=40, output=2))
+        before = s1.token_usage
+        session_id = s1.id
+        await s1.close()
+        assert before.effective_total() > 0
+
+        s2 = await MnesisSession.load(session_id, db_path=db)
+        try:
+            assert s2.token_usage == before
+        finally:
+            await s2.close()
+
+    async def test_load_new_session_has_zero_token_usage(self, tmp_path, monkeypatch):
+        """load() on a session with no turns yields empty usage."""
+        from mnesis import MnesisSession
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        db = str(tmp_path / "test.db")
+        s1 = await MnesisSession.create(model="anthropic/claude-opus-4-6", db_path=db)
+        session_id = s1.id
+        await s1.close()
+
+        s2 = await MnesisSession.load(session_id, db_path=db)
+        try:
+            assert s2.token_usage.effective_total() == 0
+        finally:
+            await s2.close()
+
+    # ── doom loop detection via record() ────────────────────────────────────
+
+    @staticmethod
+    def _tool_part(name: str = "read_file", path: str = "/x", call_id: str = "c1"):
+        from mnesis.models.message import ToolPart, ToolStatus
+
+        return ToolPart(
+            tool_name=name,
+            tool_call_id=call_id,
+            input={"path": path},
+            output="ok",
+            status=ToolStatus(state="completed"),
+        )
+
+    async def test_record_detects_doom_loop(self, tmp_path, monkeypatch):
+        """record() tracks tool calls so repeated identical calls trip doom-loop detection."""
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.events.bus import MnesisEvent
+        from mnesis.models.config import SessionConfig
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        cfg = MnesisConfig(session=SessionConfig(doom_loop_threshold=3))
+        events: list[dict] = []
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db"), config=cfg
+        ) as session:
+            session.subscribe(MnesisEvent.DOOM_LOOP_DETECTED, lambda e, p: events.append(p))
+            results = [
+                await session.record(f"turn {i}", [self._tool_part(call_id=f"c{i}")])
+                for i in range(3)
+            ]
+
+        assert [r.doom_loop_detected for r in results] == [False, False, True]
+        assert events and events[0]["tool"] == "read_file"
+
+    async def test_record_different_tool_inputs_not_doom_loop(self, tmp_path, monkeypatch):
+        """Calls with the same tool but different inputs are not a doom loop."""
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import SessionConfig
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        cfg = MnesisConfig(session=SessionConfig(doom_loop_threshold=2))
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db"), config=cfg
+        ) as session:
+            r1 = await session.record("a", [self._tool_part(path="/a", call_id="c1")])
+            r2 = await session.record("b", [self._tool_part(path="/b", call_id="c2")])
+
+        assert r1.doom_loop_detected is False
+        assert r2.doom_loop_detected is False
+
+    async def test_record_text_turn_breaks_doom_loop_run(self, tmp_path, monkeypatch):
+        """A text-only turn between identical tool calls resets the consecutive run."""
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import SessionConfig
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        cfg = MnesisConfig(session=SessionConfig(doom_loop_threshold=2))
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db"), config=cfg
+        ) as session:
+            await session.record("a", [self._tool_part(call_id="c1")])
+            await session.record("chat", "just text")
+            r3 = await session.record("b", [self._tool_part(call_id="c2")])
+            window = list(session._recent_tool_calls)
+
+        assert r3.doom_loop_detected is False
+        assert len(window) == 1
 
     # ── compaction_in_progress property ─────────────────────────────────────
 

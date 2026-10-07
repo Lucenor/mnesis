@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
+from functools import partial
 from typing import Any
 
 import structlog
@@ -142,6 +143,9 @@ class EventBus:
         self._handlers: dict[MnesisEvent, list[Handler]] = {}
         self._global_handlers: list[Handler] = []
         self._logger = logger or structlog.get_logger("mnesis.events")
+        # Strong references to in-flight async handler tasks: asyncio only holds
+        # weak references, so an unreferenced task can be garbage-collected mid-flight.
+        self._handler_tasks: set[asyncio.Task[Any]] = set()
 
     def subscribe(self, event: MnesisEvent, handler: Handler) -> None:
         """
@@ -203,6 +207,22 @@ class EventBus:
             # Handler not in global list — silent no-op by design.
             pass
 
+    def _on_handler_done(
+        self, event: MnesisEvent, handler: Handler, task: asyncio.Task[Any]
+    ) -> None:
+        """Release an async handler task and log any exception it raised."""
+        self._handler_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._logger.error(
+                "event_handler_error",
+                event=str(event),
+                handler=getattr(handler, "__qualname__", repr(handler)),
+                error=str(exc),
+            )
+
     def publish(self, event: MnesisEvent, payload: dict[str, Any]) -> None:
         """
         Publish an event to all registered handlers.
@@ -222,10 +242,13 @@ class EventBus:
                 if asyncio.iscoroutine(result):
                     try:
                         loop = asyncio.get_running_loop()
-                        _task = loop.create_task(result)  # noqa: RUF006
                     except RuntimeError:
                         # No running event loop — skip async handler
-                        pass
+                        result.close()
+                    else:
+                        task = loop.create_task(result)
+                        self._handler_tasks.add(task)
+                        task.add_done_callback(partial(self._on_handler_done, event, handler))
             except Exception as exc:
                 self._logger.error(
                     "event_handler_error",

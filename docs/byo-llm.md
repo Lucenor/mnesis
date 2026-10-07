@@ -117,7 +117,13 @@ result.user_message_id      # ID of the persisted user message
 result.assistant_message_id # ID of the persisted assistant message
 result.tokens               # TokenUsage (provided or estimated)
 result.compaction_triggered # True if compaction was scheduled
+result.doom_loop_detected   # True if the same tool call was recorded `doom_loop_threshold` times in a row
 ```
+
+`record()` tracks `ToolPart` calls (tool name plus input) for doom-loop detection, exactly as the
+managed path does: when `doom_loop_threshold` consecutive recorded turns make the same tool call,
+`doom_loop_detected` is `True` and a `DOOM_LOOP_DETECTED` event is published. A turn with no tool
+call breaks the run.
 
 ## Runnable example
 

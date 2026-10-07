@@ -11,6 +11,9 @@ from mnesis.models.config import CompactionConfig, MnesisConfig
 from mnesis.store.immutable import RawMessagePart
 from tests.conftest import make_message, make_raw_part
 
+# A model string that litellm cannot resolve, forcing the level-3 compaction fallback.
+_NONEXISTENT_MODEL = "nonexistent-model-xyz"
+
 
 def _make_tool_part(
     msg_id: str,
@@ -378,9 +381,9 @@ class TestPruneCompletedEvent:
             event_bus,
             cfg,
             id_generator=_id_gen,
-            session_model="nonexistent-model-xyz",
+            session_model=_NONEXISTENT_MODEL,
         )
-        await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
+        await engine.run_compaction(session_id, model_override=_NONEXISTENT_MODEL)
 
         prune_events = [(e, p) for e, p in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
 
@@ -423,9 +426,9 @@ class TestPruneCompletedEvent:
             event_bus,
             cfg,
             id_generator=_id_gen_nopev,
-            session_model="nonexistent-model-xyz",
+            session_model=_NONEXISTENT_MODEL,
         )
-        await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
+        await engine.run_compaction(session_id, model_override=_NONEXISTENT_MODEL)
 
         prune_events = [e for e, _ in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
         assert len(prune_events) == 0
@@ -471,9 +474,9 @@ class TestPruneCompletedEvent:
             event_bus,
             cfg,
             id_generator=_id_gen_pl,
-            session_model="nonexistent-model-xyz",
+            session_model=_NONEXISTENT_MODEL,
         )
-        await engine.run_compaction(session_id, model_override="nonexistent-model-xyz")
+        await engine.run_compaction(session_id, model_override=_NONEXISTENT_MODEL)
 
         prune_events = [(e, p) for e, p in event_bus.collected if e == MnesisEvent.PRUNE_COMPLETED]
 

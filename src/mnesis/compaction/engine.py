@@ -242,15 +242,26 @@ class CompactionEngine:
         self._pending_task = task
         return True
 
-    async def wait_for_pending(self) -> None:
-        """Await any in-flight background compaction task to natural completion, then clear it."""
+    async def wait_for_pending(self) -> CompactionResult | None:
+        """
+        Await any in-flight background compaction task to completion, then clear it.
+
+        Returns:
+            The :class:`CompactionResult` of the pending task (whether it was
+            still running or had already finished successfully), or ``None``
+            if no task was pending or it was cancelled / failed.
+        """
         task = self._pending_task
+        result: CompactionResult | None = None
         if task is not None and not task.done():
             try:
-                await task
+                result = await task
             except Exception as exc:
                 self._logger.exception("background_compaction_failed", error=str(exc))
+        elif task is not None and not task.cancelled() and task.exception() is None:
+            result = task.result()
         self._pending_task = None
+        return result
 
     # ── Public compaction entry point ───────────────────────────────────────────
 

@@ -392,8 +392,6 @@ class TestDAGPersistence:
         ) as cursor:
             row = await cursor.fetchone()
 
-        import json
-
         assert row is not None
         assert row["kind"] == "condensed"
         assert json.loads(row["parent_node_ids"]) == parent_ids
@@ -715,7 +713,6 @@ class TestDAGPersistence:
 
     async def test_get_node_by_id_pre_phase3_fallback(self, config, pool):
         """get_node_by_id falls back to _build_node_from_message for pre-Phase-3 nodes."""
-        import json
 
         from mnesis.models.message import Message
         from mnesis.session import make_id
@@ -767,7 +764,6 @@ class TestDAGPersistence:
 
     async def test_get_node_by_id_pre_phase3_second_summary(self, config, pool):
         """get_node_by_id fallback for pre-Phase-3 node when it is not the first summary."""
-        import json
         import time as time_mod
 
         from mnesis.models.message import Message
