@@ -147,14 +147,23 @@ class TestMnesisSession:
     async def test_context_manager_closes_on_exception(self, tmp_path, mock_llm_env):
         """The async context manager closes the session when the body raises."""
         from mnesis import MnesisSession
+        from mnesis.store.immutable import MnesisStoreError
 
         session = await MnesisSession.create(
             model="anthropic/claude-opus-4-6",
             db_path=str(tmp_path / "test.db"),
         )
+
+        async def body_that_fails() -> None:
+            raise RuntimeError("boom")
+
         with pytest.raises(RuntimeError, match="boom"):
             async with session:
-                raise RuntimeError("boom")
+                _ = await body_that_fails()
+
+        # The context manager closed the session: the store is no longer usable.
+        with pytest.raises(MnesisStoreError):
+            _ = await session.messages()
 
         # close() is idempotent, so a second call after the context manager
         # already closed the session must not raise.

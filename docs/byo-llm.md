@@ -9,7 +9,7 @@ Use `session.record()` instead of `session.send()`. It persists a completed user
 ```
 Your code                           mnesis
 ──────────────────────────────      ──────────────────────────────
-1. Build messages from context  ←── session.messages()
+1. Build messages from context  ←── session.context_for_next_turn()
 2. Call your LLM SDK
 3. Record the result            ──► session.record(user, assistant)
                                      └─ persists both messages
@@ -30,9 +30,8 @@ Your code                           mnesis
 
     user_text = "Explain quantum entanglement."
 
-    # Build context from previous turns
-    history = await session.messages()
-    messages = [{"role": m.role, "content": m.text_content()} for m in history]
+    # Compaction-aware context: summaries replace compacted turns
+    messages = await session.context_for_next_turn()
     messages.append({"role": "user", "content": user_text})
 
     # Call your SDK
@@ -64,8 +63,7 @@ Your code                           mnesis
 
     user_text = "What is the capital of France?"
 
-    history = await session.messages()
-    messages = [{"role": m.role, "content": m.text_content()} for m in history]
+    messages = await session.context_for_next_turn()
     messages.append({"role": "user", "content": user_text})
 
     response = await client.chat.completions.create(
@@ -82,6 +80,9 @@ Your code                           mnesis
         ),
     )
     ```
+
+!!! warning "Do not build prompts from `session.messages()`"
+    `messages()` returns the complete append-only history, including compaction summaries and turns the summaries already replaced. Sending it to your LLM resends content that was intentionally removed from the context window. Use `context_for_next_turn()` for the prompt; use `messages()` only to inspect or audit stored history. The pending user message is not stored until `record()`, so append it yourself as shown above.
 
 ## Token usage is optional
 

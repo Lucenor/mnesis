@@ -466,6 +466,19 @@ No LLM call. Walks messages in reverse order, keeping those that fit within
 Always returns a valid `SummaryCandidate` — this is the invariant that prevents
 the system from ever deadlocking on compaction.
 
+The `[LCM File IDs: ...]` footer is reserved *before* prose is sized, so messages
+are dropped before any file ID is. The assembled text is validated against
+`budget.usable` (shedding the oldest kept messages in O(n log n)). Only if the
+footer alone cannot fit in 85% of `budget.usable` (tens of thousands of distinct
+file IDs at default settings, or a `compaction_output_budget` close to its
+maximum) is it truncated, keeping the most recently referenced IDs, and a
+`level3_file_ids_truncated` warning is logged; the files themselves remain in the
+immutable store. If the full header does not fit, or would displace IDs that fit
+beside a minimal header, the minimal header is used. A `budget.usable` smaller
+than the minimal header cannot be satisfied by any output, so all file IDs are
+kept in that case. "Fits" means as measured by the compaction estimator, which
+is not necessarily the session model's tokenizer.
+
 ### Escalation flow
 
 ```

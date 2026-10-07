@@ -105,6 +105,33 @@ class TestImmutableStore:
         parts = await store.get_parts("msg_parts_001")
         assert [p.part_index for p in parts] == [0, 1, 2]
 
+    async def test_append_part_concurrent_unique_indexes(self, session_id, store):
+        """Concurrent appends to one message get distinct, gap-free part indexes."""
+        msg = make_message(session_id, role="assistant", msg_id="msg_conc_001")
+        await store.append_message(msg)
+
+        raw_parts = [
+            make_raw_part("msg_conc_001", session_id, part_id=f"part_conc_{i:03d}")
+            for i in range(25)
+        ]
+        stored = await asyncio.gather(*(store.append_part(p) for p in raw_parts))
+
+        returned = sorted(p.part_index for p in stored)
+        assert returned == list(range(25))
+        persisted = await store.get_parts("msg_conc_001")
+        assert [p.part_index for p in persisted] == list(range(25))
+        # Each returned part reports the index it was actually stored with.
+        by_id = {p.id: p.part_index for p in persisted}
+        assert all(by_id[p.id] == p.part_index for p in stored)
+
+    async def test_append_part_unknown_message_raises(self, session_id, store):
+        """append_part for a nonexistent message raises MessageNotFoundError."""
+        from mnesis.store.immutable import MessageNotFoundError
+
+        part = make_raw_part("msg_missing", session_id, part_id="part_orphan")
+        with pytest.raises(MessageNotFoundError):
+            await store.append_part(part)
+
     async def test_update_part_status_compacted_at(self, session_id, store):
         """update_part_status sets the compacted_at tombstone."""
         msg = make_message(session_id, role="assistant", msg_id="msg_prune_001")
@@ -782,6 +809,57 @@ class TestDAGPersistence:
 
         await store.close()
 
+    @pytest.mark.parametrize(
+        ("text_payload", "marker_payload"),
+        [("not json{", "also not json"), ("[1, 2]", "[3]")],
+        ids=["invalid-json", "non-object-json"],
+    )
+    async def test_get_node_by_id_pre_phase3_corrupt_parts(
+        self, config, pool, text_payload, marker_payload
+    ):
+        """Unparseable legacy summary parts degrade to defaults instead of failing."""
+        from mnesis.models.message import Message
+        from mnesis.session import make_id
+        from mnesis.store.immutable import ImmutableStore, RawMessagePart
+        from mnesis.store.summary_dag import SummaryDAGStore
+
+        store = ImmutableStore(config.store, pool=pool)
+        await store.initialize()
+        dag = SummaryDAGStore(store)
+
+        sid = "sess_pre_phase3_corrupt"
+        await store.create_session(sid, model_id="gpt-4o")
+        await store.append_message(make_message(sid, msg_id="corrupt_msg_01"))
+
+        summary_msg_id = make_id("msg")
+        await store.append_message(
+            Message(
+                id=summary_msg_id,
+                session_id=sid,
+                role="assistant",
+                created_at=int(time.time() * 1000) + 1000,
+                is_summary=True,
+            )
+        )
+        for part_type, payload in (("text", text_payload), ("compaction", marker_payload)):
+            await store.append_part(
+                RawMessagePart(
+                    id=make_id("part"),
+                    message_id=summary_msg_id,
+                    session_id=sid,
+                    part_type=part_type,
+                    content=payload,
+                    token_estimate=5,
+                )
+            )
+
+        fetched = await dag.get_node_by_id(summary_msg_id)
+        assert fetched is not None
+        assert fetched.content == ""
+        assert fetched.compaction_level == 1
+
+        await store.close()
+
     async def test_get_node_by_id_pre_phase3_second_summary(self, config, pool):
         """get_node_by_id fallback for pre-Phase-3 node when it is not the first summary."""
         import time as time_mod
@@ -1340,6 +1418,19 @@ class TestImmutableStoreCoverageGaps:
         assert "sess_child_001" in child_ids
         assert "sess_child_002" in child_ids
         assert "sess_other_001" not in child_ids
+
+    async def test_list_sessions_parent_id_respects_active_only(self, store):
+        """active_only still excludes soft-deleted children when parent_id is given."""
+        await store.create_session("sess_parent_ao")
+        await store.create_session("sess_child_live", parent_id="sess_parent_ao")
+        await store.create_session("sess_child_dead", parent_id="sess_parent_ao")
+        await store.soft_delete_session("sess_child_dead")
+
+        active = await store.list_sessions(parent_id="sess_parent_ao")
+        assert {s.id for s in active} == {"sess_child_live"}
+
+        everything = await store.list_sessions(parent_id="sess_parent_ao", active_only=False)
+        assert {s.id for s in everything} == {"sess_child_live", "sess_child_dead"}
 
     # ── get_messages_with_parts_by_ids: no part rows ─────────────────────────
 

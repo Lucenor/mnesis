@@ -218,6 +218,30 @@ class TestCompactionLevels:
         # Budget is so tight no messages fit — summary is only the truncation header
         assert "CONTEXT TRUNCATED" in candidate.text
 
+    def test_level3_sheds_oldest_when_join_overhead_exceeds_budget(self):
+        """Per-line sizing ignores "\\n" joiners; the validation loop sheds oldest messages."""
+
+        class NewlineEstimator:
+            # One token per newline: each rendered line costs 1 when sized but 2
+            # once the join separator is added, so assembled text overshoots.
+            def estimate(self, text: str, model: ModelInfo | None = None) -> int:
+                return text.count("\n")
+
+        budget = ContextBudget(
+            model_context_limit=27, reserved_output_tokens=5, compaction_buffer=5
+        )  # usable = 17, cap = 14 == header (4) + 10 one-token lines
+        messages = [
+            MessageWithParts(
+                message=make_message("sess_l3_shed", role="user", msg_id=f"msg_shed_{i:02d}"),
+                parts=[TextPart(text=f"m{i}")],
+            )
+            for i in range(10)
+        ]
+        candidate = level3_deterministic(messages, budget, NewlineEstimator())
+        assert candidate.token_count <= budget.usable
+        assert "m9" in candidate.text  # newest survives
+        assert "m0" not in candidate.text  # oldest shed
+
     def test_extract_text_includes_tool_output(self, estimator, budget):
         """_extract_text includes ToolPart output when compacted_at is None."""
         tool_part = ToolPart(
@@ -235,6 +259,161 @@ class TestCompactionLevels:
         )
         candidate = level3_deterministic([user_msg, assistant_msg], budget, estimator)
         assert "important file content" in candidate.text
+
+
+class TestLevel3FileIdBound:
+    @staticmethod
+    def _msgs_with_ids(n_ids: int, n_msgs: int = 4) -> list[MessageWithParts]:
+        ids = " ".join(f"file_{i:016x}" for i in range(n_ids))
+        msgs = []
+        for i in range(n_msgs):
+            text = ids if i == 0 else f"plain message {i}"
+            msgs.append(
+                MessageWithParts(
+                    message=make_message(
+                        "sess_l3b", role="user" if i % 2 == 0 else "assistant", msg_id=f"m{i}"
+                    ),
+                    parts=[TextPart(text=text)],
+                )
+            )
+        return msgs
+
+    def test_oversized_file_id_set_fits_budget(self, estimator):
+        """A file-ID set larger than the whole budget is bounded, not emitted verbatim."""
+        small = ContextBudget(
+            model_context_limit=3_000, reserved_output_tokens=500, compaction_buffer=500
+        )  # usable = 2000
+        msgs = self._msgs_with_ids(2_000)
+        candidate = level3_deterministic(msgs, small, estimator)
+        assert candidate.token_count <= small.usable
+        assert estimator.estimate(candidate.text) <= small.usable
+        assert "[LCM File IDs:" in candidate.text
+        # Truncation keeps the most recently referenced IDs: the newest survives.
+        assert f"file_{1999:016x}" in candidate.text
+        assert "file_0000000000000000" not in candidate.text
+
+    def test_truncation_prefers_ids_from_recent_messages(self, estimator):
+        """When IDs must be cut, those referenced by newer messages win over older ones."""
+        old_ids = " ".join(f"file_{i:016x}" for i in range(0, 600))
+        new_ids = " ".join(f"file_{i:016x}" for i in range(600, 1200))
+        msgs = [
+            MessageWithParts(
+                message=make_message("sess_l3r", role="user", msg_id="r0"),
+                parts=[TextPart(text=old_ids)],
+            ),
+            MessageWithParts(
+                message=make_message("sess_l3r", role="assistant", msg_id="r1"),
+                parts=[TextPart(text=new_ids)],
+            ),
+        ]
+        small = ContextBudget(
+            model_context_limit=3_000, reserved_output_tokens=500, compaction_buffer=500
+        )
+        candidate = level3_deterministic(msgs, small, estimator)
+        assert candidate.token_count <= small.usable
+        assert f"file_{1199:016x}" in candidate.text
+        assert f"file_{0:016x}" not in candidate.text
+
+    def test_file_ids_win_over_prose(self, estimator):
+        """When IDs fit but leave little room, messages are shed before any ID."""
+        budget = ContextBudget(
+            model_context_limit=2_000, reserved_output_tokens=300, compaction_buffer=300
+        )  # usable = 1400
+        msgs = self._msgs_with_ids(40)
+        candidate = level3_deterministic(msgs, budget, estimator)
+        assert candidate.token_count <= budget.usable
+        for i in range(40):
+            assert f"file_{i:016x}" in candidate.text
+        # Everything fits, so all four messages are kept.
+        assert "plain message 1" in candidate.text
+
+    def test_messages_shed_before_file_ids(self, estimator):
+        """A budget that fits the footer but not the prose sheds messages, never IDs."""
+        budget = ContextBudget(
+            model_context_limit=380, reserved_output_tokens=20, compaction_buffer=20
+        )  # usable = 340: footer for 40 IDs fits, prose of message 0 does not
+        msgs = self._msgs_with_ids(40)
+        candidate = level3_deterministic(msgs, budget, estimator)
+        assert candidate.token_count <= budget.usable
+        for i in range(40):
+            assert f"file_{i:016x}" in candidate.text
+        # Oldest message (the one carrying the IDs as prose) shed; newest kept.
+        assert candidate.text.count(f"file_{0:016x}") == 1  # footer only
+        assert "plain message 3" in candidate.text
+
+    def test_minimal_header_used_when_full_header_would_displace_ids(self, estimator):
+        """The decorative header never pushes file IDs out when the minimal one lets them fit."""
+        budget = ContextBudget(
+            model_context_limit=325, reserved_output_tokens=20, compaction_buffer=20
+        )  # usable = 285: 40-ID footer fits beside the minimal header only
+        candidate = level3_deterministic(self._msgs_with_ids(40), budget, estimator)
+        assert candidate.token_count <= budget.usable
+        assert "Kept Messages" not in candidate.text
+        for i in range(40):
+            assert f"file_{i:016x}" in candidate.text
+
+    @pytest.mark.parametrize("usable", [1, 2, 3, 4, 5, 8])
+    def test_tiny_budgets_are_bounded_or_lossless(self, estimator, usable):
+        """Budgets below the minimal header keep all IDs; others stay within usable."""
+        tiny = ContextBudget(
+            model_context_limit=usable + 20, reserved_output_tokens=10, compaction_buffer=10
+        )
+        assert tiny.usable == usable
+        candidate = level3_deterministic(self._msgs_with_ids(3), tiny, estimator)
+        if usable >= estimator.estimate("[TRUNCATED]\n"):
+            assert estimator.estimate(candidate.text) <= usable
+        else:
+            for i in range(3):
+                assert f"file_{i:016x}" in candidate.text
+
+    def test_shedding_is_not_quadratic(self):
+        """Shedding re-estimates O(log n) times, not once per dropped message."""
+        calls = 0
+
+        class CountingEstimator:
+            # Sized per line as 1 token, but joined text costs ~4 per line, so
+            # most kept messages must be shed.
+            def estimate(self, text: str, model: ModelInfo | None = None) -> int:
+                nonlocal calls
+                calls += 1
+                return text.count("\n") + 2 * text.count("\n\n")
+
+        n = 2_000
+        header_cost = 4  # newlines in the full header
+        usable = int((header_cost + n) / 0.85) + 2
+        budget = ContextBudget(
+            model_context_limit=usable + 20, reserved_output_tokens=10, compaction_buffer=10
+        )
+        messages = [
+            MessageWithParts(
+                message=make_message("sess_perf", role="user", msg_id=f"perf_{i:05d}"),
+                parts=[TextPart(text="")],
+            )
+            for i in range(n)
+        ]
+        candidate = level3_deterministic(messages, budget, CountingEstimator())  # type: ignore[arg-type]
+        assert candidate.token_count <= budget.usable
+        assert candidate.text.count("[USER]:") < n  # shedding actually happened
+        assert calls < n + 100
+
+    def test_header_larger_than_budget_uses_minimal_header(self, estimator):
+        """A budget smaller than the full header still yields a bounded result."""
+        tiny = ContextBudget(
+            model_context_limit=90, reserved_output_tokens=50, compaction_buffer=30
+        )  # usable = 10, cap = 8 < full header
+        candidate = level3_deterministic(self._msgs_with_ids(0), tiny, estimator)
+        assert "Kept Messages" not in candidate.text
+        assert candidate.token_count <= tiny.usable
+        assert candidate.compaction_level == 3
+
+    def test_non_positive_budget_keeps_all_file_ids(self, estimator):
+        """No output can satisfy a non-positive budget, so the lossless invariant wins."""
+        degenerate = ContextBudget(
+            model_context_limit=10, reserved_output_tokens=10, compaction_buffer=10
+        )
+        candidate = level3_deterministic(self._msgs_with_ids(5), degenerate, estimator)
+        for i in range(5):
+            assert f"file_{i:016x}" in candidate.text
 
 
 class TestIsOverflow:

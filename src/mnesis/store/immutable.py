@@ -403,7 +403,8 @@ class ImmutableStore:
 
         Args:
             parent_id: Filter to sessions with this parent (sub-sessions).
-            active_only: Exclude soft-deleted sessions when True.
+            active_only: Exclude soft-deleted sessions when True. Applies
+                independently of ``parent_id``.
             limit: Maximum number of sessions to return.
             offset: Number of sessions to skip (for pagination).
 
@@ -417,7 +418,7 @@ class ImmutableStore:
         if parent_id is not None:
             conditions.append("parent_id = ?")
             params.append(parent_id)
-        elif active_only:
+        if active_only:
             conditions.append("is_active = 1")
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -527,7 +528,10 @@ class ImmutableStore:
         """
         Append a single part to a message.
 
-        Assigns ``part_index`` as ``max(existing_parts) + 1`` within a transaction.
+        Assigns ``part_index`` as ``max(existing_parts) + 1`` inside the INSERT
+        statement itself (``INSERT ... SELECT``), so allocation and insertion are
+        a single atomic SQLite statement.  Concurrent appends to the same message
+        on the shared connection therefore can never read the same maximum.
 
         Args:
             part: The RawMessagePart to persist.
@@ -539,14 +543,6 @@ class ImmutableStore:
             MessageNotFoundError: If message_id does not exist.
         """
         conn = self._conn_or_raise()
-        async with conn.execute(
-            "SELECT COALESCE(MAX(part_index), -1) FROM message_parts WHERE message_id = ?",
-            (part.message_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        max_index = row[0] if row else -1
-        part.part_index = max_index + 1
-
         try:
             await conn.execute(
                 """
@@ -554,14 +550,14 @@ class ImmutableStore:
                     (id, message_id, session_id, part_type, part_index, content,
                      tool_name, tool_call_id, tool_state, compacted_at,
                      started_at, completed_at, token_estimate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT ?, ?, ?, ?, COALESCE(MAX(part_index), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?
+                FROM message_parts WHERE message_id = ?
                 """,
                 (
                     part.id,
                     part.message_id,
                     part.session_id,
                     part.part_type,
-                    part.part_index,
                     part.content,
                     part.tool_name,
                     part.tool_call_id,
@@ -570,6 +566,7 @@ class ImmutableStore:
                     part.started_at,
                     part.completed_at,
                     part.token_estimate,
+                    part.message_id,
                 ),
             )
             await conn.commit()
@@ -577,6 +574,15 @@ class ImmutableStore:
             if "FOREIGN KEY" in str(exc):
                 raise MessageNotFoundError(part.message_id) from exc
             raise
+        # Read back the allocated index; the part id is unique, so this cannot
+        # race with other appends (indexes are never rewritten).
+        async with conn.execute(
+            "SELECT part_index FROM message_parts WHERE id = ?", (part.id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:  # pragma: no cover - the INSERT above just succeeded
+            raise RuntimeError(f"part {part.id} missing immediately after INSERT")
+        part.part_index = row[0]
         return part
 
     async def update_part_status(

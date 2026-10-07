@@ -76,7 +76,7 @@ Demonstrates the core `send()` loop:
 **[`examples/06_byo_llm.py`](https://github.com/Lucenor/mnesis/blob/main/examples/06_byo_llm.py)**
 
 - Using `session.record()` to inject turns from your own SDK
-- Building the LLM message list from `session.messages()`
+- Building the LLM message list from `session.context_for_next_turn()`
 - Passing explicit `TokenUsage` for accurate compaction budgeting
 
 This example includes a canned-response stub so it runs without any API key. See [BYO-LLM](byo-llm.md) for a full explanation.
