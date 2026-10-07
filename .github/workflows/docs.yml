@@ -38,11 +38,11 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: "**/uv.lock"
+          cache-dependency-glob: "**/pyproject.toml"
           python-version: "3.12"
 
       - name: Install docs dependencies
-        run: uv sync --locked --group docs
+        run: uv sync --group docs
 
       - name: Install D2
         env:

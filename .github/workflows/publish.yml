@@ -91,11 +91,11 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: "**/uv.lock"
+          cache-dependency-glob: "**/pyproject.toml"
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --locked --dev
+        run: uv sync --dev
 
       - name: Ruff lint
         run: uv run ruff check src/ tests/
@@ -114,11 +114,11 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: "**/uv.lock"
+          cache-dependency-glob: "**/pyproject.toml"
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --locked --dev
+        run: uv sync --dev
 
       - name: mypy
         run: uv run mypy src/mnesis
@@ -138,11 +138,11 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: "**/uv.lock"
+          cache-dependency-glob: "**/pyproject.toml"
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --locked --dev
+        run: uv sync --dev
 
       - name: Run tests
         env:
@@ -172,7 +172,7 @@ jobs:
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: "**/uv.lock"
+          cache-dependency-glob: "**/pyproject.toml"
           python-version: "3.12"
 
       - name: Configure git identity
@@ -212,10 +212,6 @@ jobs:
           VERSION="${RELEASE_VERSION}"
           sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
           grep '^version = ' pyproject.toml
-
-      # uv.lock records the root project version; re-lock so `uv sync --locked` keeps passing on main.
-      - name: Re-lock after version bump
-        run: uv lock
 
       # ── 3c. Prepend changelog entry ──────────────────────────────────────
       - name: Update docs/changelog.md
@@ -289,7 +285,7 @@ jobs:
           VERSION="${RELEASE_VERSION}"
           TAG="${RELEASE_TAG}"
 
-          git add pyproject.toml uv.lock docs/changelog.md
+          git add pyproject.toml docs/changelog.md
           git commit -m "chore: release ${VERSION}"
           git tag -a "$TAG" -m "Release ${VERSION}"
           git push origin main
