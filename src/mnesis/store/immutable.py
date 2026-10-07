@@ -581,7 +581,7 @@ class ImmutableStore:
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:  # pragma: no cover - the INSERT above just succeeded
-            raise MessageNotFoundError(part.message_id)
+            raise RuntimeError(f"part {part.id} missing immediately after INSERT")
         part.part_index = row[0]
         return part
 
