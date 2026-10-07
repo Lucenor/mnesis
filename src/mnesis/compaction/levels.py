@@ -586,8 +586,10 @@ def _append_bounded_footer(
     check rejects the candidate, so the run escalates to the next level.
     """
     if file_ids and estimator.estimate(append_file_ids_footer("", file_ids)) > budget.usable:
-        prose_tokens = estimator.estimate(strip_file_ids_footer(text))
-        fitted = _fit_file_ids(recent_first, prose_tokens, budget.usable, estimator)
+        # Fit the IDs against the budget alone, not what the prose leaves: the
+        # caller's budget check then rejects this candidate and the run escalates
+        # to level 3, which keeps as many IDs as the budget allows.
+        fitted = _fit_file_ids(recent_first, 0, budget.usable, estimator)
         keep = set(fitted)
         logger.warning(
             "summary_file_ids_truncated",

@@ -393,7 +393,9 @@ CompactFailed -> Idle: "COMPACTION_FAILED published\nstub result returned"
   compaction run. Such a run makes no summarisation calls when nothing is
   summarisable; the only LLM call it can make is a condensation, and only for a
   set of live summary nodes that is new since the last condensation that failed
-  to shrink them (that set is remembered and skipped while unchanged). Level 3 is unaffected (a run always produces its
+  to shrink them even at the deterministic level (an LLM condensation that does
+  not shrink the nodes falls back to the deterministic level in the same run;
+  only if that also fails is the set remembered and skipped while unchanged). Level 3 is unaffected (a run always produces its
   summary first), and the engine never truncates the protected tail to force a
   fit: Level 3 runs only over the summarisable messages, so the last two user
   turns, including the message being answered, stay raw. A manual `compact()`

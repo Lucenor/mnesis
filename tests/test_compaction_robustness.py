@@ -237,3 +237,82 @@ class TestEventBusHandlerErrors:
         engine = engine_mod.CompactionEngine(store, dag_store, estimator, bus, MnesisConfig())
         result = await engine.run_compaction(sid)
         assert result.level_used == 0
+
+
+class TestCondensationFallbackAndWorkLeft:
+    async def test_bloated_llm_condensation_falls_to_level3_in_the_same_run(
+        self, tmp_path, monkeypatch
+    ):
+        s = await TestCompactionRobustness()._two_node_session(tmp_path)
+        try:
+            calls = 0
+
+            async def bloated(nodes, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                return CondensationCandidate(
+                    text="x " * 5000,
+                    token_count=10**6,
+                    parent_node_ids=[n.id for n in nodes],
+                    compaction_level=1,
+                )
+
+            def deterministic(nodes, estimator, budget):
+                return CondensationCandidate(
+                    text="[CONDENSED] det",
+                    token_count=1,
+                    parent_node_ids=[n.id for n in nodes],
+                    compaction_level=3,
+                )
+
+            monkeypatch.setattr(engine_mod, "condense_level1", bloated)
+            monkeypatch.setattr(engine_mod, "condense_level3_deterministic", deterministic)
+            result = await s.compact()
+            nodes = await s._dag_store.get_active_nodes(s.id)
+            assert calls == 1
+            assert len(nodes) == 1 and nodes[0].kind == "condensed"
+            assert nodes[0].compaction_level == 3
+            assert result.level_used == 3
+        finally:
+            await s.close()
+
+    async def test_exception_path_resets_work_left(self, store, dag_store, event_bus, estimator):
+        info = ModelInfo(model_id="m", context_limit=12_000, max_output_tokens=1_000)
+        engine = engine_mod.CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            MnesisConfig(compaction=CompactionConfig(compaction_output_budget=2_000)),
+            session_model=MODEL,
+            model_info=info,
+        )
+        engine._note_run_outcome("s", tokens_before=9000, tokens_after=6000, more_to_compact=True)
+        assert engine.more_to_compact
+
+        async def boom(session_id: str):
+            raise RuntimeError("store down")
+
+        store.get_messages_with_parts = boom  # type: ignore[method-assign]
+        await store.create_session("sess_boom", model_id=MODEL, agent="t")
+        result = await engine.run_compaction("sess_boom")
+        assert result.level_used == 0
+        assert not engine.more_to_compact
+
+    async def test_nothing_compactable_does_not_trigger_an_extra_run(self, tmp_path):
+        async with MnesisSession.open(
+            model=MODEL, config=_cfg(tmp_path), system_prompt="short"
+        ) as s:
+            engine = s._compaction_engine
+            runs: list[bool] = []
+            real = engine.run_compaction
+
+            async def spy(session_id, **kw):
+                runs.append(bool(kw.get("until_under_hard")))
+                return await real(session_id, **kw)
+
+            engine.run_compaction = spy  # type: ignore[method-assign]
+            _ = await s.record("turn 0 hi", "ok")
+            # The per-turn prompt alone is over the hard limit and nothing can shrink.
+            _ = await s.send("turn 1 hi", system_prompt="word " * 9_000)
+            assert runs == [True]  # the blocking run only; no useless full-drain rerun

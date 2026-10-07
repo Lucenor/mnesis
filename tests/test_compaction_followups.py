@@ -1182,11 +1182,15 @@ class TestFileIdFooterBounded:
         budget = ContextBudget(
             model_context_limit=600, reserved_output_tokens=100, compaction_buffer=100
         )
+        # The footer alone exceeds the budget: levels 1-2 are rejected (IDs are never
+        # crowded out by prose) and level 3 keeps as many IDs as fit.
         for fn in (level1_summarise, level2_summarise):
-            cand = await fn(msgs, "m", budget, estimator, _short_llm)
-            assert cand is not None, fn.__name__
-            assert cand.token_count <= budget.usable
-            assert "LCM File IDs" in cand.text
+            assert await fn(msgs, "m", budget, estimator, _short_llm) is None, fn.__name__
+        from mnesis.compaction.levels import level3_deterministic
+
+        cand = level3_deterministic(_messages_to_summarise(msgs), budget, estimator)
+        assert cand.token_count <= budget.usable
+        assert "LCM File IDs" in cand.text
 
 
 class TestBlockingRunStopsUnderHard:

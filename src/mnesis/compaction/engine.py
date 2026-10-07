@@ -343,7 +343,8 @@ class CompactionEngine:
         A warning is logged once when the engine pauses. The pause never applies
         with ``force=True``: the blocking hard-limit path always re-evaluates. A
         futile run makes no summarisation calls; it can only repeat a condensation
-        for a set of live summaries that is new since the last failed attempt.
+        for a set of live summaries that is new since the last condensation that
+        failed to shrink them even at the deterministic level.
         """
         if not self.is_overflow(tokens, model):
             return False
@@ -473,6 +474,7 @@ class CompactionEngine:
             )
         except Exception as exc:
             elapsed = time.time() * 1000 - start_ms
+            self._more_to_compact = False  # no longer reflects a completed run
             self._logger.error(
                 "compaction_unexpected_error",
                 session_id=session_id,
@@ -741,14 +743,17 @@ class CompactionEngine:
                 # ``tokens_after`` is fresh here: measured after the leaf swap
                 # (round 0) or after the previous round's condensation.
                 active_nodes = await self._dag_store.get_active_nodes(session_id)
+                node_ids = frozenset(n.id for n in active_nodes)
                 if tokens_after < fit_limit:
-                    break  # Under budget — done.
+                    # Under target — done. Work is left only if there is a set of
+                    # nodes a full drain could still condense.
+                    can_condense = len(active_nodes) >= 2 and node_ids != self._failed_condense_ids
+                    break
 
                 if len(active_nodes) < 2:
                     can_condense = False
                     break  # Nothing to condense — can't make further progress.
 
-                node_ids = frozenset(n.id for n in active_nodes)
                 if node_ids == self._failed_condense_ids:
                     can_condense = False
                     break  # This exact set already failed to shrink; don't pay for it again.
@@ -764,8 +769,15 @@ class CompactionEngine:
                     compaction_model_info,
                 )
 
+                if cond.token_count >= tokens_before_condense and cond.compaction_level < 3:
+                    # An LLM condensation that did not shrink the nodes (levels 1-2 have
+                    # no convergence check): fall back to the deterministic level, which
+                    # always fits the budget, before giving up.
+                    cond = condense_level3_deterministic(active_nodes, self._estimator, budget)
+
                 if cond.token_count >= tokens_before_condense:
-                    # No progress — LLM generated as much as it consumed.
+                    # No progress even from the deterministic level, so this exact set
+                    # of nodes cannot be shrunk (remembered in ``_failed_condense_ids``).
                     self._logger.info(
                         "condensation_no_progress",
                         round=round_num,

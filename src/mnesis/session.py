@@ -1395,12 +1395,15 @@ class MnesisSession:
         if engine.is_hard_overflow(self._threshold_tokens(context), self._model_info) and (
             engine.more_to_compact
         ):
-            if engine.check_and_trigger(
-                self._session_id,
-                self._threshold_tokens(context),
-                self._model_info,
-                force=True,
-                full_drain=True,
+            if (
+                engine.check_and_trigger(
+                    self._session_id,
+                    self._threshold_tokens(context),
+                    self._model_info,
+                    force=True,
+                    full_drain=True,
+                )
+                or engine.in_flight
             ):
                 result = await engine.wait_for_pending() or result
                 context = await rebuild()
