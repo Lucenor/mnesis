@@ -363,7 +363,10 @@ class CompactionResult(BaseModel):
     level_used: int
     """1 = selective LLM, 2 = aggressive LLM, 3 = deterministic fallback."""
     compacted_message_count: int
+    """Raw messages summarised by the run, cumulative across its summarisation passes."""
     summary_token_count: int
+    """Tokens of the summary content the run produced: the sum over its leaf summaries,
+    or the resulting condensed node's tokens when condensation then merged them."""
     tokens_before: int
     """Size of the active context window before the run, on the same basis as ``tokens_after``."""
     tokens_after: int

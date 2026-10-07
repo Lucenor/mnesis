@@ -159,6 +159,7 @@ class CompactionEngine:
         # Counts in the session model's units (what ``ContextBuilder`` uses), so
         # "fits the budget" here means "fits the session context". A bare engine
         # (no ``model_info``) keeps the model-less heuristic.
+        self._base_estimator = token_estimator
         self._estimator = token_estimator.for_model(model_info)
         self._event_bus = event_bus
         self._config = config
@@ -178,9 +179,32 @@ class CompactionEngine:
         self._logger = structlog.get_logger("mnesis.compaction")
         self._pending_task: asyncio.Task[CompactionResult] | None = None
         # Set when a run ended still at/above the soft threshold with nothing
-        # left that compaction can shrink (see ``_note_run_outcome``); holds the
-        # context size at which ``check_and_trigger`` re-arms.
-        self._stalled_until: int | None = None
+        # left that compaction can shrink (see ``_note_run_outcome``). Pauses the
+        # background (soft) trigger only; cleared by a new user turn.
+        self._stalled = False
+        # Bumped by :meth:`note_user_turn`; lets a run that was in flight when a
+        # turn arrived avoid stalling on a stale view of the history.
+        self._turn_epoch = 0
+
+    @property
+    def stalled(self) -> bool:
+        """``True`` while background auto-compaction is paused as futile.
+
+        Set when a run ended at/above the soft threshold with nothing left to
+        summarise or condense; cleared by :meth:`note_user_turn` or by a run
+        that gets under the soft threshold. Never affects the blocking
+        hard-limit path.
+        """
+        return self._stalled
+
+    def note_user_turn(self) -> None:
+        """Record that a new user turn was appended, re-arming a paused trigger.
+
+        A new user turn can make older messages summarisable (they leave the
+        protected tail), so a pause based on the previous history no longer holds.
+        """
+        self._turn_epoch += 1
+        self._stalled = False
 
     def set_context_measure(self, measure: Callable[[str], Awaitable[int]] | None) -> None:
         """Set the callable that returns the session's current context size."""
@@ -269,9 +293,10 @@ class CompactionEngine:
         tokens: TokenUsage | int,
         model: ModelInfo,
         abort: asyncio.Event | None = None,
+        force: bool = False,
     ) -> bool:
         """
-        Check for overflow and trigger async background compaction if needed.
+        Check for overflow and trigger async compaction if needed.
 
         Non-blocking — schedules a background task and returns immediately.
         The task handle is stored in ``self._pending_task`` so callers can
@@ -285,34 +310,37 @@ class CompactionEngine:
             tokens: Size of the current context window in tokens.
             model: Model info for overflow detection.
             abort: Optional event to signal early termination.
+            force: The caller is about to block on the result (the hard-limit
+                path): bypass the stall pause and stop the run as soon as the
+                context is under the hard limit, leaving the rest of the drain to
+                the next background run.
 
         Returns:
             True if a new compaction task was scheduled, False if the context
             is under the soft threshold, a compaction is already in flight, or
-            the previous run found nothing left to shrink (see below).
+            background compaction is paused (see below).
 
         A run that ends still at/above the soft threshold with nothing left to
         summarise or condense (typically: the protected last two user turns
         alone exceed it) cannot be improved by running again. Re-triggering on
-        every turn would burn LLM calls without progress, so further triggers
-        are skipped until the context has grown by the soft-to-hard headroom
-        past the size the stalled run ended at. A warning is logged once when
-        the engine stalls.
+        every turn would burn LLM calls without progress, so the background
+        trigger is paused until a new user turn arrives
+        (:meth:`note_user_turn`), which can make older messages summarisable.
+        A warning is logged once when the engine pauses. The pause never applies
+        with ``force=True``: a futile run makes no LLM calls, so the blocking
+        hard-limit path always re-evaluates.
         """
         if not self.is_overflow(tokens, model):
             return False
         if self._pending_task is not None and not self._pending_task.done():
             return False
-        if self._stalled_until is not None:
-            if self._as_count(tokens) < self._stalled_until:
-                self._logger.debug(
-                    "compaction_skipped_stalled",
-                    session_id=session_id,
-                    tokens=self._as_count(tokens),
-                    rearm_at=self._stalled_until,
-                )
-                return False
-            self._stalled_until = None
+        if self._stalled and not force:
+            self._logger.debug(
+                "compaction_skipped_stalled",
+                session_id=session_id,
+                tokens=self._as_count(tokens),
+            )
+            return False
 
         self._logger.info(
             "compaction_triggered",
@@ -324,7 +352,12 @@ class CompactionEngine:
             {"session_id": session_id, "tokens": self._as_count(tokens)},
         )
 
-        task = asyncio.create_task(self.run_compaction(session_id, abort=abort))
+        coro = (
+            self.run_compaction(session_id, abort=abort, until_under_hard=True)
+            if force
+            else self.run_compaction(session_id, abort=abort)
+        )
+        task = asyncio.create_task(coro)
         self._pending_task = task
         return True
 
@@ -392,6 +425,7 @@ class CompactionEngine:
         session_id: str,
         abort: asyncio.Event | None = None,
         model_override: str | None = None,
+        until_under_hard: bool = False,
     ) -> CompactionResult:
         """
         Run the full compaction protocol. Never raises.
@@ -406,6 +440,9 @@ class CompactionEngine:
             session_id: The session to compact.
             abort: Optional asyncio.Event — checked before each level attempt.
             model_override: Override compaction model (for testing).
+            until_under_hard: Stop draining as soon as the context is under the
+                hard limit (used when a caller blocks on the run) instead of
+                continuing down to the condensation target.
 
         Returns:
             CompactionResult describing what happened.
@@ -414,7 +451,10 @@ class CompactionEngine:
 
         try:
             return await self._run_compaction_inner(
-                session_id, abort=abort, model_override=model_override
+                session_id,
+                abort=abort,
+                model_override=model_override,
+                until_under_hard=until_under_hard,
             )
         except Exception as exc:
             elapsed = time.time() * 1000 - start_ms
@@ -447,8 +487,10 @@ class CompactionEngine:
         session_id: str,
         abort: asyncio.Event | None,
         model_override: str | None,
+        until_under_hard: bool = False,
     ) -> CompactionResult:
         start_ms = time.time() * 1000
+        epoch = self._turn_epoch
 
         # Context size before this run, on the same basis as ``tokens_after``.
         measured_before = await self._measure_session(session_id)
@@ -472,20 +514,6 @@ class CompactionEngine:
         messages_with_parts = await self._store.get_messages_with_parts(session_id)
         non_summary = [m for m in messages_with_parts if not m.is_summary]
 
-        if not non_summary:
-            return CompactionResult(
-                session_id=session_id,
-                summary_message_id="",
-                level_used=0,
-                compacted_message_count=0,
-                summary_token_count=0,
-                tokens_before=0,
-                tokens_after=0,
-                elapsed_ms=time.time() * 1000 - start_ms,
-                pruned_tool_outputs=prune_result.pruned_count,
-                pruned_tokens=prune_result.pruned_tokens,
-            )
-
         # Raw messages still in the context. The store also holds messages that
         # earlier compactions already replaced with a summary; summarising those
         # again would put the same content in context twice. Legacy databases
@@ -495,20 +523,6 @@ class CompactionEngine:
         in_context = (
             [m for m in non_summary if m.id in in_context_ids] if context_items else non_summary
         )
-        if not in_context:
-            # Every raw message is already covered by a live summary.
-            return CompactionResult(
-                session_id=session_id,
-                summary_message_id="",
-                level_used=0,
-                compacted_message_count=0,
-                summary_token_count=0,
-                tokens_before=0,
-                tokens_after=0,
-                elapsed_ms=time.time() * 1000 - start_ms,
-                pruned_tool_outputs=prune_result.pruned_count,
-                pruned_tokens=prune_result.pruned_tokens,
-            )
         raw_tokens = sum(self._estimator.estimate_message(m) for m in in_context)
         if measured_before is None:
             prior_nodes = await self._dag_store.get_active_nodes(session_id)
@@ -553,15 +567,17 @@ class CompactionEngine:
             if self._model_info is not None and self._model_info.context_limit > 0
             else budget.usable
         )
+        if until_under_hard:
+            # A caller is blocked on this run: stop once the context is under the
+            # hard limit. The post-turn soft check schedules the rest of the drain.
+            fit_limit = max(fit_limit, budget.usable)
         max_rounds = self._config.compaction.max_compaction_rounds
         compaction_prompt = self._config.compaction.compaction_prompt
 
-        # Nothing summarisable (only the protected last two user turns remain) on a
-        # session that already has a live summary: leave the tail alone. Running
-        # level 3 over it would replace the newest turns with a truncated
-        # digest, and an LLM pass would only repeat what the summaries already say.
-        has_live_summary = any(item_type == "summary" for item_type, _ in context_items)
-        skip_leaf = has_live_summary and not _messages_to_summarise(in_context)
+        # Nothing summarisable (only the protected last two user turns remain):
+        # leave the tail alone. The protected turns, including the user message
+        # being answered, are never swapped out, at any level.
+        skip_leaf = not _messages_to_summarise(in_context)
 
         last_summary_msg_id = ""
         last_summary_level = 0
@@ -588,7 +604,7 @@ class CompactionEngine:
                 budget,
                 llm_call,
                 compaction_prompt,
-                compaction_model_info.context_limit,
+                compaction_model_info,
                 abort,
                 allow_level3=passes == 0,
             )
@@ -632,7 +648,7 @@ class CompactionEngine:
             last_summary_msg_id = leaf_msg_id
             last_summary_level = candidate.compaction_level
             last_messages_covered += candidate.messages_covered
-            last_summary_tokens = candidate.token_count
+            last_summary_tokens += candidate.token_count
             passes += 1
 
             # Raw messages that stay in context after the swap. Older leaf summaries
@@ -750,6 +766,7 @@ class CompactionEngine:
             tokens_before=tokens_before,
             tokens_after=tokens_after,
             more_to_compact=can_condense or bool(_messages_to_summarise(remaining)),
+            epoch=epoch,
         )
         elapsed_ms = time.time() * 1000 - start_ms
         result = CompactionResult(
@@ -805,27 +822,34 @@ class CompactionEngine:
         tokens_before: int,
         tokens_after: int,
         more_to_compact: bool,
+        epoch: int | None = None,
     ) -> None:
-        """Remember when a run could not get the context under the soft threshold.
+        """Pause background compaction when a run ended with nothing left to shrink.
 
-        A run is *stalled* when it ends at/above the soft threshold and either
-        made no progress (``tokens_after >= tokens_before``) or left nothing
-        that compaction could still shrink. Re-running on the next turn would
-        spend LLM calls for nothing, so :meth:`check_and_trigger` skips until the
-        context has grown by the soft-to-hard headroom (see its docstring).
-        Never affects level 3: a run always produces its summary first.
+        A run is *stalled* when it ends at/above the soft threshold and nothing
+        remains that a further run could summarise or condense. Token deltas are
+        deliberately not consulted: ``record()`` can append during a long run, so
+        ``tokens_after >= tokens_before`` does not mean the run made no progress.
+        While stalled, :meth:`check_and_trigger` skips the background trigger until
+        :meth:`note_user_turn`; the blocking hard-limit path is never paused. Never
+        affects level 3: a run always produces its summary first.
+
+        Args:
+            epoch: The ``note_user_turn`` count when the run started. If a user
+                turn arrived since, the run's view of the history is stale and no
+                pause is set.
         """
-        self._stalled_until = None
+        self._stalled = False
         info = self._model_info
         if info is None or info.context_limit <= 0:
             return
         usable = self._usable_tokens(info)
         soft_limit = int(usable * self._config.compaction.soft_threshold_fraction)
-        if tokens_after < soft_limit:
+        if tokens_after < soft_limit or more_to_compact:
             return
-        if more_to_compact and tokens_after < tokens_before:
+        if epoch is not None and epoch != self._turn_epoch:
             return
-        self._stalled_until = tokens_after + max(1, usable - soft_limit)
+        self._stalled = True
         self._logger.warning(
             "compaction_cannot_reduce_context",
             session_id=session_id,
@@ -833,9 +857,8 @@ class CompactionEngine:
             tokens_after=tokens_after,
             soft_limit=soft_limit,
             usable=usable,
-            rearm_at=self._stalled_until,
             hint="the protected recent turns and live summaries alone exceed the soft "
-            "threshold; auto-compaction is paused until the context grows",
+            "threshold; background auto-compaction is paused until the next user turn",
         )
 
     async def _measure_session(self, session_id: str) -> int | None:
@@ -872,15 +895,18 @@ class CompactionEngine:
         budget: ContextBudget,
         llm_call: Any,
         compaction_prompt: str | None,
-        model_context_limit: int,
+        compaction_info: ModelInfo,
         abort: asyncio.Event | None,
         allow_level3: bool = True,
     ) -> SummaryCandidate | None:
         """Run level 1 → 2 → 3 summarisation escalation and return a candidate.
 
-        ``None`` is returned only when level 3 is not allowed and levels 1-2 failed.
+        ``None`` is returned when level 3 is not allowed and levels 1-2 failed, or
+        when there is nothing summarisable (the protected recent turns are never
+        swapped out, not even by level 3).
         """
         candidate: SummaryCandidate | None = None
+        compaction_estimator = self._base_estimator.for_model(compaction_info)
 
         # Level 1
         if abort and abort.is_set():
@@ -892,7 +918,9 @@ class CompactionEngine:
             self._estimator,
             llm_call,
             compaction_prompt=compaction_prompt,
-            model_context_limit=model_context_limit,
+            model_context_limit=compaction_info.context_limit,
+            model_max_output_tokens=compaction_info.max_output_tokens,
+            compaction_estimator=compaction_estimator,
         )
 
         # Level 2 (if Level 1 failed and level2 is enabled)
@@ -906,12 +934,16 @@ class CompactionEngine:
                 self._estimator,
                 llm_call,
                 compaction_prompt=compaction_prompt,
-                model_context_limit=model_context_limit,
+                model_context_limit=compaction_info.context_limit,
+                model_max_output_tokens=compaction_info.max_output_tokens,
+                compaction_estimator=compaction_estimator,
             )
 
         # Level 3 (deterministic fallback — always succeeds)
         if candidate is None and allow_level3:
-            candidate = level3_deterministic(non_summary, budget, self._estimator)
+            to_truncate = _messages_to_summarise(non_summary)
+            if to_truncate:
+                candidate = level3_deterministic(to_truncate, budget, self._estimator)
 
         return candidate
 
@@ -925,17 +957,36 @@ class CompactionEngine:
     ) -> CondensationCandidate:
         """Run level 1 → 2 → 3 condensation escalation and return a candidate."""
         cond: CondensationCandidate | None = None
+        max_out = (
+            self._model_info.max_output_tokens
+            if self._model_info is not None and compaction_model == self._session_model
+            else ModelInfo.from_model_string(compaction_model).max_output_tokens
+        )
 
         # Level 1
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
-        cond = await condense_level1(nodes, compaction_model, budget, self._estimator, llm_call)
+        cond = await condense_level1(
+            nodes,
+            compaction_model,
+            budget,
+            self._estimator,
+            llm_call,
+            model_max_output_tokens=max_out,
+        )
 
         # Level 2
         if cond is None and self._config.compaction.level2_enabled:
             if abort and abort.is_set():
                 raise asyncio.CancelledError("Compaction aborted")
-            cond = await condense_level2(nodes, compaction_model, budget, self._estimator, llm_call)
+            cond = await condense_level2(
+                nodes,
+                compaction_model,
+                budget,
+                self._estimator,
+                llm_call,
+                model_max_output_tokens=max_out,
+            )
 
         # Level 3 (always succeeds)
         if cond is None:

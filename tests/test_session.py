@@ -1770,7 +1770,9 @@ class TestSessionCoverageGaps:
             engine.is_hard_overflow = lambda tokens, model: True  # type: ignore[method-assign]
             engine.is_overflow = lambda tokens, model: True  # type: ignore[method-assign]
 
-            async def _fresh(session_id: str, abort: object = None) -> CompactionResult:
+            async def _fresh(
+                session_id: str, abort: object = None, **kw: object
+            ) -> CompactionResult:
                 return _result("msg_fresh")
 
             engine.run_compaction = _fresh  # type: ignore[method-assign]

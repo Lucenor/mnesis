@@ -378,16 +378,29 @@ CompactFailed -> Idle: "COMPACTION_FAILED published\nstub result returned"
   cross the provider's limit while the thresholds see headroom.
 
 - **When compaction cannot help.** A run that ends at or above the soft
-  threshold, and either did not reduce the context or has nothing left to
-  summarise or condense (typically the protected last two user turns plus live
-  summaries alone exceed it), is *stalled*. Re-running on every turn would spend
-  LLM calls for nothing, so `check_and_trigger()` returns `False` until the
-  context has grown by the soft-to-hard headroom (`usable - soft`) past the size
-  where the run ended, and logs a `compaction_cannot_reduce_context` warning once.
-  The hard-limit wait in `send()` does not block while stalled. Level 3 is
-  unaffected (a run always produces its summary first), and the engine never
-  truncates the protected tail to force a fit: that would destroy the newest
-  turns. A manual `compact()` always runs and re-evaluates the state.
+  threshold with nothing left to summarise or condense (typically the protected
+  last two user turns plus live summaries alone exceed it) is *stalled*. Whether
+  work remains is judged from the history, not from token deltas: `record()` can
+  append during a long run, so the context growing says nothing about progress.
+  Re-running on every turn would spend LLM calls for nothing, so the *background*
+  (soft) trigger is paused (`CompactionEngine.stalled`) and logs a
+  `compaction_cannot_reduce_context` warning once. A new user turn re-arms it
+  (it can make older messages summarisable); a turn that arrives while a run is
+  in flight prevents that run from pausing on its stale view. The pause never
+  applies to the hard limit: the next `send()` that finds the context over the
+  hard limit still blocks on a compaction run, which makes no LLM calls when
+  nothing is summarisable. Level 3 is unaffected (a run always produces its
+  summary first), and the engine never truncates the protected tail to force a
+  fit: Level 3 runs only over the summarisable messages, so the last two user
+  turns, including the message being answered, stay raw. A manual `compact()`
+  always runs and re-evaluates the state.
+- **Blocking runs stop early.** The run that `send()` waits for at the hard limit
+  stops draining as soon as the context is under the hard limit; the rest of the
+  drain is left to the background run that the post-turn soft check schedules.
+  A background run can use up to `max_compaction_rounds` summarisation passes (each
+  Level 1 then Level 2 on failure), so the worst case is
+  `2 * max_compaction_rounds` sequential summariser calls (20 with the default);
+  typically 1 to 2.
 
 **What the thresholds measure.** Both compare against
 `BuiltContext.context_tokens`: the estimated size of the *current context
@@ -442,9 +455,14 @@ The inner sequence for each round:
    is still above the condensation target, further passes (up to
    `max_compaction_rounds`) summarise the rest, each as its own leaf. Newer turns
    therefore stay verbatim until summarised, and nothing is swapped out of the
-   context without being summarised. Only the first pass may use Level 3. If the
-   context holds a live summary and nothing is summarisable (only the protected
-   last two user turns), the leaf step is skipped rather than truncating that tail.
+   context without being summarised. Only the first pass may use Level 3, and it
+   runs over the summarisable messages only. If nothing is summarisable (only the
+   protected last two user turns), the leaf step is skipped rather than
+   truncating that tail. The summariser's request is sized to the compaction
+   model: `max_tokens` is bounded by its output limit, and the input cap leaves
+   room for `max_tokens` plus the prompt. File-ID footers on LLM summaries are
+   bounded by the summary budget (least recently referenced IDs dropped first,
+   as in Level 3).
 
 3. **Commit** — `SummaryDAGStore.insert_node()` writes the summary as a
    `Message(is_summary=True)` row plus a `TextPart` and a `CompactionMarkerPart`.

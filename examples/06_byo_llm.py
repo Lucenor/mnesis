@@ -22,6 +22,10 @@ To use with the real Anthropic SDK, replace call_my_llm() with:
     client = anthropic.Anthropic()
 
     def call_my_llm(messages, system):
+        # After compaction the first item is the summary (role "assistant");
+        # lead with a user turn, as docs/byo-llm.md does.
+        if messages[0]["role"] != "user":
+            messages = [{"role": "user", "content": "[Conversation so far]"}, *messages]
         response = client.messages.create(
             model="claude-opus-4-6",
             max_tokens=1024,

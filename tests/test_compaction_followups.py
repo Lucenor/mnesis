@@ -269,6 +269,7 @@ class TestSummariseOnlyWhatIsInContext:
         result = await engine.run_compaction(sid)
         assert result.level_used == 0 and result.summary_message_id == ""
         assert MnesisEvent.COMPACTION_FAILED not in [e for e, _ in event_bus.collected]
+        assert not engine.stalled
 
     async def test_legacy_database_without_context_items_summarises_everything(
         self, tmp_path, monkeypatch
@@ -310,7 +311,9 @@ class TestSummariseOnlyWhatIsInContext:
             result = await s.compact()
             raw = await _raw_user_turns(s)
         assert result.level_used == 1
-        assert 0 < len(raw) < 40 and {38, 39} <= raw  # later turns stay verbatim
+        # Later turns stay verbatim: more than the protected tail is still raw, so the
+        # unsummarised remainder was neither dropped nor drained by level 3.
+        assert 2 < len(raw) < 40 and {38, 39} <= raw
 
 
 # ── B1 / B2: budget and estimator follow the session model ────────────────────
@@ -737,57 +740,71 @@ class TestStalledCompaction:
         s._config.compaction.auto = True
         return s
 
-    async def test_oversized_tail_stops_retriggering(self, tmp_path, monkeypatch):
+    async def test_futile_run_pauses_background_trigger_only(self, tmp_path, monkeypatch):
+        calls: list[int] = []
+        s = await self._stalled_session(tmp_path, monkeypatch, calls)
+        try:
+            engine = s._compaction_engine
+            info = s._model_info
+            first = await s.compact()
+            assert first.level_used == 1
+            assert engine.stalled
+            llm_calls = len(calls)
+            # No new user turn: the background trigger stays paused ...
+            assert engine.check_and_trigger(s.id, 10**6, info) is False
+            # ... but the blocking hard path is never paused.
+            assert engine.check_and_trigger(s.id, 10**6, info, force=True) is True
+            _ = await engine.wait_for_pending()
+            # Nothing was summarisable, so the forced futile run made no LLM calls.
+            assert len(calls) == llm_calls
+        finally:
+            await s.close()
+
+    async def test_new_user_turn_rearms_and_send_stays_under_hard(self, tmp_path, monkeypatch):
+        calls: list[int] = []
+        s = await self._stalled_session(tmp_path, monkeypatch, calls)
+        try:
+            engine = s._compaction_engine
+            usable = engine._usable_tokens(s._model_info)
+            _ = await s.compact()
+            assert engine.stalled
+            before = len(calls)
+            result = await s.send("turn 9 y")
+            # The new turn made turn 1 summarisable: send() compacted instead of
+            # sending an over-hard context that the builder would truncate.
+            assert not engine.stalled
+            assert len(calls) > before
+            assert result.compaction_result is not None
+            assert await s._measure_context(s.id) < usable
+            raw = await _raw_user_turns(s)
+            assert {2, 9} <= raw
+        finally:
+            await s.close()
+
+    async def test_record_rearms_background_compaction(self, tmp_path, monkeypatch):
         calls: list[int] = []
         s = await self._stalled_session(tmp_path, monkeypatch, calls)
         try:
             engine = s._compaction_engine
             triggers: list[int] = []
             s.subscribe(MnesisEvent.COMPACTION_TRIGGERED, lambda e, p: triggers.append(1))
-            first = await s.compact()
-            assert first.level_used == 1
-            assert engine._stalled_until is not None
-            llm_calls = len(calls)
-            for i in range(3, 6):
-                _ = await s.record(f"turn {i} x", "ok")
-                _ = await engine.wait_for_pending()
-            # Over the hard limit, send() must not block on a futile run either.
-            result = await s.send("turn 9 y")
-            assert result.compaction_result is None
-            assert await s._measure_context(s.id) >= engine._usable_tokens(s._model_info)
-        finally:
-            await s.close()
-        assert not triggers
-        assert len(calls) == llm_calls
-
-    async def test_rearms_after_growth_and_manual_compact_always_runs(self, tmp_path, monkeypatch):
-        calls: list[int] = []
-        s = await self._stalled_session(tmp_path, monkeypatch, calls)
-        try:
-            engine = s._compaction_engine
-            info = s._model_info
             _ = await s.compact()
-            rearm = engine._stalled_until
-            assert rearm is not None
-            assert engine.check_and_trigger(s.id, rearm - 1, info) is False
-            assert engine.check_and_trigger(s.id, rearm, info) is True
-            assert engine._stalled_until is None
-            _ = await engine.wait_for_pending()
+            assert engine.stalled
             before = len(calls)
-            _ = await s.compact()  # explicit request is never gated
+            _ = await s.record("turn 3 x", "ok")
+            _ = await engine.wait_for_pending()
+            assert triggers and len(calls) > before
         finally:
             await s.close()
-        assert len(calls) >= before
 
-    async def test_progress_below_soft_clears_stall(self, tmp_path):
+    async def test_healthy_run_is_not_a_stall(self, tmp_path):
         async with MnesisSession.open(model=MODEL, config=_cfg(tmp_path)) as s:
             engine = s._compaction_engine
-            engine._stalled_until = 10**9
             for i in range(12):
                 _ = await s.record(_turn(i), _turn(i))
-            engine._stalled_until = None  # as left by a healthy run
+            _ = await engine.wait_for_pending()
             _ = await s.compact()
-            assert engine._stalled_until is None
+            assert not engine.stalled
 
     async def test_bare_engine_without_model_info_never_stalls(
         self, store, dag_store, event_bus, estimator
@@ -796,12 +813,34 @@ class TestStalledCompaction:
             store, dag_store, estimator, event_bus, MnesisConfig(), session_model=MODEL
         )
         engine._note_run_outcome("s", tokens_before=10, tokens_after=10**9, more_to_compact=False)
-        assert engine._stalled_until is None
+        assert not engine.stalled
         engine._model_info = ModelInfo(model_id="z", context_limit=0)
         engine._note_run_outcome("s", tokens_before=10, tokens_after=10**9, more_to_compact=False)
-        assert engine._stalled_until is None
+        assert not engine.stalled
 
-    async def test_progress_with_more_to_compact_is_not_a_stall(
+    async def test_stall_depends_on_remaining_work_not_token_deltas(
+        self, store, dag_store, event_bus, estimator
+    ):
+        info = ModelInfo(model_id="m", context_limit=12_000, max_output_tokens=1_000)
+        engine = engine_mod.CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            MnesisConfig(compaction=CompactionConfig(compaction_output_budget=2_000)),
+            session_model=MODEL,
+            model_info=info,
+        )  # usable 9_000, soft 5_400
+        # record() grew the context during the run: tokens_after > tokens_before, yet
+        # work remains, so it is not a stall.
+        engine._note_run_outcome("s", tokens_before=6000, tokens_after=7000, more_to_compact=True)
+        assert not engine.stalled
+        engine._note_run_outcome("s", tokens_before=9000, tokens_after=6000, more_to_compact=False)
+        assert engine.stalled
+        engine._note_run_outcome("s", tokens_before=9000, tokens_after=5000, more_to_compact=False)
+        assert not engine.stalled  # under soft: healthy
+
+    async def test_turn_arriving_mid_run_prevents_stale_stall(
         self, store, dag_store, event_bus, estimator
     ):
         info = ModelInfo(model_id="m", context_limit=12_000, max_output_tokens=1_000)
@@ -814,12 +853,12 @@ class TestStalledCompaction:
             session_model=MODEL,
             model_info=info,
         )
-        engine._note_run_outcome("s", tokens_before=9000, tokens_after=6000, more_to_compact=True)
-        assert engine._stalled_until is None
-        engine._note_run_outcome("s", tokens_before=9000, tokens_after=6000, more_to_compact=False)
-        assert engine._stalled_until == 6000 + (9000 - 5400)
-        engine._note_run_outcome("s", tokens_before=9000, tokens_after=5000, more_to_compact=False)
-        assert engine._stalled_until is None  # under soft: healthy
+        started = engine._turn_epoch
+        engine.note_user_turn()
+        engine._note_run_outcome(
+            "s", tokens_before=9000, tokens_after=6000, more_to_compact=False, epoch=started
+        )
+        assert not engine.stalled
 
 
 # ── T2: tool schemas count towards the thresholds ─────────────────────────────
@@ -1005,3 +1044,205 @@ class TestEscalationEdges:
         shed = condense_level3_deterministic(nodes, est, tight)  # type: ignore[arg-type]
         assert shed.token_count <= tight.usable
         assert shed.text.count("---") < 7
+
+
+# ── Review follow-ups: level 3 keeps the tail, request sizing, drain, footers ──
+
+
+class TestLevel3KeepsProtectedTail:
+    async def test_summariser_down_over_hard_send_ends_with_user_message(
+        self, tmp_path, monkeypatch
+    ):
+        def mk(model: str):
+            async def _call(**kw):
+                raise RuntimeError("summariser down")
+
+            return _call
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", mk)
+        seen: list[list[str]] = []
+        mock_response = MnesisSession._mock_response
+
+        async def spy(self, llm_messages, *a, **k):
+            seen.append([m["role"] for m in llm_messages])
+            seen_text.append(str(llm_messages[-1]["content"]))
+            return await mock_response(self, llm_messages, *a, **k)
+
+        seen_text: list[str] = []
+        monkeypatch.setattr(MnesisSession, "_mock_response", spy)
+        async with MnesisSession.open(model=MODEL, config=_cfg(tmp_path, auto=False)) as s:
+            for i in range(30):
+                _ = await s.record(_turn(i, 60), "reply " + "lorem ipsum " * 20)
+            s._config.compaction.auto = True
+            result = await s.send("current question " + "word " * 20)
+            raw = await _raw_user_turns(s)
+        assert result.compaction_result is not None and result.compaction_result.level_used == 3
+        assert seen[-1][-1] == "user" and "current question" in seen_text[-1]
+        assert 29 in raw  # protected tail stayed raw
+
+    async def test_level3_never_swaps_out_protected_turns(self, store, dag_store, event_bus):
+        engine = engine_mod.CompactionEngine(
+            store, dag_store, TokenEstimator(), event_bus, MnesisConfig(), session_model=MODEL
+        )
+        budget = ContextBudget(
+            model_context_limit=100_000, reserved_output_tokens=0, compaction_buffer=0
+        )
+        info = ModelInfo(model_id="m", context_limit=100_000, max_output_tokens=1_000)
+        msgs = _chat("sess_l3", 4)  # two user turns: everything is protected
+        cand = await engine._run_summarisation(
+            msgs, MODEL, budget, _short_llm, None, info, None, allow_level3=True
+        )
+        assert cand is None or cand.compaction_level != 3
+
+
+class TestSummariserRequestFitsSmallWindow:
+    async def test_max_tokens_and_input_fit_compaction_model_window(self, estimator):
+        captured: dict[str, int] = {}
+
+        async def llm(*, model, messages, max_tokens):
+            captured["max_tokens"] = max_tokens
+            captured["prompt"] = estimator.estimate(messages[0]["content"])
+            return "## Goal\nshort"
+
+        window, out = 8_192, 2_048
+        budget = ContextBudget(
+            model_context_limit=window, reserved_output_tokens=out, compaction_buffer=2_000
+        )
+        # usable = 4_144: the old max_tokens = min(8192, usable) = 4_144 exceeded the 2_048 limit.
+        msgs = _chat("sess_small", 40, chars=1200)
+        cand = await level1_summarise(
+            msgs,
+            "m",
+            budget,
+            estimator,
+            llm,
+            model_context_limit=window,
+            model_max_output_tokens=out,
+        )
+        assert cand is not None
+        assert captured["max_tokens"] <= out
+        assert captured["prompt"] + captured["max_tokens"] <= window
+
+    async def test_level2_max_tokens_bounded_by_model_output(self, estimator):
+        captured: dict[str, int] = {}
+
+        async def llm(*, model, messages, max_tokens):
+            captured["max_tokens"] = max_tokens
+            return "GOAL: x"
+
+        budget = ContextBudget(
+            model_context_limit=20_000, reserved_output_tokens=1_000, compaction_buffer=6_000
+        )
+        _ = await level2_summarise(
+            _chat("sess_l2", 12), "m", budget, estimator, llm, model_max_output_tokens=500
+        )
+        assert captured["max_tokens"] == 500
+
+    async def test_input_cap_uses_compaction_model_units(self, estimator):
+        class Double:
+            def estimate(self, text: str, model: ModelInfo | None = None) -> int:
+                return 2 * estimator.estimate(text)
+
+            def estimate_message(self, msg: MessageWithParts) -> int:
+                return 2 * estimator.estimate_message(msg)
+
+        budget = ContextBudget(
+            model_context_limit=3_000, reserved_output_tokens=0, compaction_buffer=0
+        )
+        msgs = _chat("sess_units", 30, chars=2_000)
+        same = await level1_summarise(
+            msgs, "m", budget, estimator, _short_llm, model_context_limit=12_000
+        )
+        bigger_units = await level1_summarise(
+            msgs,
+            "m",
+            budget,
+            estimator,
+            _short_llm,
+            model_context_limit=12_000,
+            compaction_estimator=Double(),  # type: ignore[arg-type]
+        )
+        assert same is not None and bigger_units is not None
+        assert bigger_units.messages_covered < same.messages_covered
+
+
+class TestFileIdFooterBounded:
+    async def test_huge_footer_does_not_force_escalation(self, estimator):
+        ids = [f"file_{i:016x}" for i in range(400)]
+        msgs = []
+        for i in range(8):
+            chunk = " ".join(ids[i * 50 : (i + 1) * 50])
+            msg = make_message(
+                "sess_ids", role="user" if i % 2 == 0 else "assistant", msg_id=f"m{i}"
+            )
+            msgs.append(
+                MessageWithParts(
+                    message=msg, parts=[TextPart(text=f"t{i} {chunk} " + "word " * 400)]
+                )
+            )
+        budget = ContextBudget(
+            model_context_limit=600, reserved_output_tokens=100, compaction_buffer=100
+        )
+        for fn in (level1_summarise, level2_summarise):
+            cand = await fn(msgs, "m", budget, estimator, _short_llm)
+            assert cand is not None, fn.__name__
+            assert cand.token_count <= budget.usable
+            assert "LCM File IDs" in cand.text
+
+
+class TestBlockingRunStopsUnderHard:
+    async def test_hard_path_drains_less_than_background_run(self, tmp_path, monkeypatch):
+        seen = _capture_llm(monkeypatch)
+        counts: dict[str, int] = {}
+        for mode in ("full", "blocking"):
+            seen.clear()
+            async with MnesisSession.open(
+                model=MODEL, config=_cfg(tmp_path / mode, auto=False, condensation_enabled=False)
+            ) as s:
+                for i in range(40):
+                    _ = await s.record(_turn(i), "reply " + "lorem ipsum " * 60)
+                _ = await s._compaction_engine.run_compaction(
+                    s.id, until_under_hard=mode == "blocking"
+                )
+                counts[mode] = len(seen)
+        assert 1 <= counts["blocking"] < counts["full"]
+
+
+class TestRunResultAndLoad:
+    async def test_summary_token_count_is_cumulative_like_message_count(
+        self, tmp_path, monkeypatch
+    ):
+        seen = _capture_llm(monkeypatch)
+        async with MnesisSession.open(
+            model=MODEL, config=_cfg(tmp_path, auto=False, condensation_enabled=False)
+        ) as s:
+            for i in range(40):
+                _ = await s.record(_turn(i), "reply " + "lorem ipsum " * 60)
+            result = await s.compact()
+            nodes = await s._dag_store.get_active_nodes(s.id)
+        assert len(seen) > 1 and len(nodes) == len(seen)
+        assert result.summary_token_count == sum(n.token_count for n in nodes)
+
+    async def test_load_closes_store_on_every_early_raise(self, tmp_path, monkeypatch):
+        from mnesis.store.immutable import ImmutableStore, SessionNotFoundError
+
+        closed: list[int] = []
+        orig_close = ImmutableStore.close
+
+        async def counting_close(self):
+            closed.append(1)
+            await orig_close(self)
+
+        monkeypatch.setattr(ImmutableStore, "close", counting_close)
+        cfg = _cfg(tmp_path)
+        with pytest.raises(SessionNotFoundError):
+            _ = await MnesisSession.load("sess_missing", config=cfg)
+        assert len(closed) == 1
+        s = await MnesisSession.create(model=MODEL, config=cfg)
+        sid = s.id
+        await s.close()
+        closed.clear()
+        bad = _cfg(tmp_path, budget=50_000)
+        with pytest.raises(ValueError):
+            _ = await MnesisSession.load(sid, config=bad)
+        assert len(closed) == 1

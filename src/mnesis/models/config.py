@@ -27,7 +27,8 @@ class CompactionConfig(BaseModel):
     be changed with a thorough understanding of the compaction loop:
 
     - ``soft_threshold_fraction`` — when to start early background compaction
-    - ``max_compaction_rounds`` — cap on condensation rounds per compaction run
+    - ``max_compaction_rounds`` — cap on condensation rounds and on summarisation
+      passes per compaction run
     - ``condensation_enabled`` — whether to merge accumulated summary nodes
     """
 
@@ -93,9 +94,10 @@ class CompactionConfig(BaseModel):
         ge=1,
         le=50,
         description=(
-            "[Advanced] Upper bound on condensation rounds per compaction run. Each round merges "
-            "all live summary nodes into one, so a run condenses at most once in practice "
-            "and this limit is effectively never reached."
+            "[Advanced] Upper bound on condensation rounds per compaction run, and on "
+            "summarisation passes when the summariser's input cap forces several. Each "
+            "condensation round merges all live summary nodes into one, so a run condenses "
+            "at most once in practice."
         ),
     )
 

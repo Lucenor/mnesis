@@ -381,18 +381,18 @@ class MnesisSession:
         store = ImmutableStore(cfg.store, pool=pool)
         await store.initialize()
 
-        db_session = await store.get_session(session_id)
-        if not db_session.model_id:
-            raise ValueError(
-                f"Session {session_id!r} has no stored model_id; pass model= explicitly"
-            )
-        model = db_session.model_id
-        model_info = ModelInfo.from_model_string(model)
-        if cfg.model_overrides:
-            model_info = model_info.model_copy(update=cfg.model_overrides)
         try:
+            db_session = await store.get_session(session_id)
+            if not db_session.model_id:
+                raise ValueError(
+                    f"Session {session_id!r} has no stored model_id; pass model= explicitly"
+                )
+            model = db_session.model_id
+            model_info = ModelInfo.from_model_string(model)
+            if cfg.model_overrides:
+                model_info = model_info.model_copy(update=cfg.model_overrides)
             check_compaction_budget(cfg.compaction, model_info)
-        except ValueError:
+        except BaseException:
             await store.close()
             raise
 
@@ -481,6 +481,7 @@ class MnesisSession:
             model_id=self._model,
         )
         await self._store.append_message(user_msg)
+        self._compaction_engine.note_user_turn()
 
         for part in user_parts:
             part_id = make_id("part")
@@ -982,6 +983,7 @@ class MnesisSession:
             model_id=self._model,
         )
         await self._store.append_message(user_msg)
+        self._compaction_engine.note_user_turn()
         for part in user_parts:
             raw = RawMessagePart(
                 id=make_id("part"),
@@ -1378,7 +1380,7 @@ class MnesisSession:
         # is in flight does not let an over-hard context through.
         if (
             engine.check_and_trigger(
-                self._session_id, self._threshold_tokens(context), self._model_info
+                self._session_id, self._threshold_tokens(context), self._model_info, force=True
             )
             or engine.in_flight
         ):

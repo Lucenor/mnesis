@@ -191,9 +191,24 @@ class CondensationCandidate:
     """Condensation escalation level: 1 = normal, 2 = aggressive, 3 = deterministic."""
 
 
-def _level1_max_tokens(budget: ContextBudget) -> int:
-    """``max_tokens`` for a level 1 LLM call: bounded by the budget the result must fit."""
-    return max(1, min(_LEVEL1_MAX_OUTPUT_TOKENS, budget.usable))
+def _level1_max_tokens(budget: ContextBudget, model_max_output_tokens: int = 0) -> int:
+    """``max_tokens`` for a level 1 LLM call.
+
+    Bounded by the budget the result must fit and, when known (> 0), by the
+    compaction model's own output limit.
+    """
+    limit = min(_LEVEL1_MAX_OUTPUT_TOKENS, budget.usable)
+    if model_max_output_tokens > 0:
+        limit = min(limit, model_max_output_tokens)
+    return max(1, limit)
+
+
+def _level2_max_tokens(budget: ContextBudget, model_max_output_tokens: int = 0) -> int:
+    """``max_tokens`` for a level 2 LLM call (see :func:`_level1_max_tokens`)."""
+    limit = min(budget.compaction_buffer, 4000)
+    if model_max_output_tokens > 0:
+        limit = min(limit, model_max_output_tokens)
+    return max(1, limit)
 
 
 def _extract_text(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHARS) -> str:
@@ -240,10 +255,13 @@ def _apply_input_cap(
     messages: list[MessageWithParts],
     estimator: TokenEstimator,
     model_context_limit: int,
+    reserved_tokens: int = 0,
 ) -> list[MessageWithParts]:
     """
     Trim *messages* so their total token count stays within the summarisation
-    input cap (``MAX_SUMMARISATION_INPUT_FRACTION`` of *model_context_limit*).
+    input cap: ``MAX_SUMMARISATION_INPUT_FRACTION`` of *model_context_limit*,
+    and never more than the window left after *reserved_tokens* (the request's
+    ``max_tokens`` plus its prompt).
 
     Messages are taken oldest-first, so the result is a contiguous prefix of
     *messages*; callers must record the span of the *result* (not of the
@@ -256,6 +274,7 @@ def _apply_input_cap(
         messages: Messages to cap (already filtered by ``_messages_to_summarise``).
         estimator: Token estimator.
         model_context_limit: Full context limit of the compaction model.
+        reserved_tokens: Tokens of the window the input must leave free.
 
     Returns:
         A (possibly shorter) list of messages to pass to the LLM.
@@ -263,7 +282,10 @@ def _apply_input_cap(
     if not messages:
         return messages
 
-    max_input_tokens = int(model_context_limit * MAX_SUMMARISATION_INPUT_FRACTION)
+    max_input_tokens = min(
+        int(model_context_limit * MAX_SUMMARISATION_INPUT_FRACTION),
+        model_context_limit - reserved_tokens,
+    )
     tokens_so_far = 0
     result: list[MessageWithParts] = []
 
@@ -294,6 +316,8 @@ async def level1_summarise(
     llm_call: Any,
     compaction_prompt: str | None = None,
     model_context_limit: int = 200_000,
+    model_max_output_tokens: int = 0,
+    compaction_estimator: TokenEstimator | None = None,
 ) -> SummaryCandidate | None:
     """
     Attempt Level 1 (selective) summarisation via LLM.
@@ -312,6 +336,9 @@ async def level1_summarise(
         llm_call: Async callable ``(model, messages, max_tokens) -> str``.
         compaction_prompt: Custom system prompt override.
         model_context_limit: Context window of the compaction model.
+        model_max_output_tokens: Output limit of the compaction model (0 = unknown).
+        compaction_estimator: Estimator in the compaction model's units, used to size
+            the input against its window (defaults to *estimator*).
 
     Returns:
         SummaryCandidate if successful and fits budget, or None to escalate.
@@ -324,14 +351,21 @@ async def level1_summarise(
     # Apply input token cap before passing to LLM. The oldest prefix is kept, and
     # the span recorded below is exactly that prefix: messages past the cap stay
     # raw in context for the next compaction instead of being swapped out unsummarised.
-    to_summarise = _apply_input_cap(to_summarise, estimator, model_context_limit)
+    prompt = compaction_prompt if compaction_prompt is not None else LEVEL1_PROMPT
+    max_tokens = _level1_max_tokens(budget, model_max_output_tokens)
+    cap_estimator = compaction_estimator or estimator
+    to_summarise = _apply_input_cap(
+        to_summarise,
+        cap_estimator,
+        model_context_limit,
+        reserved_tokens=max_tokens + cap_estimator.estimate(prompt),
+    )
 
     # Collect file IDs from the capped input.
     file_ids = extract_file_ids_from_messages(to_summarise)
 
     transcript = _build_messages_text(to_summarise)
     input_token_count = estimator.estimate(transcript)
-    prompt = compaction_prompt if compaction_prompt is not None else LEVEL1_PROMPT
     prompt_messages = [
         {
             "role": "user",
@@ -343,14 +377,16 @@ async def level1_summarise(
         summary_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=_level1_max_tokens(budget),
+            max_tokens=max_tokens,
         )
     except Exception as exc:
         logger.warning("level1_llm_failed", error=str(exc))
         return None
 
     # Propagate file IDs into the summary.
-    summary_text = append_file_ids_footer(summary_text, file_ids)
+    summary_text = _append_bounded_footer(
+        summary_text, file_ids, most_recent_file_ids(to_summarise), budget, estimator
+    )
 
     token_count = estimator.estimate(summary_text)
     if token_count > budget.usable:
@@ -389,6 +425,8 @@ async def level2_summarise(
     llm_call: Any,
     compaction_prompt: str | None = None,
     model_context_limit: int = 200_000,
+    model_max_output_tokens: int = 0,
+    compaction_estimator: TokenEstimator | None = None,
 ) -> SummaryCandidate | None:
     """
     Attempt Level 2 (aggressive) summarisation via LLM.
@@ -405,6 +443,9 @@ async def level2_summarise(
         llm_call: Async callable.
         compaction_prompt: Custom system prompt override.
         model_context_limit: Context window of the compaction model.
+        model_max_output_tokens: Output limit of the compaction model (0 = unknown).
+        compaction_estimator: Estimator in the compaction model's units, used to size
+            the input against its window (defaults to *estimator*).
 
     Returns:
         SummaryCandidate if successful and fits budget, or None to escalate.
@@ -414,7 +455,15 @@ async def level2_summarise(
         return None
 
     # Apply input token cap (oldest prefix; the span below matches what is summarised).
-    to_summarise = _apply_input_cap(to_summarise, estimator, model_context_limit)
+    prompt = compaction_prompt if compaction_prompt is not None else LEVEL2_PROMPT
+    max_tokens = _level2_max_tokens(budget, model_max_output_tokens)
+    cap_estimator = compaction_estimator or estimator
+    to_summarise = _apply_input_cap(
+        to_summarise,
+        cap_estimator,
+        model_context_limit,
+        reserved_tokens=max_tokens + cap_estimator.estimate(prompt),
+    )
 
     # Collect file IDs from input messages.
     file_ids = extract_file_ids_from_messages(to_summarise)
@@ -429,7 +478,6 @@ async def level2_summarise(
     transcript = "\n".join(transcript_parts)
     input_token_count = estimator.estimate(transcript)
 
-    prompt = compaction_prompt if compaction_prompt is not None else LEVEL2_PROMPT
     prompt_messages = [
         {
             "role": "user",
@@ -441,14 +489,16 @@ async def level2_summarise(
         summary_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=min(budget.compaction_buffer, 4000),
+            max_tokens=max_tokens,
         )
     except Exception as exc:
         logger.warning("level2_llm_failed", error=str(exc))
         return None
 
     # Propagate file IDs.
-    summary_text = append_file_ids_footer(summary_text, file_ids)
+    summary_text = _append_bounded_footer(
+        summary_text, file_ids, most_recent_file_ids(to_summarise), budget, estimator
+    )
 
     token_count = estimator.estimate(summary_text)
     if token_count > budget.usable:
@@ -516,6 +566,34 @@ def _fit_file_ids(
         else:
             hi = mid
     return file_ids[:lo]
+
+
+def _append_bounded_footer(
+    text: str,
+    file_ids: list[str],
+    recent_first: list[str],
+    budget: ContextBudget,
+    estimator: TokenEstimator,
+) -> str:
+    """Append the file-ID footer to an LLM summary, bounded by ``budget.usable``.
+
+    An unbounded footer could push an otherwise-fine summary over budget and
+    force escalation. When the footer does not fit, the least recently
+    referenced IDs are dropped (the footer stays in first-occurrence order),
+    mirroring level 3; the raw files stay addressable in the immutable store.
+    """
+    if file_ids:
+        fitted = _fit_file_ids(recent_first, estimator.estimate(text), budget.usable, estimator)
+        if len(fitted) < len(file_ids):
+            keep = set(fitted)
+            logger.warning(
+                "summary_file_ids_truncated",
+                kept=len(fitted),
+                dropped=len(file_ids) - len(fitted),
+                budget_usable=budget.usable,
+            )
+            file_ids = [fid for fid in file_ids if fid in keep]
+    return append_file_ids_footer(text, file_ids)
 
 
 def _plan_header_and_file_ids(
@@ -691,6 +769,7 @@ async def condense_level1(
     budget: ContextBudget,
     estimator: TokenEstimator,
     llm_call: Any,
+    model_max_output_tokens: int = 0,
 ) -> CondensationCandidate | None:
     """
     Attempt Level 1 condensation: merge summary nodes via structured LLM prompt.
@@ -704,6 +783,7 @@ async def condense_level1(
         budget: Token budget for the condensed result.
         estimator: Token estimator.
         llm_call: Async callable ``(model, messages, max_tokens) -> str``.
+        model_max_output_tokens: Output limit of the compaction model (0 = unknown).
 
     Returns:
         CondensationCandidate if successful and fits budget, or None to escalate.
@@ -728,13 +808,15 @@ async def condense_level1(
         condensed_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=_level1_max_tokens(budget),
+            max_tokens=_level1_max_tokens(budget, model_max_output_tokens),
         )
     except Exception as exc:
         logger.warning("condense_level1_llm_failed", error=str(exc))
         return None
 
-    condensed_text = append_file_ids_footer(condensed_text, file_ids)
+    condensed_text = _append_bounded_footer(
+        condensed_text, file_ids, most_recent_file_ids_from_nodes(nodes), budget, estimator
+    )
 
     token_count = estimator.estimate(condensed_text)
     if token_count > budget.usable:
@@ -759,6 +841,7 @@ async def condense_level2(
     budget: ContextBudget,
     estimator: TokenEstimator,
     llm_call: Any,
+    model_max_output_tokens: int = 0,
 ) -> CondensationCandidate | None:
     """
     Attempt Level 2 condensation: aggressive merge via compressed prompt.
@@ -769,6 +852,7 @@ async def condense_level2(
         budget: Token budget.
         estimator: Token estimator.
         llm_call: Async callable.
+        model_max_output_tokens: Output limit of the compaction model (0 = unknown).
 
     Returns:
         CondensationCandidate if successful and fits budget, or None to escalate.
@@ -794,13 +878,15 @@ async def condense_level2(
         condensed_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=min(budget.compaction_buffer, 4000),
+            max_tokens=_level2_max_tokens(budget, model_max_output_tokens),
         )
     except Exception as exc:
         logger.warning("condense_level2_llm_failed", error=str(exc))
         return None
 
-    condensed_text = append_file_ids_footer(condensed_text, file_ids)
+    condensed_text = _append_bounded_footer(
+        condensed_text, file_ids, most_recent_file_ids_from_nodes(nodes), budget, estimator
+    )
 
     token_count = estimator.estimate(condensed_text)
     if token_count > budget.usable:

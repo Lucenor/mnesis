@@ -47,6 +47,44 @@ CompactionConfig(
 )
 ```
 
+### Small windows: when session creation raises
+
+`MnesisSession.create()` and `load()` raise `ValueError` whenever
+`context_limit - max_output_tokens <= compaction_output_budget`, whether the
+budget was set explicitly or left at the default (20,000). **This is a breaking
+change for `model_overrides` users with small windows.** Those configs were
+already unusable before the check: no history fit next to the reserved headroom,
+so `context_for_next_turn()` returned a single message after four turns and
+compaction ran and blocked every turn. Mnesis now fails fast instead.
+
+Overrides that raise with the default budget (`max_output_tokens` is inherited
+from the model string unless you set it):
+
+| Model | `model_overrides` | `max_output_tokens` | Usable (`limit - out - 20,000`) |
+|---|---|---|---|
+| `ollama/llama3` | `context_limit=8_192` | inherited | negative |
+| `ollama/llama3` | `context_limit=8_192, max_output_tokens=2_048` | 2,048 | -13,856 |
+| `ollama/llama3` | `context_limit=16_384` | inherited | negative |
+| `gpt-4o` | `context_limit=32_768` | 16,384 (inherited) | -3,616 |
+| `anthropic/claude-opus-4-6` | `context_limit=50_000` | 32,000 (inherited) | -2,000 |
+| `o3-mini` | `context_limit=120_000` | 100,000 (inherited) | 0 |
+
+Fix either side of the inequality: lower `compaction_output_budget` (it only
+needs to cover the summary the compaction model writes, so a few thousand
+tokens suit a small window), or set `max_output_tokens` in `model_overrides`
+to the reply length you actually need instead of inheriting the model's maximum:
+
+```python
+MnesisConfig(
+    model_overrides={"context_limit": 32_768, "max_output_tokens": 4_096},
+    compaction=CompactionConfig(compaction_output_budget=4_000),
+)
+```
+
+A run that blocks `send()` at the hard limit stops as soon as the context is
+under it; a background run can make up to `2 * max_compaction_rounds` sequential
+summariser calls in the worst case (20 with the default), typically 1 to 2.
+
 ### Custom compaction prompt
 
 ```python

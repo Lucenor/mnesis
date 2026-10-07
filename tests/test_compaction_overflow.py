@@ -479,7 +479,8 @@ class TestHardLimitAfterInflightWait:
 
             async def _counting(session_id: str, **kw):
                 nonlocal real_calls
-                real_calls += 1
+                if kw.get("until_under_hard"):  # the blocking hard-path run
+                    real_calls += 1
                 return await real(session_id, **kw)
 
             async def _noop() -> CompactionResult:
