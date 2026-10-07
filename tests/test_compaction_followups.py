@@ -919,3 +919,89 @@ class TestCloseDrainsPending:
         await s.close()
         assert done == ["first", "second"]
         assert not engine.has_pending
+
+
+# ── Coverage: abort between passes, level-3 condensation fallthrough ──────────
+
+
+class TestEscalationEdges:
+    async def test_abort_set_before_summarisation_pass(
+        self, store, dag_store, event_bus, monkeypatch
+    ):
+        sid = "sess_abort_pass"
+        await store.create_session(sid, model_id=MODEL, agent="t")
+        for i in range(4):
+            mid = f"u{i}"
+            _ = await store.append_message(
+                make_message(sid, role="user" if i % 2 == 0 else "assistant", msg_id=mid)
+            )
+            _ = await store.append_part(
+                make_raw_part(
+                    mid,
+                    sid,
+                    content=json.dumps({"type": "text", "text": "hi"}),
+                    part_id=f"p{i}",
+                )
+            )
+        engine = engine_mod.CompactionEngine(
+            store,
+            dag_store,
+            TokenEstimator(),
+            event_bus,
+            MnesisConfig(),
+            id_generator=lambda p: f"{p}_x",
+            session_model=MODEL,
+        )
+        abort = asyncio.Event()
+        orig = store.get_context_items
+
+        async def fetch_then_abort(session_id: str):
+            result = await orig(session_id)
+            abort.set()  # after the pre-fetch check, before the first pass
+            return result
+
+        monkeypatch.setattr(store, "get_context_items", fetch_then_abort)
+        with pytest.raises(asyncio.CancelledError):
+            _ = await engine.run_compaction(sid, abort=abort)
+
+    async def test_condensation_falls_through_to_level3(
+        self, store, dag_store, event_bus, estimator, monkeypatch
+    ):
+        async def no_summary(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(engine_mod, "condense_level1", no_summary)
+        engine = engine_mod.CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            MnesisConfig(compaction=CompactionConfig(level2_enabled=False)),
+            session_model=MODEL,
+        )
+        budget = ContextBudget(
+            model_context_limit=100_000, reserved_output_tokens=0, compaction_buffer=0
+        )
+        nodes = [_node("a", "alpha " * 20), _node("b", "beta " * 20)]
+        cond = await engine._run_condensation(nodes, MODEL, budget, None, None)
+        assert "DETERMINISTIC FALLBACK" in cond.text
+
+    def test_level3_binary_search_sheds_most_chunks(self):
+        class JoinerEstimator:
+            def estimate(self, text: str, model: ModelInfo | None = None) -> int:
+                return len(text) // 4 + 50 * text.count("---")
+
+        est = JoinerEstimator()
+        nodes = [_node(f"n{i}", "w" * 100) for i in range(8)]
+        probe = ContextBudget(
+            model_context_limit=100_000, reserved_output_tokens=0, compaction_buffer=0
+        )
+        full = condense_level3_deterministic(nodes, est, probe)  # type: ignore[arg-type]
+        tight = ContextBudget(
+            model_context_limit=full.token_count - 200,
+            reserved_output_tokens=0,
+            compaction_buffer=0,
+        )
+        shed = condense_level3_deterministic(nodes, est, tight)  # type: ignore[arg-type]
+        assert shed.token_count <= tight.usable
+        assert shed.text.count("---") < 7
