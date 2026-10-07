@@ -577,7 +577,7 @@ class TestManualCompactionIsExclusive:
             await asyncio.sleep(0.05)
             assert not manual.done()  # waiting for the background run
             gate.set()
-            await manual
+            _ = await manual
 
         assert max_active == 1
         assert order == ["start", "end", "start", "end"]
