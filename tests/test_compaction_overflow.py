@@ -319,3 +319,49 @@ class TestEngineFitsMeasure:
         live_summary_tokens = sum(n.token_count for n in nodes)
         assert first.level_used > 0 and second.level_used > 0
         assert second.tokens_after >= live_summary_tokens
+
+
+class TestOverflowCheckBuildFailure:
+    async def test_record_survives_context_build_failure(self, tmp_path, monkeypatch):
+        """A failing context build skips the overflow check and the snapshot, not the turn."""
+        cfg = _cfg(tmp_path)
+        async with MnesisSession.open(model=MODEL, config=cfg) as s:
+
+            async def boom(*args, **kwargs):
+                raise RuntimeError("build failed")
+
+            monkeypatch.setattr(s._context_builder, "build", boom)
+            result = await s.record("hello", "world", tokens=TokenUsage(input=10, output=5))
+
+        assert result.compaction_triggered is False
+
+
+class TestBuilderFallbackTruncation:
+    async def test_fallback_path_truncates_but_reports_full_size(
+        self, session_id, store, dag_store, estimator
+    ):
+        """Legacy sessions (no context_items rows) are budget-truncated too."""
+        tight = ModelInfo(model_id="m", context_limit=4_000, max_output_tokens=200)
+        cfg = MnesisConfig(compaction=CompactionConfig(compaction_output_budget=1000))
+        for i in range(10):
+            await store.append_message(
+                make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"m{i}")
+            )
+            await store.append_part(
+                make_raw_part(
+                    f"m{i}",
+                    session_id,
+                    content=json.dumps({"type": "text", "text": "word " * 400}),
+                    part_id=f"p{i}",
+                )
+            )
+        conn = store._conn_or_raise()
+        _ = await conn.execute("DELETE FROM context_items WHERE session_id = ?", (session_id,))
+        await conn.commit()
+        assert await store.get_context_items(session_id) == []
+
+        ctx = await ContextBuilder(store, dag_store, estimator).build(session_id, tight, "sys", cfg)
+
+        assert 0 < len(ctx.messages) < 10
+        assert ctx.token_estimate <= ctx.budget.usable
+        assert ctx.context_tokens > ctx.budget.usable
