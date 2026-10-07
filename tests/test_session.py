@@ -1756,7 +1756,7 @@ class TestSessionCoverageGaps:
         ) as session:
             engine = session._compaction_engine
             stale = asyncio.ensure_future(_done())
-            await stale
+            await asyncio.wait({stale})
             engine._pending_task = stale
             engine.is_hard_overflow = lambda tokens, model: True  # type: ignore[method-assign]
             engine.is_overflow = lambda tokens, model: True  # type: ignore[method-assign]
