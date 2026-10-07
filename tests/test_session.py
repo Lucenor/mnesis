@@ -1547,8 +1547,8 @@ class TestSessionCoverageGaps:
 
     # ── doom loop detection ──────────────────────────────────────────────────
 
-    async def test_doom_loop_detected_after_threshold(self, tmp_path, monkeypatch):
-        """doom_loop_detected=True when the same tool call repeats >= threshold times."""
+    async def test_send_text_turn_resets_doom_window(self, tmp_path, monkeypatch):
+        """send() turns carry no tracked tool calls, so they reset any stale window."""
         from mnesis import MnesisConfig, MnesisSession
         from mnesis.models.config import SessionConfig
 
@@ -1561,14 +1561,65 @@ class TestSessionCoverageGaps:
             db_path=str(tmp_path / "test.db"),
             config=cfg,
         ) as session:
-            # Inject repeated tool calls directly into _recent_tool_calls
             session._recent_tool_calls = [
                 ("read_file", '{"path":"/x"}'),
                 ("read_file", '{"path":"/x"}'),
             ]
             result = await session.send("Do something")
 
-        assert result.doom_loop_detected is True
+        assert result.doom_loop_detected is False
+        assert session._recent_tool_calls == []
+
+    async def test_record_doom_loop_does_not_leak_into_send(self, tmp_path, monkeypatch):
+        """After record() trips detection, later text-only send() turns are clean."""
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.events.bus import MnesisEvent
+        from mnesis.models.config import SessionConfig
+        from mnesis.models.message import ToolPart, ToolStatus
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        cfg = MnesisConfig(session=SessionConfig(doom_loop_threshold=3))
+        events: list[dict] = []
+
+        def _tp(i: int) -> ToolPart:
+            return ToolPart(
+                tool_name="read_file",
+                tool_call_id=f"c{i}",
+                input={"path": "/x"},
+                output="ok",
+                status=ToolStatus(state="completed"),
+            )
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db"), config=cfg
+        ) as session:
+            session.subscribe(MnesisEvent.DOOM_LOOP_DETECTED, lambda e, p: events.append(p))
+            recorded = [await session.record(f"t{i}", [_tp(i)]) for i in range(3)]
+            assert recorded[-1].doom_loop_detected is True
+            assert len(events) == 1
+            sent = [await session.send(f"hello {i}") for i in range(2)]
+
+        assert [r.doom_loop_detected for r in sent] == [False, False]
+        assert len(events) == 1
+
+    async def test_record_mixed_key_tool_input_does_not_crash(self, tmp_path, monkeypatch):
+        """Nested dicts with unsortable mixed key types must not break record()."""
+        from mnesis import MnesisSession
+        from mnesis.models.message import ToolPart, ToolStatus
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        part = ToolPart(
+            tool_name="search",
+            tool_call_id="c1",
+            input={"q": {1: "a", "b": "c"}},
+            output="ok",
+            status=ToolStatus(state="completed"),
+        )
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db")
+        ) as session:
+            await session.record("q", [part])
+            assert len(session._recent_tool_calls) == 1
 
     # ── subscribe() convenience wrapper ──────────────────────────────────────
 
@@ -1677,6 +1728,47 @@ class TestSessionCoverageGaps:
             result = await session.send("Over the hard limit")
 
         assert result.compaction_result == expected
+
+    async def test_send_hard_overflow_ignores_stale_finished_task(self, tmp_path, monkeypatch):
+        """A finished earlier background task is not reported as this turn's result."""
+        from mnesis import MnesisSession
+        from mnesis.models.message import CompactionResult
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+
+        def _result(msg_id: str) -> CompactionResult:
+            return CompactionResult(
+                session_id="s",
+                summary_message_id=msg_id,
+                level_used=3,
+                compacted_message_count=1,
+                summary_token_count=1,
+                tokens_before=1,
+                tokens_after=1,
+                elapsed_ms=1.0,
+            )
+
+        async def _done() -> CompactionResult:
+            return _result("msg_stale")
+
+        async with await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", db_path=str(tmp_path / "test.db")
+        ) as session:
+            engine = session._compaction_engine
+            stale = asyncio.ensure_future(_done())
+            await stale
+            engine._pending_task = stale
+            engine.is_hard_overflow = lambda tokens, model: True  # type: ignore[method-assign]
+            engine.is_overflow = lambda tokens, model: True  # type: ignore[method-assign]
+
+            async def _fresh(session_id: str, abort: object = None) -> CompactionResult:
+                return _result("msg_fresh")
+
+            engine.run_compaction = _fresh  # type: ignore[method-assign]
+            result = await session.send("Over the hard limit")
+
+        assert result.compaction_result is not None
+        assert result.compaction_result.summary_message_id == "msg_fresh"
 
     async def test_send_without_hard_overflow_has_no_compaction_result(self, tmp_path, monkeypatch):
         """Background (soft) compaction never populates TurnResult.compaction_result."""

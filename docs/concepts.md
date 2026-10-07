@@ -75,4 +75,4 @@ session.subscribe(MnesisEvent.DOOM_LOOP_DETECTED, lambda e, p: print("Doom loop!
 
 ## Doom Loop Detection
 
-If the model makes the same tool call (same name and input) more than `doom_loop_threshold` (default: 3) times consecutively, mnesis raises a `DOOM_LOOP_DETECTED` event and sets `TurnResult.doom_loop_detected = True`. The session continues — the caller decides how to handle it.
+If the model makes the same tool call (same name and input) `doom_loop_threshold` (default: 3) times consecutively, mnesis raises a `DOOM_LOOP_DETECTED` event and sets `TurnResult.doom_loop_detected = True`. The session continues — the caller decides how to handle it.

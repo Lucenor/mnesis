@@ -221,6 +221,7 @@ class EventBus:
                 event=str(event),
                 handler=getattr(handler, "__qualname__", repr(handler)),
                 error=str(exc),
+                exc_info=exc,
             )
 
     def publish(self, event: MnesisEvent, payload: dict[str, Any]) -> None:

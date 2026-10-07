@@ -727,6 +727,43 @@ class ImmutableStore:
             raise MessageNotFoundError(message_id)
         return self._row_to_message(row)
 
+    async def sum_token_usage(self, session_id: str) -> TokenUsage:
+        """
+        Aggregate token usage over a session's non-summary messages in SQL.
+
+        Matches ``TokenUsage.__add__`` semantics: each row contributes its
+        explicit ``tokens_total`` when positive, otherwise the sum of its parts.
+        Summary messages are excluded (``send()``/``record()`` never count them).
+
+        Args:
+            session_id: The session to aggregate.
+
+        Returns:
+            The summed :class:`TokenUsage` (all zeros for an empty session).
+        """
+        conn = self._conn_or_raise()
+        async with conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(tokens_input), 0),
+                COALESCE(SUM(tokens_output), 0),
+                COALESCE(SUM(tokens_cache_read), 0),
+                COALESCE(SUM(tokens_cache_write), 0),
+                COALESCE(SUM(CASE WHEN COALESCE(tokens_total, 0) > 0 THEN tokens_total
+                    ELSE COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0)
+                       + COALESCE(tokens_cache_read, 0) + COALESCE(tokens_cache_write, 0)
+                    END), 0)
+            FROM messages WHERE session_id = ? AND is_summary = 0
+            """,
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return TokenUsage()
+        return TokenUsage(
+            input=row[0], output=row[1], cache_read=row[2], cache_write=row[3], total=row[4]
+        )
+
     async def get_messages(
         self,
         session_id: str,

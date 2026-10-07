@@ -248,8 +248,11 @@ class CompactionEngine:
 
         Returns:
             The :class:`CompactionResult` of the pending task (whether it was
-            still running or had already finished successfully), or ``None``
-            if no task was pending or it was cancelled / failed.
+            still running or had already finished), or ``None`` if no task was
+            pending or it was cancelled. :meth:`run_compaction` never raises:
+            a failed run is returned as a stub result with ``level_used == 0``
+            and an empty ``summary_message_id``, so callers should check
+            ``level_used`` before treating the result as a real summary.
         """
         task = self._pending_task
         result: CompactionResult | None = None
