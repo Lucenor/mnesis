@@ -127,7 +127,7 @@ Fired by: `MnesisEvent.COMPACTION_TRIGGERED`
 | Field | Type | Description |
 |---|---|---|
 | `session_id` | `str` | The session whose compaction was triggered |
-| `tokens` | `int` | Current cumulative token count that crossed the threshold |
+| `tokens` | `int` | Size of the current context window (system prompt, live summaries and raw messages) that crossed the soft threshold. Earlier versions reported lifetime cumulative tokens. |
 
 ### `CompactionCompletedPayload`
 
@@ -140,8 +140,8 @@ Fired by: `MnesisEvent.COMPACTION_COMPLETED`
 | `level_used` | `int` | Escalation level used: 1 = selective LLM, 2 = aggressive LLM, 3 = deterministic |
 | `compacted_message_count` | `int` | Number of messages folded into the summary |
 | `summary_token_count` | `int` | Token count of the resulting summary |
-| `tokens_before` | `int` | Cumulative tokens before compaction |
-| `tokens_after` | `int` | Cumulative tokens after compaction |
+| `tokens_before` | `int` | Size of the active context window before compaction (the same measure the thresholds use) |
+| `tokens_after` | `int` | Size of the active context window after compaction, older live summaries included |
 | `elapsed_ms` | `float` | Wall-clock time the compaction pass took |
 | `pruned_tool_outputs` | `int` | Number of tool outputs tombstoned during this run |
 | `pruned_tokens` | `int` | Tokens reclaimed by pruning tool outputs |

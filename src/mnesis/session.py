@@ -130,6 +130,8 @@ class MnesisSession:
         self._dag_store = dag_store
         self._context_builder = context_builder
         self._compaction_engine = compaction_engine
+        # The engine's "does it fit" check uses the same measure as the trigger.
+        compaction_engine.set_context_measure(self._measure_context)
         self._estimator = token_estimator
         self._event_bus = event_bus
         # Lifetime billed usage (public ``token_usage``). Never reset by compaction
@@ -467,31 +469,13 @@ class MnesisSession:
         # rebuild the now-compacted context. This prevents an over-limit context
         # reaching the LLM. The blocking run is surfaced as
         # TurnResult.compaction_result.
-        compaction_result_obj: CompactionResult | None = None
         context = await self._context_builder.build(
             self._session_id,
             self._model_info,
             sys_prompt,
             self._config,
         )
-        if self._compaction_engine.is_hard_overflow(context.context_tokens, self._model_info):
-            pending = self._compaction_engine._pending_task
-            if pending is None or pending.done():
-                # A finished background run is stale: its result was already
-                # reported (COMPACTION_COMPLETED) and the context still
-                # overflows, so schedule a fresh run and block on it.
-                self._compaction_engine.check_and_trigger(
-                    self._session_id,
-                    context.context_tokens,
-                    self._model_info,
-                )
-            compaction_result_obj = await self._compaction_engine.wait_for_pending()
-            context = await self._context_builder.build(
-                self._session_id,
-                self._model_info,
-                sys_prompt,
-                self._config,
-            )
+        context, compaction_result_obj = await self._ensure_under_hard_limit(context, sys_prompt)
 
         # Prepare LLM messages
         llm_messages = [{"role": m.role, "content": m.content} for m in context.messages]
@@ -1181,7 +1165,8 @@ class MnesisSession:
             CompactionResult describing the compaction outcome.
         """
         self._logger.info("manual_compaction_triggered", session_id=self._session_id)
-        result = await self._compaction_engine.run_compaction(self._session_id)
+        # Runs as the engine's tracked task, after any background compaction.
+        result = await self._compaction_engine.compact_exclusive(self._session_id)
         self._pending_compact_result = result
         return result
 
@@ -1289,13 +1274,57 @@ class MnesisSession:
         """
         return list(self._turn_snapshots)
 
+    async def _measure_context(self) -> int:
+        """Current context size (the measure the soft/hard triggers compare)."""
+        context = await self._context_builder.build(
+            self._session_id, self._model_info, self._system_prompt, self._config
+        )
+        return context.context_tokens
+
+    async def _ensure_under_hard_limit(
+        self, context: BuiltContext, sys_prompt: str
+    ) -> tuple[BuiltContext, CompactionResult | None]:
+        """Block on compaction until *context* is under the hard limit.
+
+        A compaction already in flight (or just finished) is awaited first and
+        the context re-measured, since it may have shrunk it after *context*
+        was built. Only if the rebuilt context is still over the hard limit is
+        one fresh compaction run and awaited, so this performs at most one
+        retry and cannot loop when compaction cannot shrink the context.
+
+        Returns:
+            ``(context, compaction_result)``: the context to send, rebuilt if
+            compaction ran, and the last compaction result (or ``None``).
+        """
+        engine = self._compaction_engine
+
+        async def rebuild() -> BuiltContext:
+            return await self._context_builder.build(
+                self._session_id, self._model_info, sys_prompt, self._config
+            )
+
+        result: CompactionResult | None = None
+        if not engine.is_hard_overflow(context.context_tokens, self._model_info):
+            return context, result
+        had_pending = engine._pending_task is not None
+        result = await engine.wait_for_pending()
+        if had_pending:
+            context = await rebuild()
+            if not engine.is_hard_overflow(context.context_tokens, self._model_info):
+                return context, result
+        if engine.check_and_trigger(self._session_id, context.context_tokens, self._model_info):
+            result = await engine.wait_for_pending() or result
+            context = await rebuild()
+        return context, result
+
     async def _check_overflow_and_trigger(self) -> tuple[bool, BuiltContext | None]:
         """Trigger background compaction if the current context crossed the soft threshold.
 
         Thresholds are evaluated against the size of the context window the
         next LLM call would carry (system prompt + live summaries + raw
         messages, un-truncated), not lifetime usage. Compaction shrinks that
-        size immediately, so an already-compacted session does not re-trigger.
+        size immediately (the engine measures it the same way and compacts down
+        to the soft threshold).
 
         The context built for the measurement is returned so the caller can
         reuse it for the turn snapshot instead of assembling it twice.
@@ -1313,7 +1342,9 @@ class MnesisSession:
                 self._config,
             )
         except Exception:
-            self._logger.warning("overflow_check_build_failed", session_id=self._session_id)
+            self._logger.warning(
+                "overflow_check_build_failed", session_id=self._session_id, exc_info=True
+            )
             return False, None
         triggered = self._compaction_engine.check_and_trigger(
             self._session_id, context.context_tokens, self._model_info

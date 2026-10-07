@@ -71,7 +71,8 @@ class CompactionTriggeredPayload(TypedDict):
     session_id: str
     """The session whose compaction was triggered."""
     tokens: int
-    """Current cumulative token count that crossed the threshold."""
+    """Size of the current context window (system prompt, live summaries and raw
+    messages) that crossed the soft threshold. Previously a lifetime cumulative count."""
 
 
 class CompactionCompletedPayload(TypedDict):

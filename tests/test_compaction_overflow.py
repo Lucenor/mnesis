@@ -12,7 +12,9 @@ context builder together.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
+import uuid
 
 import pytest
 
@@ -43,6 +45,12 @@ def _cfg(tmp_path, *, small: bool = True) -> MnesisConfig:
 
 def _big(i: int) -> str:
     return f"turn {i} " + "lorem ipsum " * 130  # roughly 400 tokens
+
+
+def _min_gap(triggers: list[int]) -> int:
+    """Smallest number of turns between two compacting turns (large if < 2)."""
+    idx = [i for i, t in enumerate(triggers) if t]
+    return min((b - a for a, b in itertools.pairwise(idx)), default=len(triggers))
 
 
 def _count_triggers(session: MnesisSession) -> list[int]:
@@ -85,7 +93,8 @@ class TestSendCurrentContext:
 
         # Premise: lifetime usage is far past the budget, yet compaction is rare.
         assert lifetime > 3 * usable
-        assert 1 <= sum(t for t, _ in rows) <= 5, rows
+        assert 1 <= sum(t for t, _ in rows) <= 4, rows  # observed 3 in 24 turns
+        assert _min_gap([t for t, _ in rows]) >= 4, rows
         assert all(t <= 1 for t, _ in rows), rows
         assert not any(blocked for _, blocked in rows), rows
         # The turn right after each compaction must be quiet.
@@ -152,7 +161,8 @@ class TestRecordCurrentContext:
             usable = s._compaction_engine._usable_tokens(s._model_info)
 
         assert lifetime > 10 * usable
-        assert 1 <= sum(per_turn) <= 9, per_turn  # vs. 24 when keyed on lifetime
+        assert 1 <= sum(per_turn) <= 7, per_turn  # observed 6; 24 when keyed on lifetime
+        assert _min_gap(per_turn) >= 2, per_turn
         assert max(per_turn) <= 1
 
     async def test_reloaded_session_quiet_when_compacted_and_triggers_when_over(self, tmp_path):
@@ -365,3 +375,209 @@ class TestBuilderFallbackTruncation:
         assert 0 < len(ctx.messages) < 10
         assert ctx.token_estimate <= ctx.budget.usable
         assert ctx.context_tokens > ctx.budget.usable
+
+
+class TestLongRunSteadyState:
+    @pytest.mark.parametrize("sys_tokens", [0, 900])
+    async def test_long_run_no_compaction_streaks_no_blocking(self, tmp_path, sys_tokens):
+        """100 turns with a non-trivial system prompt: no compaction streaks, never blocks."""
+        system_prompt = "You are helpful. " * (sys_tokens // 18) or "You are a helpful assistant."
+        async with MnesisSession.open(
+            model=MODEL, config=_cfg(tmp_path), system_prompt=system_prompt
+        ) as s:
+            rows = await _drive_send(s, 100)
+        triggers = [t for t, _ in rows]
+        assert not any(blocked for _, blocked in rows), rows
+        assert _min_gap(triggers) >= 2, triggers  # never compacts on consecutive turns
+        assert sum(triggers) <= 25, triggers  # observed 15-19 (vs 40-70 before)
+
+
+class TestEngineAgreesWithBuilder:
+    @pytest.mark.parametrize("model", [MODEL, "gpt-4o"])
+    async def test_tokens_before_after_match_builder_measure(self, tmp_path, model):
+        """After compact(), the engine's own measure equals the builder's (system prompt too)."""
+        cfg = MnesisConfig(
+            store=StoreConfig(db_path=str(tmp_path / "t.db")),
+            compaction=CompactionConfig(auto=False),
+        )
+        async with MnesisSession.open(model=model, config=cfg, system_prompt="Rules. " * 1500) as s:
+            for i in range(12):
+                await s.record(f"turn {i} " + "lorem ipsum dolor sit amet " * 100, "reply " * 200)
+            builder_before = await s._measure_context()
+            result = await s.compact()
+            builder_after = await s._measure_context()
+
+        assert result.tokens_before == builder_before
+        assert result.tokens_after == builder_after
+        assert result.tokens_after < result.tokens_before
+
+    async def test_engine_without_measure_uses_estimator_basis(
+        self, estimator, event_bus, store, dag_store, config, session_id
+    ):
+        """Without a measure callback both numbers are estimator-based (no system prompt)."""
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
+            id_generator=lambda p: f"{p}_{uuid.uuid4().hex[:8]}",
+            session_model=MODEL,
+        )
+        for i in range(8):
+            await store.append_message(
+                make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"m{i}")
+            )
+            await store.append_part(
+                make_raw_part(
+                    f"m{i}",
+                    session_id,
+                    content=json.dumps({"type": "text", "text": "word " * 200}),
+                    part_id=f"p{i}",
+                )
+            )
+        result = await engine.run_compaction(session_id)
+        assert result.level_used > 0
+        assert 0 < result.tokens_after < result.tokens_before
+
+
+def _stub_result(session_id: str) -> CompactionResult:
+    return CompactionResult(
+        session_id=session_id,
+        summary_message_id="",
+        level_used=0,
+        compacted_message_count=0,
+        summary_token_count=0,
+        tokens_before=0,
+        tokens_after=0,
+        elapsed_ms=0.0,
+    )
+
+
+async def _over_hard_session(tmp_path) -> MnesisSession:
+    """Reload a session whose real context exceeds the hard limit of a tight window."""
+    async with MnesisSession.open(model=MODEL, config=_cfg(tmp_path, small=False)) as s:
+        sid = s.id
+        for i in range(30):
+            await s.record(_big(i), _big(i))
+    return await MnesisSession.load(sid, config=_cfg(tmp_path))
+
+
+class TestHardLimitAfterInflightWait:
+    async def test_stale_inflight_run_is_followed_by_one_fresh_run(self, tmp_path):
+        """An in-flight run that leaves the context over hard does not let send() overflow."""
+        s = await _over_hard_session(tmp_path)
+        try:
+            engine = s._compaction_engine
+            real = engine.run_compaction
+            real_calls = 0
+
+            async def _counting(session_id: str, **kw):
+                nonlocal real_calls
+                real_calls += 1
+                return await real(session_id, **kw)
+
+            async def _noop() -> CompactionResult:
+                return _stub_result(s.id)  # snapshotted earlier: shrinks nothing
+
+            engine.run_compaction = _counting  # type: ignore[method-assign]
+            engine._pending_task = asyncio.create_task(_noop())
+            result = await s.send("continue")
+            after = await s._measure_context()
+        finally:
+            await s.close()
+
+        assert real_calls == 1
+        assert result.compaction_result is not None and result.compaction_result.level_used > 0
+        assert not engine.is_hard_overflow(after, s._model_info)
+
+    async def test_retry_is_bounded_when_compaction_cannot_shrink(self, tmp_path):
+        s = await _over_hard_session(tmp_path)
+        try:
+            engine = s._compaction_engine
+            runs = 0
+
+            async def _useless(session_id: str, **kw) -> CompactionResult:
+                nonlocal runs
+                runs += 1
+                return _stub_result(session_id)
+
+            engine.run_compaction = _useless  # type: ignore[method-assign]
+            engine._pending_task = asyncio.create_task(_useless(s.id))
+            result = await asyncio.wait_for(s.send("continue"), timeout=30)
+        finally:
+            await s.close()
+
+        assert result.finish_reason in ("stop", "end_turn")
+        # stale in-flight run + exactly one fresh blocking retry + the post-turn background
+        # soft trigger (the context stays over soft since nothing can shrink it).
+        assert runs == 3
+
+    async def test_finished_background_run_is_remeasured_before_blocking(self, tmp_path):
+        """If a background run already shrank the context, no fresh blocking run starts."""
+        s = await _over_hard_session(tmp_path)
+        try:
+            engine = s._compaction_engine
+            real = engine.run_compaction
+            real_calls = 0
+
+            async def _counting(session_id: str, **kw):
+                nonlocal real_calls
+                real_calls += 1
+                return await real(session_id, **kw)
+
+            engine.run_compaction = _counting  # type: ignore[method-assign]
+            # Background run lands between the send's first measurement and its check.
+            orig_build = s._context_builder.build
+            first = True
+
+            async def _build(*a, **k):
+                nonlocal first
+                ctx = await orig_build(*a, **k)
+                if first:
+                    first = False
+                    engine._pending_task = asyncio.create_task(engine.run_compaction(s.id))
+                    _ = await engine._pending_task  # swap committed after `ctx` was measured
+                return ctx
+
+            s._context_builder.build = _build  # type: ignore[method-assign]
+            result = await s.send("continue")
+        finally:
+            await s.close()
+
+        assert real_calls == 1  # only the background one
+        assert result.finish_reason in ("stop", "end_turn")
+
+
+class TestManualCompactionIsExclusive:
+    async def test_compact_waits_for_background_run(self, tmp_path):
+        async with MnesisSession.open(model=MODEL, config=_cfg(tmp_path)) as s:
+            engine = s._compaction_engine
+            active = 0
+            max_active = 0
+            order: list[str] = []
+            gate = asyncio.Event()
+
+            async def _fake(session_id: str, abort: object = None, **kw) -> CompactionResult:
+                nonlocal active, max_active
+                active += 1
+                max_active = max(max_active, active)
+                order.append("start")
+                if len(order) == 1:
+                    await gate.wait()
+                await asyncio.sleep(0)
+                active -= 1
+                order.append("end")
+                return _stub_result(session_id)
+
+            engine.run_compaction = _fake  # type: ignore[method-assign]
+            model = s._model_info
+            assert engine.check_and_trigger(s.id, model.context_limit, model) is True
+            manual = asyncio.create_task(s.compact())
+            await asyncio.sleep(0.05)
+            assert not manual.done()  # waiting for the background run
+            gate.set()
+            await manual
+
+        assert max_active == 1
+        assert order == ["start", "end", "start", "end"]

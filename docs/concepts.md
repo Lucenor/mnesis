@@ -27,7 +27,7 @@ Level 3 is the unconditional safety net. At the soft threshold, compaction runs 
 !!! info "Soft vs. hard threshold"
     Compaction has two thresholds: a **soft threshold** (default 60% of usable context, `soft_threshold_fraction`) that triggers background compaction without blocking the current turn, and a **hard threshold** (100%) that blocks `send()` until compaction completes. Both are configurable via `CompactionConfig`.
 
-    Both thresholds compare against the size of the **current context window** — the system prompt, live summaries, and raw messages the next LLM call would carry — not lifetime billed usage (`session.token_usage`, which only grows). Compaction shrinks the context immediately, so a compacted session stays quiet until it fills up again, including after `MnesisSession.load()`. At most one compaction is in flight per session.
+    Both thresholds compare against the size of the **current context window** — the system prompt, live summaries, and raw messages the next LLM call would carry — not lifetime billed usage (`session.token_usage`, which only grows). Compaction shrinks the context immediately and condenses summaries to leave headroom below the soft threshold, so a compaction buys many turns before the next one, including after `MnesisSession.load()`. At most one compaction is in flight per session (a manual `compact()` waits for a running background one first).
 
 ## Tool Output Pruning
 

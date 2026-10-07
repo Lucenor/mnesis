@@ -4,8 +4,9 @@ This engine implements the full Mnesis compaction flow:
 
 1. **Tool output pruning** — backward-scan and tombstone oversized tool outputs.
 2. **Summarisation** — level 1 → level 2 → level 3 escalation for raw messages.
-3. **Condensation** — if accumulated summary nodes still exceed the hard
-   threshold after summarisation, condense them (level 1 → 2 → 3).
+3. **Condensation** — if the context (live summaries included) is still at or
+   above half the soft threshold after summarisation, condense the summary nodes
+   (level 1 → 2 → 3).
 4. **Multi-round loop** — repeat steps 2-3 up to ``max_compaction_rounds``
    times until either the context fits or no progress is made.
 
@@ -19,7 +20,10 @@ Soft/hard threshold distinction:
 Both thresholds compare against the size of the **current context window**
 (system prompt + live summaries + raw messages that the next LLM call would
 carry), not lifetime billed tokens. The size shrinks as soon as compaction
-swaps messages for a summary, so a compacted session stops re-triggering.
+swaps messages for a summary. The engine's own "does it fit" check uses the
+same measure (see ``context_measure``) and condenses summaries until the
+context is below half the soft threshold, so a finished compaction leaves
+headroom below the trigger instead of hovering at it.
 
 File IDs are propagated through every compaction round; see
 :mod:`mnesis.compaction.file_ids` and :mod:`mnesis.compaction.levels`.
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -88,6 +93,11 @@ def _make_llm_call(model: str) -> Any:
     return _call
 
 
+# Condensation runs until the context is below this fraction of the soft
+# threshold (see ``_run_compaction_inner``).
+_CONDENSE_TARGET_FRACTION = 0.5
+
+
 class CompactionEngine:
     """
     Orchestrates the full compaction protocol (summarise → condense → loop).
@@ -111,7 +121,8 @@ class CompactionEngine:
     Both thresholds take the size of the *current context window* in tokens
     (see :attr:`mnesis.context.builder.BuiltContext.context_tokens`), never
     lifetime usage. At most one compaction is in flight per engine:
-    :meth:`check_and_trigger` is a no-op while a previous task is running.
+    :meth:`check_and_trigger` is a no-op while a previous task is running, and
+    :meth:`compact_exclusive` (manual compaction) waits for it first.
 
     Example::
 
@@ -132,6 +143,7 @@ class CompactionEngine:
         id_generator: Any = None,
         session_model: str | None = None,
         model_info: ModelInfo | None = None,
+        context_measure: Callable[[], Awaitable[int]] | None = None,
     ) -> None:
         self._store = store
         self._dag_store = dag_store
@@ -140,13 +152,23 @@ class CompactionEngine:
         self._config = config
         self._session_model = session_model
         # Session model limits (including ``model_overrides``). When given, the
-        # multi-round loop stops at the same hard threshold ``is_hard_overflow``
-        # uses; otherwise it falls back to a fixed 200K-window budget.
+        # multi-round loop stops below half the soft threshold that triggers
+        # compaction; otherwise it uses a fixed 200K-window hard budget.
         self._model_info = model_info
+        # Async callable returning the session's current context size (the
+        # ``BuiltContext.context_tokens`` the trigger uses). When set, the
+        # engine's stop condition and ``tokens_before``/``tokens_after`` use it
+        # so they cannot diverge from the trigger; otherwise they fall back to
+        # an estimator-based count of raw messages plus live summaries.
+        self._context_measure = context_measure
         self._pruner = ToolOutputPruner(store, token_estimator, config)
         self._id_gen = id_generator or _default_id_generator
         self._logger = structlog.get_logger("mnesis.compaction")
         self._pending_task: asyncio.Task[CompactionResult] | None = None
+
+    def set_context_measure(self, measure: Callable[[], Awaitable[int]] | None) -> None:
+        """Set the callable that returns the session's current context size."""
+        self._context_measure = measure
 
     # ── Threshold helpers ───────────────────────────────────────────────────────
 
@@ -295,6 +317,23 @@ class CompactionEngine:
         self._pending_task = None
         return result
 
+    async def compact_exclusive(self, session_id: str) -> CompactionResult:
+        """
+        Run a compaction as the tracked in-flight task, after any pending one.
+
+        Used for manual compaction so that it never overlaps a background run
+        (duplicate summaries / conflicting context-item swaps).
+        """
+        while self._pending_task is not None:
+            _ = await self.wait_for_pending()
+        task = asyncio.create_task(self.run_compaction(session_id))
+        self._pending_task = task
+        try:
+            return await task
+        finally:
+            if self._pending_task is task:
+                self._pending_task = None
+
     # ── Public compaction entry point ───────────────────────────────────────────
 
     async def run_compaction(
@@ -360,6 +399,9 @@ class CompactionEngine:
     ) -> CompactionResult:
         start_ms = time.time() * 1000
 
+        # Context size before this run, on the same basis as ``tokens_after``.
+        measured_before = await self._measure_session(session_id)
+
         # Step 1: Run pruner first to reduce input size
         prune_result = await self._pruner.prune(session_id)
         if prune_result.pruned_count > 0:
@@ -393,7 +435,10 @@ class CompactionEngine:
                 pruned_tokens=prune_result.pruned_tokens,
             )
 
-        tokens_before = sum(self._estimator.estimate_message(m) for m in non_summary)
+        raw_tokens = sum(self._estimator.estimate_message(m) for m in non_summary)
+        if measured_before is None:
+            prior_nodes = await self._dag_store.get_active_nodes(session_id)
+            measured_before = raw_tokens + sum(n.token_count for n in prior_nodes)
 
         # Determine compaction model: explicit override → config → session model
         compaction_model = (
@@ -467,19 +512,29 @@ class CompactionEngine:
         last_messages_covered = candidate.messages_covered
         last_summary_tokens = candidate.token_count
 
-        # Raw messages that stay in context after the leaf swap. The context
-        # after compaction is this tail plus every live summary node; the loop
-        # below stops once that fits the same hard limit ``is_hard_overflow``
-        # enforces, so "compaction finished" and "no longer overflowing" agree.
-        tail_tokens = tokens_before - sum(
+        # Raw messages that stay in context after the leaf swap. Older leaf
+        # summaries stay in context until condensed, so the context after
+        # compaction is the tail plus every live summary node (plus the system
+        # prompt, when ``context_measure`` is set). The loop below stops once
+        # that is below ``fit_limit``: a fraction of the soft threshold that
+        # triggers compaction. Stopping exactly at the soft threshold would leave
+        # the context hovering at the trigger and re-compact on nearly every
+        # turn once summaries accumulate; the headroom makes a compaction buy
+        # many turns.
+        tail_tokens = raw_tokens - sum(
             self._estimator.estimate_message(m) for m in non_summary[: span_end_idx + 1]
         )
-        tokens_after = tail_tokens + candidate.token_count
         fit_limit = (
-            self._usable_tokens(self._model_info)
+            int(
+                self._usable_tokens(self._model_info)
+                * self._config.compaction.soft_threshold_fraction
+                * _CONDENSE_TARGET_FRACTION
+            )
             if self._model_info is not None and self._model_info.context_limit > 0
             else budget.usable
         )
+        tokens_after = await self._measure(session_id, tail_tokens)
+        condensed_any = False
 
         # ── Condensation + multi-round loop ──────────────────────────────────────
         if self._config.compaction.condensation_enabled:
@@ -491,8 +546,8 @@ class CompactionEngine:
                 # Fetch all live summary nodes (older leaves stay in context
                 # until condensed, so they count towards the context size).
                 active_nodes = await self._dag_store.get_active_nodes(session_id)
-                tokens_after = tail_tokens + sum(n.token_count for n in active_nodes)
-                if tokens_after <= fit_limit:
+                tokens_after = await self._measure(session_id, tail_tokens)
+                if tokens_after < fit_limit:
                     break  # Under budget — done.
 
                 if len(active_nodes) < 2:
@@ -552,7 +607,7 @@ class CompactionEngine:
                 last_summary_msg_id = condensed_msg_id
                 last_summary_level = cond.compaction_level
                 last_summary_tokens = cond.token_count
-                tokens_after = max(0, tokens_after - tokens_before_condense + cond.token_count)
+                condensed_any = True
 
                 self._logger.info(
                     "condensation_round_completed",
@@ -561,7 +616,9 @@ class CompactionEngine:
                     tokens_after=tokens_after,
                 )
 
-        tokens_after = max(0, tokens_after)
+        if condensed_any:
+            tokens_after = await self._measure(session_id, tail_tokens)
+        tokens_before = measured_before
         elapsed_ms = time.time() * 1000 - start_ms
         result = CompactionResult(
             session_id=session_id,
@@ -588,6 +645,33 @@ class CompactionEngine:
 
         self._event_bus.publish(MnesisEvent.COMPACTION_COMPLETED, result.model_dump())
         return result
+
+    async def _measure_session(self, session_id: str) -> int | None:
+        """Return the session's current context size, or ``None`` if unavailable.
+
+        This is the builder's un-truncated context size (system prompt, live
+        summaries and raw messages, session-model estimator): the number the
+        soft/hard triggers compare.
+        """
+        if self._context_measure is None:
+            return None
+        try:
+            return await self._context_measure()
+        except Exception:
+            self._logger.warning("context_measure_failed", session_id=session_id, exc_info=True)
+            return None
+
+    async def _measure(self, session_id: str, tail_tokens: int) -> int:
+        """Return the context size after the leaf swap.
+
+        Uses :meth:`_measure_session` when available; otherwise ``tail_tokens``
+        plus the live summary nodes (estimator-based, no system prompt).
+        """
+        measured = await self._measure_session(session_id)
+        if measured is not None:
+            return measured
+        nodes = await self._dag_store.get_active_nodes(session_id)
+        return tail_tokens + sum(n.token_count for n in nodes)
 
     async def _run_summarisation(
         self,
