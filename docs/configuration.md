@@ -31,7 +31,7 @@ Controls when and how context compaction fires.
 | `compaction_model` | `None` | Model for summarisation. `None` = use session model |
 | `level2_enabled` | `True` | Attempt Level 2 compression before falling back to Level 3 |
 | `compaction_prompt` | `None` | Custom prompt string for Level 1/2 LLM summarisation. `None` = use the built-in agentic prompt |
-| `soft_threshold_fraction` | `0.6` | Fraction of usable context at which background compaction triggers (before hard threshold). Advanced. |
+| `soft_threshold_fraction` | `0.6` | Fraction of usable context at which background compaction triggers (before hard threshold). Measured against the size of the current context window, not lifetime token usage. Advanced. |
 | `max_compaction_rounds` | `10` | Cap on summarise+condense cycles in multi-round loop. Advanced. |
 | `condensation_enabled` | `True` | Whether to attempt condensation of accumulated summary nodes. Advanced. |
 

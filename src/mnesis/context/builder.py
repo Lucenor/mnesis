@@ -43,6 +43,22 @@ class BuiltContext:
     """Tokens consumed by raw (non-summary) messages included in context."""
     tool_output_tokens: int = 0
     """Subset of raw_message_tokens attributable to tool call parts."""
+    full_context_tokens: int | None = None
+    """Estimated size of the *un-truncated* current context: system prompt +
+    live summaries + every raw message currently in ``context_items``.
+
+    ``token_estimate`` is capped by the budget (messages that do not fit are
+    dropped from the window), so it can never exceed ``budget.usable``. This
+    field keeps counting past the cap and is therefore the quantity compaction
+    thresholds compare against. ``None`` is treated as ``token_estimate``.
+    """
+
+    @property
+    def context_tokens(self) -> int:
+        """Token size of the current context, used for compaction thresholds."""
+        if self.full_context_tokens is None:
+            return self.token_estimate
+        return self.full_context_tokens
 
 
 class ContextBuilder:
@@ -130,10 +146,14 @@ class ContextBuilder:
             # Treat all non-summary messages as the context snapshot, newest→oldest.
             includable_fb: list[MessageWithParts] = []
             tokens_used_fb = 0
+            total_fb = 0
+            truncated_fb = False
             for msg_with_parts in reversed(non_summary_fallback):
                 msg_tokens = self._estimator.estimate_message(msg_with_parts, model)
-                if tokens_used_fb + msg_tokens > available:
-                    break
+                total_fb += msg_tokens
+                if truncated_fb or tokens_used_fb + msg_tokens > available:
+                    truncated_fb = True
+                    continue
                 includable_fb.append(msg_with_parts)
                 tokens_used_fb += msg_tokens
             includable_fb.reverse()
@@ -161,6 +181,7 @@ class ContextBuilder:
                 summary_token_count=0,
                 raw_message_tokens=tokens_used_fb,
                 tool_output_tokens=tool_output_tokens_fb,
+                full_context_tokens=system_tokens + total_fb,
             )
 
         # Step 3: Separate summaries from messages and compute summary tokens
@@ -202,17 +223,24 @@ class ContextBuilder:
                 )
 
         # Walk newest→oldest, include as many messages as fit.
+        # Keep estimating past the cut-off so ``full_context_tokens`` reports
+        # the true (un-truncated) context size for threshold checks.
         includable: list[MessageWithParts] = []
         tokens_used = 0
+        total_raw = 0
+        truncated = False
         for msg_with_parts in reversed(candidate_messages):
             msg_tokens = self._estimator.estimate_message(msg_with_parts, model)
-            if tokens_used + msg_tokens > available:
-                self._logger.debug(
-                    "context_budget_reached",
-                    session_id=session_id,
-                    excluded_count=len(candidate_messages) - len(includable),
-                )
-                break
+            total_raw += msg_tokens
+            if truncated or tokens_used + msg_tokens > available:
+                if not truncated:
+                    self._logger.debug(
+                        "context_budget_reached",
+                        session_id=session_id,
+                        excluded_count=len(candidate_messages) - len(includable),
+                    )
+                truncated = True
+                continue
             includable.append(msg_with_parts)
             tokens_used += msg_tokens
 
@@ -269,6 +297,7 @@ class ContextBuilder:
             summary_token_count=summary_token_count,
             raw_message_tokens=tokens_used,
             tool_output_tokens=tool_output_tokens,
+            full_context_tokens=system_tokens + summary_token_count + total_raw,
         )
 
     def _convert_message(self, msg_with_parts: MessageWithParts) -> LLMMessage:

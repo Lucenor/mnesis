@@ -945,28 +945,24 @@ class TestSessionHistory:
         assert "assistant" in roles
 
     async def test_stream_compaction_triggered_when_threshold_crossed(self, tmp_path, mock_llm_env):
-        """stream() triggers compaction if cumulative tokens exceed the overflow threshold.
+        """stream() triggers compaction if the current context exceeds the soft threshold.
 
-        We pre-load the session's cumulative token counter to just below the
-        context limit so the post-turn overflow check in send() fires and the
-        TurnComplete event carries compaction_triggered=True.
+        The context window is shrunk (``model_overrides``) so one large message
+        puts the *current context* past the soft threshold; lifetime usage is
+        deliberately not what drives the decision (see test_compaction_overflow).
         """
-        from mnesis import MnesisSession, TokenUsage
+        from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import CompactionConfig, StoreConfig
 
+        cfg = MnesisConfig(
+            store=StoreConfig(db_path=str(tmp_path / "test.db")),
+            compaction=CompactionConfig(compaction_output_budget=2000),
+            model_overrides={"context_limit": 12000, "max_output_tokens": 1000},
+        )
         turn_complete_result = None
 
-        async with MnesisSession.open(
-            model="anthropic/claude-opus-4-6",
-            db_path=str(tmp_path / "test.db"),
-        ) as session:
-            # Pre-load cumulative tokens so even a small mock response tips
-            # the overflow check inside send().
-            context_limit = session._model_info.context_limit
-            session._cumulative_tokens = TokenUsage(
-                input=context_limit, output=0, total=context_limit
-            )
-
-            async for event in session.stream("Trigger compaction."):
+        async with MnesisSession.open(model="anthropic/claude-opus-4-6", config=cfg) as session:
+            async for event in session.stream("lorem ipsum " * 2000):
                 if event.type == "turn_complete":
                     turn_complete_result = event.result
 

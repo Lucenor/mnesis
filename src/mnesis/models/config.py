@@ -75,7 +75,8 @@ class CompactionConfig(BaseModel):
         le=0.95,
         description=(
             "[Advanced] Fraction of the usable context window at which background compaction is "
-            "triggered early (soft threshold). Must be less than 1.0 so compaction "
+            "triggered early (soft threshold), measured against the current context window "
+            "size (not lifetime token usage). Must be less than 1.0 so compaction "
             "starts before the hard limit is reached."
         ),
     )
