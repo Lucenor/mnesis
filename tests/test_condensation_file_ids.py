@@ -748,18 +748,23 @@ class TestMultiRoundNoProgressGuard:
     async def test_no_progress_guard_breaks_loop(
         self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
     ):
-        """Condensation loop breaks when token count doesn't decrease."""
-        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        """With >= 2 live summaries, a condensation that does not shrink breaks the loop."""
+        import json
 
+        from mnesis.compaction.levels import CondensationCandidate
         from mnesis.models.config import CompactionConfig, StoreConfig
 
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
         cfg = MnesisConfig(
             compaction=CompactionConfig(
                 condensation_enabled=True,
                 max_compaction_rounds=5,
+                compaction_output_budget=1000,
             ),
             store=StoreConfig(db_path=config_db_path(store)),
         )
+        # usable 2500 -> condensation target 750 tokens, which the tail alone exceeds.
+        model_info = ModelInfo(model_id="m", context_limit=4_000, max_output_tokens=500)
         engine = CompactionEngine(
             store,
             dag_store,
@@ -767,27 +772,30 @@ class TestMultiRoundNoProgressGuard:
             event_bus,
             cfg,
             session_model="anthropic/claude-haiku-4-5",
+            model_info=model_info,
         )
 
-        for i in range(6):
-            msg = make_message(
-                session_id,
-                role="user" if i % 2 == 0 else "assistant",
-                msg_id=f"msg_np_{i:03d}",
-            )
-            await store.append_message(msg)
-            part = make_raw_part(msg.id, session_id, part_id=f"part_np_{i:03d}")
-            await store.append_part(part)
-
-        # Patch _run_condensation to return a candidate with same or higher token count
-        # than input — simulates no-progress scenario.
-        from mnesis.compaction.levels import CondensationCandidate
+        async def add_messages(start: int, count: int) -> None:
+            for i in range(start, start + count):
+                msg = make_message(
+                    session_id,
+                    role="user" if i % 2 == 0 else "assistant",
+                    msg_id=f"msg_np_{i:03d}",
+                )
+                await store.append_message(msg)
+                await store.append_part(
+                    make_raw_part(
+                        msg.id,
+                        session_id,
+                        content=json.dumps({"type": "text", "text": "word " * 600}),
+                        part_id=f"part_np_{i:03d}",
+                    )
+                )
 
         condensation_calls = [0]
 
         async def no_progress_condense(nodes, *args, **kwargs):  # type: ignore[no-untyped-def]
             condensation_calls[0] += 1
-            # Return a token count equal to input — no progress.
             tokens_in = sum(n.token_count for n in nodes)
             return CondensationCandidate(
                 text="same size",
@@ -798,22 +806,18 @@ class TestMultiRoundNoProgressGuard:
 
         engine._run_condensation = no_progress_condense  # type: ignore[method-assign]
 
-        # Make tokens_after appear over budget so condensation loop is entered.
-        original_estimate_msg = estimator.estimate_message
+        await add_messages(0, 6)
+        first = await engine.run_compaction(session_id)
+        assert first.level_used > 0
+        assert condensation_calls[0] == 0  # a single live summary: nothing to condense
+        await add_messages(6, 6)
+        second = await engine.run_compaction(session_id)
 
-        def inflated_estimate_msg(msg):  # type: ignore[no-untyped-def]
-            return original_estimate_msg(msg) + 50_000
-
-        estimator.estimate_message = inflated_estimate_msg  # type: ignore[method-assign]
-        try:
-            result = await engine.run_compaction(session_id)
-        finally:
-            estimator.estimate_message = original_estimate_msg  # type: ignore[method-assign]
-
-        # run_compaction must complete without error.
-        assert result.session_id == session_id
-        # No-progress guard fires: condensation should be called at most once per round.
-        assert condensation_calls[0] <= cfg.compaction.max_compaction_rounds
+        assert second.level_used > 0
+        assert len(await dag_store.get_active_nodes(session_id)) >= 2
+        # Entered the loop, hit the guard on the first round, did not retry.
+        assert condensation_calls[0] == 1
+        assert len(dag_store._superseded_ids) == 0
 
 
 # ── Hard overflow triggers compaction when no pending task ────────────────────

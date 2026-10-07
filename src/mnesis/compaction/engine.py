@@ -22,8 +22,9 @@ Both thresholds compare against the size of the **current context window**
 carry), not lifetime billed tokens. The size shrinks as soon as compaction
 swaps messages for a summary. The engine's own "does it fit" check uses the
 same measure (see ``context_measure``) and condenses summaries until the
-context is below half the soft threshold, so a finished compaction leaves
-headroom below the trigger instead of hovering at it.
+context is below half the soft threshold, which makes compactions rarer than
+stopping at the trigger (not guaranteed when the system prompt and recent turns
+alone exceed that target).
 
 File IDs are propagated through every compaction round; see
 :mod:`mnesis.compaction.file_ids` and :mod:`mnesis.compaction.levels`.
@@ -143,7 +144,7 @@ class CompactionEngine:
         id_generator: Any = None,
         session_model: str | None = None,
         model_info: ModelInfo | None = None,
-        context_measure: Callable[[], Awaitable[int]] | None = None,
+        context_measure: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self._store = store
         self._dag_store = dag_store
@@ -155,7 +156,7 @@ class CompactionEngine:
         # multi-round loop stops below half the soft threshold that triggers
         # compaction; otherwise it uses a fixed 200K-window hard budget.
         self._model_info = model_info
-        # Async callable returning the session's current context size (the
+        # Async callable ``(session_id) -> int`` returning the session's current context size (the
         # ``BuiltContext.context_tokens`` the trigger uses). When set, the
         # engine's stop condition and ``tokens_before``/``tokens_after`` use it
         # so they cannot diverge from the trigger; otherwise they fall back to
@@ -166,7 +167,7 @@ class CompactionEngine:
         self._logger = structlog.get_logger("mnesis.compaction")
         self._pending_task: asyncio.Task[CompactionResult] | None = None
 
-    def set_context_measure(self, measure: Callable[[], Awaitable[int]] | None) -> None:
+    def set_context_measure(self, measure: Callable[[str], Awaitable[int]] | None) -> None:
         """Set the callable that returns the session's current context size."""
         self._context_measure = measure
 
@@ -314,8 +315,21 @@ class CompactionEngine:
                 self._logger.exception("background_compaction_failed", error=str(exc))
         elif task is not None and not task.cancelled() and task.exception() is None:
             result = task.result()
-        self._pending_task = None
+        # A newer run may have replaced the one awaited here; never drop its handle.
+        if self._pending_task is task:
+            self._pending_task = None
         return result
+
+    @property
+    def in_flight(self) -> bool:
+        """``True`` while a compaction task (background or manual) is running."""
+        task = self._pending_task
+        return task is not None and not task.done()
+
+    @property
+    def has_pending(self) -> bool:
+        """``True`` if a task handle is held, running or finished but not yet reaped."""
+        return self._pending_task is not None
 
     async def compact_exclusive(self, session_id: str) -> CompactionResult:
         """
@@ -435,7 +449,16 @@ class CompactionEngine:
                 pruned_tokens=prune_result.pruned_tokens,
             )
 
-        raw_tokens = sum(self._estimator.estimate_message(m) for m in non_summary)
+        # Raw messages still in the context (the store also holds messages that
+        # earlier compactions already replaced). Legacy databases without
+        # ``context_items`` rows count every message.
+        in_context_ids = {
+            item_id
+            for item_type, item_id in await self._store.get_context_items(session_id)
+            if item_type != "summary"
+        }
+        in_context = [m for m in non_summary if m.id in in_context_ids] or non_summary
+        raw_tokens = sum(self._estimator.estimate_message(m) for m in in_context)
         if measured_before is None:
             prior_nodes = await self._dag_store.get_active_nodes(session_id)
             measured_before = raw_tokens + sum(n.token_count for n in prior_nodes)
@@ -519,10 +542,10 @@ class CompactionEngine:
         # that is below ``fit_limit``: a fraction of the soft threshold that
         # triggers compaction. Stopping exactly at the soft threshold would leave
         # the context hovering at the trigger and re-compact on nearly every
-        # turn once summaries accumulate; the headroom makes a compaction buy
-        # many turns.
-        tail_tokens = raw_tokens - sum(
-            self._estimator.estimate_message(m) for m in non_summary[: span_end_idx + 1]
+        # turn once summaries accumulate.
+        compacted_set = set(compacted_ids)
+        tail_tokens = sum(
+            self._estimator.estimate_message(m) for m in in_context if m.id not in compacted_set
         )
         fit_limit = (
             int(
@@ -534,7 +557,6 @@ class CompactionEngine:
             else budget.usable
         )
         tokens_after = await self._measure(session_id, tail_tokens)
-        condensed_any = False
 
         # ── Condensation + multi-round loop ──────────────────────────────────────
         if self._config.compaction.condensation_enabled:
@@ -545,8 +567,9 @@ class CompactionEngine:
 
                 # Fetch all live summary nodes (older leaves stay in context
                 # until condensed, so they count towards the context size).
+                # ``tokens_after`` is fresh here: measured after the leaf swap
+                # (round 0) or after the previous round's condensation.
                 active_nodes = await self._dag_store.get_active_nodes(session_id)
-                tokens_after = await self._measure(session_id, tail_tokens)
                 if tokens_after < fit_limit:
                     break  # Under budget — done.
 
@@ -607,7 +630,7 @@ class CompactionEngine:
                 last_summary_msg_id = condensed_msg_id
                 last_summary_level = cond.compaction_level
                 last_summary_tokens = cond.token_count
-                condensed_any = True
+                tokens_after = await self._measure(session_id, tail_tokens)
 
                 self._logger.info(
                     "condensation_round_completed",
@@ -616,8 +639,6 @@ class CompactionEngine:
                     tokens_after=tokens_after,
                 )
 
-        if condensed_any:
-            tokens_after = await self._measure(session_id, tail_tokens)
         tokens_before = measured_before
         elapsed_ms = time.time() * 1000 - start_ms
         result = CompactionResult(
@@ -656,7 +677,7 @@ class CompactionEngine:
         if self._context_measure is None:
             return None
         try:
-            return await self._context_measure()
+            return await self._context_measure(session_id)
         except Exception:
             self._logger.warning("context_measure_failed", session_id=session_id, exc_info=True)
             return None

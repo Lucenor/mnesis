@@ -86,8 +86,9 @@ class CompactionConfig(BaseModel):
         ge=1,
         le=50,
         description=(
-            "[Advanced] Maximum number of summarise + condense cycles to run when the context "
-            "is still over the hard threshold after an initial compaction pass."
+            "[Advanced] Upper bound on condensation rounds per compaction run. Each round merges "
+            "all live summary nodes into one, so a run condenses at most once in practice "
+            "and this limit is effectively never reached."
         ),
     )
 

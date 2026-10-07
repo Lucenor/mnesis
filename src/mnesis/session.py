@@ -1222,9 +1222,8 @@ class MnesisSession:
 
     @property
     def compaction_in_progress(self) -> bool:
-        """``True`` while a background compaction task is running."""
-        task = self._compaction_engine._pending_task
-        return task is not None and not task.done()
+        """``True`` while a compaction task is running (background or manual ``compact()``)."""
+        return self._compaction_engine.in_flight
 
     @property
     def event_bus(self) -> EventBus:
@@ -1274,10 +1273,16 @@ class MnesisSession:
         """
         return list(self._turn_snapshots)
 
-    async def _measure_context(self) -> int:
-        """Current context size (the measure the soft/hard triggers compare)."""
+    async def _measure_context(self, session_id: str) -> int:
+        """Current context size (the measure the soft/hard triggers compare).
+
+        Uses the session's configured system prompt. ``send()`` may be called
+        with a per-turn ``system_prompt`` override that the hard check counts
+        instead, so the two can differ by the prompt-size delta; the single
+        bounded retry in :meth:`_ensure_under_hard_limit` covers that.
+        """
         context = await self._context_builder.build(
-            self._session_id, self._model_info, self._system_prompt, self._config
+            session_id, self._model_info, self._system_prompt, self._config
         )
         return context.context_tokens
 
@@ -1306,13 +1311,19 @@ class MnesisSession:
         result: CompactionResult | None = None
         if not engine.is_hard_overflow(context.context_tokens, self._model_info):
             return context, result
-        had_pending = engine._pending_task is not None
+        had_pending = engine.has_pending
         result = await engine.wait_for_pending()
         if had_pending:
             context = await rebuild()
             if not engine.is_hard_overflow(context.context_tokens, self._model_info):
                 return context, result
-        if engine.check_and_trigger(self._session_id, context.context_tokens, self._model_info):
+        # Also wait for a run another caller (e.g. a concurrent ``compact()``)
+        # started meanwhile, so ``check_and_trigger`` returning False because one
+        # is in flight does not let an over-hard context through.
+        if (
+            engine.check_and_trigger(self._session_id, context.context_tokens, self._model_info)
+            or engine.in_flight
+        ):
             result = await engine.wait_for_pending() or result
             context = await rebuild()
         return context, result
@@ -1323,8 +1334,8 @@ class MnesisSession:
         Thresholds are evaluated against the size of the context window the
         next LLM call would carry (system prompt + live summaries + raw
         messages, un-truncated), not lifetime usage. Compaction shrinks that
-        size immediately (the engine measures it the same way and compacts down
-        to the soft threshold).
+        size immediately (the engine measures it the same way and condenses
+        summaries down to half the soft threshold).
 
         The context built for the measurement is returned so the caller can
         reuse it for the turn snapshot instead of assembling it twice.

@@ -381,7 +381,9 @@ class TestLongRunSteadyState:
     @pytest.mark.parametrize("sys_tokens", [0, 900])
     async def test_long_run_no_compaction_streaks_no_blocking(self, tmp_path, sys_tokens):
         """100 turns with a non-trivial system prompt: no compaction streaks, never blocks."""
-        system_prompt = "You are helpful. " * (sys_tokens // 18) or "You are a helpful assistant."
+        system_prompt = (
+            "You are helpful. " * (sys_tokens * 3 // 17) or "You are a helpful assistant."
+        )
         async with MnesisSession.open(
             model=MODEL, config=_cfg(tmp_path), system_prompt=system_prompt
         ) as s:
@@ -403,9 +405,9 @@ class TestEngineAgreesWithBuilder:
         async with MnesisSession.open(model=model, config=cfg, system_prompt="Rules. " * 1500) as s:
             for i in range(12):
                 await s.record(f"turn {i} " + "lorem ipsum dolor sit amet " * 100, "reply " * 200)
-            builder_before = await s._measure_context()
+            builder_before = await s._measure_context(s.id)
             result = await s.compact()
-            builder_after = await s._measure_context()
+            builder_after = await s._measure_context(s.id)
 
         assert result.tokens_before == builder_before
         assert result.tokens_after == builder_after
@@ -483,7 +485,7 @@ class TestHardLimitAfterInflightWait:
             engine.run_compaction = _counting  # type: ignore[method-assign]
             engine._pending_task = asyncio.create_task(_noop())
             result = await s.send("continue")
-            after = await s._measure_context()
+            after = await s._measure_context(s.id)
         finally:
             await s.close()
 
@@ -581,3 +583,183 @@ class TestManualCompactionIsExclusive:
 
         assert max_active == 1
         assert order == ["start", "end", "start", "end"]
+
+
+class TestConcurrentSendAndCompact:
+    @pytest.mark.parametrize("compact_delay", [0, 0.001, 0.01, 0.05])
+    async def test_send_and_compact_never_overlap(self, tmp_path, compact_delay):
+        """compact() racing a send() that waits on a stale run: one run at a time."""
+        s = await _over_hard_session(tmp_path)
+        try:
+            engine = s._compaction_engine
+            usable = engine._usable_tokens(s._model_info)
+            real = engine.run_compaction
+            active = peak = 0
+
+            async def _counting(session_id: str, **kw):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    return await real(session_id, **kw)
+                finally:
+                    active -= 1
+
+            async def _stale() -> CompactionResult:
+                await asyncio.sleep(0.1)
+                return _stub_result(s.id)  # snapshotted earlier: shrinks nothing
+
+            engine.run_compaction = _counting  # type: ignore[method-assign]
+            engine._pending_task = asyncio.create_task(_stale())
+            sent: list[int] = []
+            orig = s._ensure_under_hard_limit
+
+            async def _spy(ctx, sys_prompt):
+                out = await orig(ctx, sys_prompt)
+                sent.append(out[0].context_tokens)
+                return out
+
+            s._ensure_under_hard_limit = _spy  # type: ignore[method-assign]
+            send_task = asyncio.create_task(s.send("continue"))
+            await asyncio.sleep(compact_delay)
+            compact_task = asyncio.create_task(s.compact())
+            _ = await asyncio.wait_for(send_task, 30)
+            _ = await asyncio.wait_for(compact_task, 30)
+            _ = await engine.wait_for_pending()
+
+            items = await s._store.get_context_items(s.id)
+            in_context = {item_id for kind, item_id in items if kind == "summary"}
+            live = {n.id for n in await s._dag_store.get_active_nodes(s.id)}
+        finally:
+            await s.close()
+
+        assert peak == 1
+        assert live <= in_context, "orphaned live summary node"
+        assert sent and all(tokens < usable for tokens in sent), sent
+
+
+class TestEngineMeasureAndTarget:
+    def _cfg(self, store) -> MnesisConfig:
+        return MnesisConfig(
+            store=StoreConfig(db_path=str(store._config.db_path)),
+            compaction=CompactionConfig(compaction_output_budget=1000),
+        )
+
+    async def _seed(self, store, session_id, n=8, words=600):
+        for i in range(n):
+            await store.append_message(
+                make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"m{i}")
+            )
+            await store.append_part(
+                make_raw_part(
+                    f"m{i}",
+                    session_id,
+                    content=json.dumps({"type": "text", "text": "word " * words}),
+                    part_id=f"p{i}",
+                )
+            )
+
+    async def test_failing_measure_falls_back_to_estimator(
+        self, estimator, event_bus, store, dag_store, session_id
+    ):
+        async def _boom(session_id: str) -> int:
+            raise RuntimeError("measure failed")
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            self._cfg(store),
+            id_generator=lambda p: f"{p}_{uuid.uuid4().hex[:8]}",
+            session_model=MODEL,
+            context_measure=_boom,
+        )
+        await self._seed(store, session_id)
+        result = await engine.run_compaction(session_id)
+        assert result.level_used > 0
+        assert 0 < result.tokens_after < result.tokens_before
+
+    async def test_fallback_tokens_before_counts_only_in_context_messages(
+        self, estimator, event_bus, store, dag_store, session_id
+    ):
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            self._cfg(store),
+            id_generator=lambda p: f"{p}_{uuid.uuid4().hex[:8]}",
+            session_model=MODEL,
+        )
+        await self._seed(store, session_id)
+        first = await engine.run_compaction(session_id)
+        await self._seed_more(store, session_id)
+        context_ids = {i for k, i in await store.get_context_items(session_id) if k != "summary"}
+        nodes = await dag_store.get_active_nodes(session_id)
+        msgs = await store.get_messages_with_parts(session_id)
+        expected = sum(
+            estimator.estimate_message(m) for m in msgs if not m.is_summary and m.id in context_ids
+        ) + sum(n.token_count for n in nodes)
+        second = await engine.run_compaction(session_id)
+
+        assert first.level_used > 0
+        assert second.tokens_before == expected
+
+    async def _seed_more(self, store, session_id):
+        for i in range(8, 12):
+            await store.append_message(
+                make_message(session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"m{i}")
+            )
+            await store.append_part(
+                make_raw_part(
+                    f"m{i}",
+                    session_id,
+                    content=json.dumps({"type": "text", "text": "word " * 600}),
+                    part_id=f"p{i}",
+                )
+            )
+
+    @pytest.mark.parametrize(("measure_value", "condenses"), [(749, False), (750, True)])
+    async def test_condensation_target_is_half_the_soft_threshold(
+        self, estimator, event_bus, store, dag_store, session_id, measure_value, condenses
+    ):
+        """usable 2500 * soft 0.6 * 0.5 = 750: a measure below it stops, at it condenses."""
+        from mnesis.compaction.levels import CondensationCandidate
+
+        model_info = ModelInfo(model_id="m", context_limit=4_000, max_output_tokens=500)
+        calls = 0
+
+        async def _measure(session_id: str) -> int:
+            return measure_value
+
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            self._cfg(store),  # compaction_output_budget=1000 -> usable 2500
+            id_generator=lambda p: f"{p}_{uuid.uuid4().hex[:8]}",
+            session_model=MODEL,
+            model_info=model_info,
+            context_measure=_measure,
+        )
+        await self._seed(store, session_id)
+        _ = await engine.run_compaction(session_id)  # first leaf
+        await self._seed_more(store, session_id)
+
+        async def _no_progress(nodes, *a, **k):
+            nonlocal calls
+            calls += 1
+            tokens = sum(n.token_count for n in nodes)
+            return CondensationCandidate(
+                text="same",
+                token_count=tokens,
+                parent_node_ids=[n.id for n in nodes],
+                compaction_level=1,
+            )
+
+        engine._run_condensation = _no_progress  # type: ignore[method-assign]
+        _ = await engine.run_compaction(session_id)
+        assert len(await dag_store.get_active_nodes(session_id)) >= 2
+        assert calls == (1 if condenses else 0)

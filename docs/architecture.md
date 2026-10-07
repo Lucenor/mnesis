@@ -386,14 +386,19 @@ The multi-round loop in `_run_compaction_inner()` uses the same yardstick.
 The session hands the engine a measurement callback (`context_measure`) that
 builds the context with the session's model, estimator and system prompt, so the
 engine's "does it fit" check, `tokens_before` and `tokens_after` are exactly the
-numbers the trigger compares. Condensation runs until that measure is below half
-of the soft threshold (`usable * soft_threshold_fraction / 2`, `usable` derived
-from the session's `ModelInfo` including `model_overrides`). Stopping exactly at
-the soft threshold would leave the context hovering at the trigger and
-re-compact on nearly every turn once leaf summaries accumulate; the headroom
-makes each compaction buy many turns. If no callback is given (a bare
-`CompactionEngine`), the engine falls back to an estimator-based count of the raw
-tail plus live summaries, stopping at the fixed hard budget.
+numbers the trigger compares. When the engine knows the session's `ModelInfo`
+(including `model_overrides`), condensation runs until that measure is below half
+of the soft threshold (`usable * soft_threshold_fraction * 0.5`; the 0.5 is a
+private constant, not configuration). Stopping exactly at the soft threshold
+left the context hovering at the trigger and re-compacted on nearly every turn
+once leaf summaries accumulated; the lower target makes compactions rarer in
+practice. It is not a guarantee: when the system prompt, the most recent turns and
+a single summary already exceed the target, every compaction condenses and the
+target is never reached. Each run merges all live summary nodes into one, so a
+run condenses at most once and `max_compaction_rounds` is effectively never
+reached. Without a `ModelInfo` the stop target is the fixed 200K-window hard
+budget; without the callback the measure falls back to an estimator-based count
+of the raw tail plus live summaries (no system prompt).
 
 ### `run_compaction()` sequence
 
