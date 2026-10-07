@@ -609,7 +609,9 @@ class CompactionEngine:
                 model_id=compaction_model,
                 compaction_level=candidate.compaction_level,
             )
-            await self._dag_store.insert_node(leaf_node, id_generator=lambda: self._id_gen("part"))
+            _ = await self._dag_store.insert_node(
+                leaf_node, id_generator=lambda: self._id_gen("part")
+            )
 
             # Atomic context swap: remove compacted messages, insert summary item.
             # The span is exactly what the summary covers (see ``SummaryCandidate``).

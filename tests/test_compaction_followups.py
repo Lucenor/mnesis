@@ -20,7 +20,6 @@ import pytest
 
 import mnesis.compaction.engine as engine_mod
 from mnesis import MnesisConfig, MnesisSession
-from mnesis.compaction.engine import CompactionEngine
 from mnesis.compaction.file_ids import (
     extract_file_ids,
     extract_file_ids_from_messages,
@@ -190,7 +189,7 @@ class TestCappedSpanMatchesSummarisedInput:
             model=MODEL, config=_cfg(tmp_path, auto=False, condensation_enabled=False)
         ) as s:
             for i in range(n):
-                await s.record(_turn(i), "reply " + "lorem ipsum " * 60)
+                _ = await s.record(_turn(i), "reply " + "lorem ipsum " * 60)
             result = await s.compact()
             raw = await _raw_user_turns(s)
         summarised = set().union(*seen) if seen else set()
@@ -213,11 +212,11 @@ class TestSummariseOnlyWhatIsInContext:
         )
         async with MnesisSession.open(model=MODEL, config=cfg) as s:
             for i in range(6):
-                await s.record(_turn(i, 20), _turn(i, 20))
-            await s.compact()
+                _ = await s.record(_turn(i, 20), _turn(i, 20))
+            _ = await s.compact()
             for i in range(6, 12):
-                await s.record(_turn(i, 20), _turn(i, 20))
-            await s.compact()
+                _ = await s.record(_turn(i, 20), _turn(i, 20))
+            _ = await s.compact()
             msgs = await s._store.get_messages_with_parts(s.id)
             order = {m.id: i for i, m in enumerate(m for m in msgs if not m.is_summary)}
             nodes = sorted(
@@ -232,7 +231,7 @@ class TestSummariseOnlyWhatIsInContext:
     async def test_repeat_compact_with_only_protected_tail_is_a_no_op(self, tmp_path):
         async with MnesisSession.open(model=MODEL, config=_cfg(tmp_path, auto=False)) as s:
             for i in range(8):
-                await s.record(_turn(i), _turn(i))
+                _ = await s.record(_turn(i), _turn(i))
             first = await s.compact()
             assert first.level_used > 0
             before = await s._store.get_context_items(s.id)
@@ -248,8 +247,8 @@ class TestSummariseOnlyWhatIsInContext:
         sid = "sess_onlysum"
         await store.create_session(sid, model_id=MODEL, agent="t")
         for i in range(2):
-            await store.append_message(make_message(sid, role="user", msg_id=f"u{i}"))
-            await store.append_part(
+            _ = await store.append_message(make_message(sid, role="user", msg_id=f"u{i}"))
+            _ = await store.append_part(
                 make_raw_part(
                     f"u{i}",
                     sid,
@@ -258,7 +257,7 @@ class TestSummariseOnlyWhatIsInContext:
                 )
             )
         await store.swap_context_items(sid, ["u0", "u1"], "sum_x")
-        engine = CompactionEngine(
+        engine = engine_mod.CompactionEngine(
             store,
             dag_store,
             TokenEstimator(),
@@ -277,7 +276,7 @@ class TestSummariseOnlyWhatIsInContext:
         seen = _capture_llm(monkeypatch)
         async with MnesisSession.open(model=MODEL, config=_cfg(tmp_path, auto=False)) as s:
             for i in range(6):
-                await s.record(_turn(i, 20), _turn(i, 20))
+                _ = await s.record(_turn(i, 20), _turn(i, 20))
             conn = s._store._conn_or_raise()
             _ = await conn.execute("DELETE FROM context_items")
             await conn.commit()
@@ -307,7 +306,7 @@ class TestSummariseOnlyWhatIsInContext:
             model=MODEL, config=_cfg(tmp_path, auto=False, condensation_enabled=False)
         ) as s:
             for i in range(40):
-                await s.record(_turn(i), "reply " + "lorem ipsum " * 60)
+                _ = await s.record(_turn(i), "reply " + "lorem ipsum " * 60)
             result = await s.compact()
             raw = await _raw_user_turns(s)
         assert result.level_used == 1
@@ -319,7 +318,7 @@ class TestSummariseOnlyWhatIsInContext:
 
 class TestModelAwareBudget:
     async def _engine(self, store, dag_store, event_bus, info, cfg=None):
-        return CompactionEngine(
+        return engine_mod.CompactionEngine(
             store,
             dag_store,
             TokenEstimator(),
@@ -338,7 +337,7 @@ class TestModelAwareBudget:
         assert engine._summary_budget().usable == 5_000  # 8000 - 1000 - 2000
 
     async def test_bare_engine_and_unknown_window_fall_back(self, store, dag_store, event_bus):
-        bare = CompactionEngine(
+        bare = engine_mod.CompactionEngine(
             store, dag_store, TokenEstimator(), event_bus, MnesisConfig(), session_model=MODEL
         )
         assert bare._summary_budget().usable == 200_000 - 8_192 - 20_000
@@ -354,7 +353,7 @@ class TestModelAwareBudget:
         cfg = _cfg(tmp_path, window=8_000, out=1_000, budget=2_000, auto=False)
         async with MnesisSession.open(model=MODEL, config=cfg) as s:
             for i in range(30):
-                await s.record(_turn(i, 60), _turn(i, 60))
+                _ = await s.record(_turn(i, 60), _turn(i, 60))
             result = await s.compact()
             usable = s._compaction_engine._usable_tokens(s._model_info)
             ctx = await s._context_builder.build(s.id, s._model_info, s._system_prompt, s._config)
@@ -367,8 +366,8 @@ class TestModelAwareBudget:
         cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "e.db")))
         async with MnesisSession.open(model=model, config=cfg) as s:
             for i in range(6):
-                await s.record(_turn(i, 40), _turn(i, 40))
-            await s.compact()
+                _ = await s.record(_turn(i, 40), _turn(i, 40))
+            _ = await s.compact()
             nodes = await s._dag_store.get_active_nodes(s.id)
             ctx = await s._context_builder.build(s.id, s._model_info, s._system_prompt, s._config)
             expect = s._estimator.estimate(nodes[0].content, s._model_info)
@@ -689,7 +688,7 @@ class TestFileIdExtractionIsRaw:
             prune_minimum_tokens=10,
         )
         async with MnesisSession.open(model=MODEL, config=cfg) as s:
-            await s.record(
+            _ = await s.record(
                 "turn 0 start",
                 [
                     ToolPart(
@@ -702,7 +701,7 @@ class TestFileIdExtractionIsRaw:
                 ],
             )
             for i in range(1, 8):
-                await s.record(_turn(i, 40), _turn(i, 40))
+                _ = await s.record(_turn(i, 40), _turn(i, 40))
             result = await s.compact()
             msgs = await s._store.get_messages_with_parts(s.id)
             tool = next(p for m in msgs for p in m.parts if isinstance(p, ToolPart))
@@ -732,9 +731,9 @@ class TestStalledCompaction:
         monkeypatch.setattr(engine_mod, "_make_llm_call", mk)
         s = await MnesisSession.create(model=MODEL, config=_cfg(tmp_path, auto=False))
         # usable 9_000, soft 5_400. Turn 0 is summarisable; turns 1-2 (~6K tokens each) are not.
-        await s.record(_turn(0, 400), "ok")
-        await s.record(_turn(1, 1500), "ok")
-        await s.record(_turn(2, 1500), "ok")
+        _ = await s.record(_turn(0, 400), "ok")
+        _ = await s.record(_turn(1, 1500), "ok")
+        _ = await s.record(_turn(2, 1500), "ok")
         s._config.compaction.auto = True
         return s
 
@@ -785,7 +784,7 @@ class TestStalledCompaction:
             engine = s._compaction_engine
             engine._stalled_until = 10**9
             for i in range(12):
-                await s.record(_turn(i), _turn(i))
+                _ = await s.record(_turn(i), _turn(i))
             engine._stalled_until = None  # as left by a healthy run
             _ = await s.compact()
             assert engine._stalled_until is None
@@ -793,7 +792,7 @@ class TestStalledCompaction:
     async def test_bare_engine_without_model_info_never_stalls(
         self, store, dag_store, event_bus, estimator
     ):
-        engine = CompactionEngine(
+        engine = engine_mod.CompactionEngine(
             store, dag_store, estimator, event_bus, MnesisConfig(), session_model=MODEL
         )
         engine._note_run_outcome("s", tokens_before=10, tokens_after=10**9, more_to_compact=False)
@@ -806,7 +805,7 @@ class TestStalledCompaction:
         self, store, dag_store, event_bus, estimator
     ):
         info = ModelInfo(model_id="m", context_limit=12_000, max_output_tokens=1_000)
-        engine = CompactionEngine(
+        engine = engine_mod.CompactionEngine(
             store,
             dag_store,
             estimator,
@@ -845,7 +844,7 @@ class TestToolSchemaTokens:
             triggers: list[int] = []
             s.subscribe(MnesisEvent.COMPACTION_TRIGGERED, lambda e, p: triggers.append(1))
             for i in range(4):
-                await s.record(_turn(i, 40), _turn(i, 40))
+                _ = await s.record(_turn(i, 40), _turn(i, 40))
             _ = await engine.wait_for_pending()
             assert not triggers  # history alone is under the soft threshold
             _ = await s.send("hello", tools=self._tools(20_000))
