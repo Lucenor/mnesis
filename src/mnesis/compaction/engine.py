@@ -3,7 +3,10 @@
 This engine implements the full Mnesis compaction flow:
 
 1. **Tool output pruning** — backward-scan and tombstone oversized tool outputs.
-2. **Summarisation** — level 1 → level 2 → level 3 escalation for raw messages.
+2. **Summarisation** — level 1 → level 2 → level 3 escalation over the raw
+   messages still in the context (never ones an earlier summary already covers).
+   The recorded span is exactly what was summarised; input beyond the
+   summariser's cap is left raw and handled by a further pass.
 3. **Condensation** — if the context (live summaries included) is still at or
    above half the soft threshold after summarisation, condense the summary nodes
    (level 1 → 2 → 3).
@@ -42,6 +45,7 @@ import structlog
 from mnesis.compaction.levels import (
     CondensationCandidate,
     SummaryCandidate,
+    _messages_to_summarise,
     condense_level1,
     condense_level2,
     condense_level3_deterministic,
@@ -93,6 +97,10 @@ def _make_llm_call(model: str) -> Any:
 
     return _call
 
+
+# Window assumed by a bare engine (no ``model_info``) when sizing summaries.
+_FALLBACK_CONTEXT_LIMIT = 200_000
+_FALLBACK_RESERVED_OUTPUT_TOKENS = 8_192
 
 # Condensation runs until the context is below this fraction of the soft
 # threshold (see ``_run_compaction_inner``).
@@ -148,7 +156,10 @@ class CompactionEngine:
     ) -> None:
         self._store = store
         self._dag_store = dag_store
-        self._estimator = token_estimator
+        # Counts in the session model's units (what ``ContextBuilder`` uses), so
+        # "fits the budget" here means "fits the session context". A bare engine
+        # (no ``model_info``) keeps the model-less heuristic.
+        self._estimator = token_estimator.for_model(model_info)
         self._event_bus = event_bus
         self._config = config
         self._session_model = session_model
@@ -162,10 +173,14 @@ class CompactionEngine:
         # so they cannot diverge from the trigger; otherwise they fall back to
         # an estimator-based count of raw messages plus live summaries.
         self._context_measure = context_measure
-        self._pruner = ToolOutputPruner(store, token_estimator, config)
+        self._pruner = ToolOutputPruner(store, self._estimator, config)
         self._id_gen = id_generator or _default_id_generator
         self._logger = structlog.get_logger("mnesis.compaction")
         self._pending_task: asyncio.Task[CompactionResult] | None = None
+        # Set when a run ended still at/above the soft threshold with nothing
+        # left that compaction can shrink (see ``_note_run_outcome``); holds the
+        # context size at which ``check_and_trigger`` re-arms.
+        self._stalled_until: int | None = None
 
     def set_context_measure(self, measure: Callable[[str], Awaitable[int]] | None) -> None:
         """Set the callable that returns the session's current context size."""
@@ -273,12 +288,31 @@ class CompactionEngine:
 
         Returns:
             True if a new compaction task was scheduled, False if the context
-            is under the soft threshold or a compaction is already in flight.
+            is under the soft threshold, a compaction is already in flight, or
+            the previous run found nothing left to shrink (see below).
+
+        A run that ends still at/above the soft threshold with nothing left to
+        summarise or condense (typically: the protected last two user turns
+        alone exceed it) cannot be improved by running again. Re-triggering on
+        every turn would burn LLM calls without progress, so further triggers
+        are skipped until the context has grown by the soft-to-hard headroom
+        past the size the stalled run ended at. A warning is logged once when
+        the engine stalls.
         """
         if not self.is_overflow(tokens, model):
             return False
         if self._pending_task is not None and not self._pending_task.done():
             return False
+        if self._stalled_until is not None:
+            if self._as_count(tokens) < self._stalled_until:
+                self._logger.debug(
+                    "compaction_skipped_stalled",
+                    session_id=session_id,
+                    tokens=self._as_count(tokens),
+                    rearm_at=self._stalled_until,
+                )
+                return False
+            self._stalled_until = None
 
         self._logger.info(
             "compaction_triggered",
@@ -296,7 +330,10 @@ class CompactionEngine:
 
     async def wait_for_pending(self) -> CompactionResult | None:
         """
-        Await any in-flight background compaction task to completion, then clear it.
+        Await any in-flight background compaction task to completion, then release it.
+
+        The handle is released unless a newer run replaced it while waiting
+        (that run stays tracked; loop on :attr:`has_pending` to drain).
 
         Returns:
             The :class:`CompactionResult` of the pending task (whether it was
@@ -449,15 +486,29 @@ class CompactionEngine:
                 pruned_tokens=prune_result.pruned_tokens,
             )
 
-        # Raw messages still in the context (the store also holds messages that
-        # earlier compactions already replaced). Legacy databases without
-        # ``context_items`` rows count every message.
-        in_context_ids = {
-            item_id
-            for item_type, item_id in await self._store.get_context_items(session_id)
-            if item_type != "summary"
-        }
-        in_context = [m for m in non_summary if m.id in in_context_ids] or non_summary
+        # Raw messages still in the context. The store also holds messages that
+        # earlier compactions already replaced with a summary; summarising those
+        # again would put the same content in context twice. Legacy databases
+        # with no ``context_items`` rows count every message, as the builder does.
+        context_items = await self._store.get_context_items(session_id)
+        in_context_ids = {item_id for item_type, item_id in context_items if item_type != "summary"}
+        in_context = (
+            [m for m in non_summary if m.id in in_context_ids] if context_items else non_summary
+        )
+        if not in_context:
+            # Every raw message is already covered by a live summary.
+            return CompactionResult(
+                session_id=session_id,
+                summary_message_id="",
+                level_used=0,
+                compacted_message_count=0,
+                summary_token_count=0,
+                tokens_before=0,
+                tokens_after=0,
+                elapsed_ms=time.time() * 1000 - start_ms,
+                pruned_tool_outputs=prune_result.pruned_count,
+                pruned_tokens=prune_result.pruned_tokens,
+            )
         raw_tokens = sum(self._estimator.estimate_message(m) for m in in_context)
         if measured_before is None:
             prior_nodes = await self._dag_store.get_active_nodes(session_id)
@@ -473,80 +524,26 @@ class CompactionEngine:
                 "MnesisConfig or pass a model when creating the session."
             )
 
-        # Derive model context limit for input cap calculation.
-        compaction_model_info = ModelInfo.from_model_string(compaction_model)
-
-        # Compute a generous budget for the summary
-        budget = ContextBudget(
-            model_context_limit=200_000,
-            reserved_output_tokens=8_192,
-            compaction_buffer=self._config.compaction.compaction_output_budget,
+        # The summariser's own input cap follows the compaction model's window. When
+        # it is the session model, use the resolved info (incl. ``model_overrides``).
+        compaction_model_info = (
+            self._model_info
+            if self._model_info is not None and compaction_model == self._session_model
+            else ModelInfo.from_model_string(compaction_model)
         )
+
+        # Summaries must fit the *session* window (they replace messages in it), so
+        # the budget comes from the session's model info; a bare engine without one
+        # falls back to a generic 200K window.
+        budget = self._summary_budget()
 
         llm_call = _make_llm_call(compaction_model)
 
-        # ── Summarisation ────────────────────────────────────────────────────────
-        if abort and abort.is_set():
-            raise asyncio.CancelledError("Compaction aborted")
-
-        compaction_prompt = self._config.compaction.compaction_prompt
-        candidate = await self._run_summarisation(
-            non_summary,
-            compaction_model,
-            budget,
-            llm_call,
-            compaction_prompt,
-            compaction_model_info.context_limit,
-            abort,
-        )
-
-        # Commit the leaf summary node.
-        leaf_msg_id = self._id_gen("msg")
-        leaf_node = SummaryNode(
-            id=leaf_msg_id,
-            session_id=session_id,
-            level=0,
-            kind="leaf",
-            span_start_message_id=candidate.span_start_message_id,
-            span_end_message_id=candidate.span_end_message_id,
-            content=candidate.text,
-            token_count=candidate.token_count,
-            model_id=compaction_model,
-            compaction_level=candidate.compaction_level,
-        )
-        await self._dag_store.insert_node(leaf_node, id_generator=lambda: self._id_gen("part"))
-
-        # Atomic context swap: remove compacted messages, insert summary item.
-        span_end_msg = next(
-            (m for m in non_summary if m.id == candidate.span_end_message_id),
-            non_summary[-1],
-        )
-        span_end_idx = non_summary.index(span_end_msg)
-        span_start_msg = next(
-            (m for m in non_summary if m.id == candidate.span_start_message_id),
-            non_summary[0],
-        )
-        span_start_idx = non_summary.index(span_start_msg)
-        compacted_ids = [m.id for m in non_summary[span_start_idx : span_end_idx + 1]]
-        await self._store.swap_context_items(session_id, compacted_ids, leaf_msg_id)
-
-        last_summary_msg_id = leaf_msg_id
-        last_summary_level = candidate.compaction_level
-        last_messages_covered = candidate.messages_covered
-        last_summary_tokens = candidate.token_count
-
-        # Raw messages that stay in context after the leaf swap. Older leaf
-        # summaries stay in context until condensed, so the context after
-        # compaction is the tail plus every live summary node (plus the system
-        # prompt, when ``context_measure`` is set). The loop below stops once
-        # that is below ``fit_limit``: a fraction of the soft threshold that
-        # triggers compaction. Stopping exactly at the soft threshold would leave
-        # the context hovering at the trigger and re-compact on nearly every
-        # turn once summaries accumulate.
-        compacted_set = set(compacted_ids)
-        tail_tokens = sum(
-            self._estimator.estimate_message(m) for m in in_context if m.id not in compacted_set
-        )
+        # Condensation (and the summarisation drain below) stop once the context is
+        # under ``fit_limit``: a fraction of the soft threshold that triggers
+        # compaction. Stopping exactly at the soft threshold would leave the
+        # context hovering at the trigger and re-compact on nearly every turn once
+        # summaries accumulate.
         fit_limit = (
             int(
                 self._usable_tokens(self._model_info)
@@ -556,11 +553,113 @@ class CompactionEngine:
             if self._model_info is not None and self._model_info.context_limit > 0
             else budget.usable
         )
-        tokens_after = await self._measure(session_id, tail_tokens)
+        max_rounds = self._config.compaction.max_compaction_rounds
+        compaction_prompt = self._config.compaction.compaction_prompt
+
+        # Nothing summarisable (only the protected last two user turns remain) on a
+        # session that already has a live summary: leave the tail alone. Running
+        # level 3 over it would replace the newest turns with a truncated
+        # digest, and an LLM pass would only repeat what the summaries already say.
+        has_live_summary = any(item_type == "summary" for item_type, _ in context_items)
+        skip_leaf = has_live_summary and not _messages_to_summarise(in_context)
+
+        last_summary_msg_id = ""
+        last_summary_level = 0
+        last_messages_covered = 0
+        last_summary_tokens = 0
+        compacted_ids: list[str] = []
+        remaining = in_context
+
+        # ── Summarisation ────────────────────────────────────────────────────────
+        # One pass summarises a contiguous, oldest-first slice of the raw messages
+        # (the summariser's input is capped at 75% of the compaction model's
+        # window). If that leaves summarisable messages and the context is still
+        # over ``fit_limit``, further passes handle the rest, so a long history
+        # with a small window is compacted in one run rather than silently
+        # dropped. Only the first pass may fall back to level 3.
+        passes = 0
+        while not skip_leaf:
+            if abort and abort.is_set():
+                raise asyncio.CancelledError("Compaction aborted")
+
+            candidate = await self._run_summarisation(
+                remaining,
+                compaction_model,
+                budget,
+                llm_call,
+                compaction_prompt,
+                compaction_model_info.context_limit,
+                abort,
+                allow_level3=passes == 0,
+            )
+            if candidate is None:
+                break  # a later pass could not summarise; keep what the earlier ones did
+
+            # Commit the leaf summary node.
+            leaf_msg_id = self._id_gen("msg")
+            leaf_node = SummaryNode(
+                id=leaf_msg_id,
+                session_id=session_id,
+                level=0,
+                kind="leaf",
+                span_start_message_id=candidate.span_start_message_id,
+                span_end_message_id=candidate.span_end_message_id,
+                content=candidate.text,
+                token_count=candidate.token_count,
+                model_id=compaction_model,
+                compaction_level=candidate.compaction_level,
+            )
+            await self._dag_store.insert_node(leaf_node, id_generator=lambda: self._id_gen("part"))
+
+            # Atomic context swap: remove compacted messages, insert summary item.
+            # The span is exactly what the summary covers (see ``SummaryCandidate``).
+            span_end_msg = next(
+                (m for m in remaining if m.id == candidate.span_end_message_id),
+                remaining[-1],
+            )
+            span_end_idx = remaining.index(span_end_msg)
+            span_start_msg = next(
+                (m for m in remaining if m.id == candidate.span_start_message_id),
+                remaining[0],
+            )
+            span_start_idx = remaining.index(span_start_msg)
+            pass_ids = [m.id for m in remaining[span_start_idx : span_end_idx + 1]]
+            await self._store.swap_context_items(session_id, pass_ids, leaf_msg_id)
+
+            compacted_ids.extend(pass_ids)
+            last_summary_msg_id = leaf_msg_id
+            last_summary_level = candidate.compaction_level
+            last_messages_covered += candidate.messages_covered
+            last_summary_tokens = candidate.token_count
+            passes += 1
+
+            # Raw messages that stay in context after the swap. Older leaf summaries
+            # stay in context until condensed, so the context after compaction is the
+            # tail plus every live summary node (plus the system prompt, when
+            # ``context_measure`` is set).
+            compacted_set = set(compacted_ids)
+            remaining = [m for m in in_context if m.id not in compacted_set]
+            tail_tokens = sum(self._estimator.estimate_message(m) for m in remaining)
+            tokens_after = await self._measure(session_id, tail_tokens)
+            if (
+                passes >= max_rounds
+                or tokens_after < fit_limit
+                or not _messages_to_summarise(remaining)
+            ):
+                break
+
+        compacted_set = set(compacted_ids)
+        remaining = [m for m in in_context if m.id not in compacted_set]
+        tail_tokens = sum(self._estimator.estimate_message(m) for m in remaining)
+        if skip_leaf or passes == 0:
+            tokens_after = await self._measure(session_id, tail_tokens)
 
         # ── Condensation + multi-round loop ──────────────────────────────────────
+        # Whether another condensation could still shrink the context; feeds the
+        # "compaction cannot help" check after the run.
+        can_condense = False
         if self._config.compaction.condensation_enabled:
-            max_rounds = self._config.compaction.max_compaction_rounds
+            can_condense = True
             for round_num in range(max_rounds):
                 if abort and abort.is_set():
                     raise asyncio.CancelledError("Compaction aborted during condensation")
@@ -574,6 +673,7 @@ class CompactionEngine:
                     break  # Under budget — done.
 
                 if len(active_nodes) < 2:
+                    can_condense = False
                     break  # Nothing to condense — can't make further progress.
 
                 tokens_before_condense = sum(n.token_count for n in active_nodes)
@@ -594,6 +694,7 @@ class CompactionEngine:
                         tokens_before=tokens_before_condense,
                         tokens_after=cond.token_count,
                     )
+                    can_condense = False
                     break
 
                 # Determine span from the consumed nodes.
@@ -640,6 +741,14 @@ class CompactionEngine:
                 )
 
         tokens_before = measured_before
+        # Raw messages the summariser left alone because of its input cap are still
+        # compactable by the next run; so is anything the loop did not condense.
+        self._note_run_outcome(
+            session_id,
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            more_to_compact=can_condense or bool(_messages_to_summarise(remaining)),
+        )
         elapsed_ms = time.time() * 1000 - start_ms
         result = CompactionResult(
             session_id=session_id,
@@ -666,6 +775,66 @@ class CompactionEngine:
 
         self._event_bus.publish(MnesisEvent.COMPACTION_COMPLETED, result.model_dump())
         return result
+
+    def _summary_budget(self) -> ContextBudget:
+        """Token budget a summary must fit: the *session* window's usable tokens.
+
+        Derived from the session's resolved :class:`ModelInfo` (including
+        ``model_overrides``), so small-window models get a small budget. A bare
+        engine without model info falls back to a generic 200K window.
+        """
+        info = self._model_info
+        if info is None or info.context_limit <= 0:
+            return ContextBudget(
+                model_context_limit=_FALLBACK_CONTEXT_LIMIT,
+                reserved_output_tokens=_FALLBACK_RESERVED_OUTPUT_TOKENS,
+                compaction_buffer=self._config.compaction.compaction_output_budget,
+            )
+        return ContextBudget(
+            model_context_limit=info.context_limit,
+            reserved_output_tokens=info.max_output_tokens,
+            compaction_buffer=self._config.compaction.compaction_output_budget,
+        )
+
+    def _note_run_outcome(
+        self,
+        session_id: str,
+        *,
+        tokens_before: int,
+        tokens_after: int,
+        more_to_compact: bool,
+    ) -> None:
+        """Remember when a run could not get the context under the soft threshold.
+
+        A run is *stalled* when it ends at/above the soft threshold and either
+        made no progress (``tokens_after >= tokens_before``) or left nothing
+        that compaction could still shrink. Re-running on the next turn would
+        spend LLM calls for nothing, so :meth:`check_and_trigger` skips until the
+        context has grown by the soft-to-hard headroom (see its docstring).
+        Never affects level 3: a run always produces its summary first.
+        """
+        self._stalled_until = None
+        info = self._model_info
+        if info is None or info.context_limit <= 0:
+            return
+        usable = self._usable_tokens(info)
+        soft_limit = int(usable * self._config.compaction.soft_threshold_fraction)
+        if tokens_after < soft_limit:
+            return
+        if more_to_compact and tokens_after < tokens_before:
+            return
+        self._stalled_until = tokens_after + max(1, usable - soft_limit)
+        self._logger.warning(
+            "compaction_cannot_reduce_context",
+            session_id=session_id,
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            soft_limit=soft_limit,
+            usable=usable,
+            rearm_at=self._stalled_until,
+            hint="the protected recent turns and live summaries alone exceed the soft "
+            "threshold; auto-compaction is paused until the context grows",
+        )
 
     async def _measure_session(self, session_id: str) -> int | None:
         """Return the session's current context size, or ``None`` if unavailable.
@@ -703,8 +872,12 @@ class CompactionEngine:
         compaction_prompt: str | None,
         model_context_limit: int,
         abort: asyncio.Event | None,
-    ) -> SummaryCandidate:
-        """Run level 1 → 2 → 3 summarisation escalation and return a candidate."""
+        allow_level3: bool = True,
+    ) -> SummaryCandidate | None:
+        """Run level 1 → 2 → 3 summarisation escalation and return a candidate.
+
+        ``None`` is returned only when level 3 is not allowed and levels 1-2 failed.
+        """
         candidate: SummaryCandidate | None = None
 
         # Level 1
@@ -735,7 +908,7 @@ class CompactionEngine:
             )
 
         # Level 3 (deterministic fallback — always succeeds)
-        if candidate is None:
+        if candidate is None and allow_level3:
             candidate = level3_deterministic(non_summary, budget, self._estimator)
 
         return candidate
@@ -764,7 +937,7 @@ class CompactionEngine:
 
         # Level 3 (always succeeds)
         if cond is None:
-            cond = condense_level3_deterministic(nodes, self._estimator)
+            cond = condense_level3_deterministic(nodes, self._estimator, budget)
 
         return cond
 

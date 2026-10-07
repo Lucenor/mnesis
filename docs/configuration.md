@@ -24,7 +24,7 @@ Controls when and how context compaction fires.
 | Field | Default | Description |
 |---|---|---|
 | `auto` | `True` | Auto-trigger compaction on overflow |
-| `compaction_output_budget` | `20_000` | Tokens reserved as headroom for compaction summary output |
+| `compaction_output_budget` | `20_000` | Tokens reserved as headroom for compaction summary output. Range 1,000-100,000. Usable context is `context_limit - max_output_tokens - compaction_output_budget`, and summaries (including the Level 3 fallback) are sized against it, so it must be well below your model's window. Session creation/loading raises `ValueError` when the budget leaves no usable context (`context_limit - max_output_tokens <= compaction_output_budget`, e.g. a small `model_overrides` window) and logs a `compaction_output_budget_exceeds_usable_window` warning when the budget is at least as large as the usable window. |
 | `prune` | `True` | Run tool output pruning before compaction |
 | `prune_protect_tokens` | `40_000` | Token window from the end of history that is never pruned |
 | `prune_minimum_tokens` | `20_000` | Minimum prunable volume required before pruning fires |
@@ -32,7 +32,7 @@ Controls when and how context compaction fires.
 | `level2_enabled` | `True` | Attempt Level 2 compression before falling back to Level 3 |
 | `compaction_prompt` | `None` | Custom prompt string for Level 1/2 LLM summarisation. `None` = use the built-in agentic prompt |
 | `soft_threshold_fraction` | `0.6` | Fraction of usable context at which background compaction triggers (before hard threshold). Measured against the size of the current context window, not lifetime token usage. Also sets condensation's stop target: after summarising, summaries are condensed until the context is below half this threshold (`soft_threshold_fraction * 0.5` of usable; the 0.5 is not configurable). Advanced. |
-| `max_compaction_rounds` | `10` | Upper bound on condensation rounds per run. Each round merges all live summary nodes into one, so a run condenses at most once and this limit is effectively never reached. Advanced. |
+| `max_compaction_rounds` | `10` | Upper bound on condensation rounds per run, and on summarisation passes when the summariser's input cap (75% of the compaction model's window) forces several passes. Each condensation round merges all live summary nodes into one, so a run condenses at most once in practice. Advanced. |
 | `condensation_enabled` | `True` | Whether to attempt condensation of accumulated summary nodes. Advanced. |
 
 ### Tuning for large models

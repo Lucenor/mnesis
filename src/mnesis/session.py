@@ -16,7 +16,7 @@ from ulid import ULID
 from mnesis.compaction.engine import CompactionEngine
 from mnesis.context.builder import BuiltContext, ContextBuilder
 from mnesis.events.bus import EventBus, MnesisEvent
-from mnesis.models.config import MnesisConfig, ModelInfo, StoreConfig
+from mnesis.models.config import MnesisConfig, ModelInfo, StoreConfig, check_compaction_budget
 from mnesis.models.message import (
     CompactionResult,
     Message,
@@ -48,6 +48,24 @@ def make_id(prefix: str) -> str:
         ID string in the format ``"{prefix}_{ulid}"``.
     """
     return f"{prefix}_{ULID()}"
+
+
+def _json_default(value: Any) -> str:
+    """``json.dumps`` fallback: ISO-8601 for dates/times, ``str()`` for anything else."""
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return str(value)
+
+
+def _dump_part(part: MessagePart) -> str:
+    """Serialise *part* for persistence.
+
+    Tool inputs/outputs are caller-supplied ``Any``; values JSON cannot encode
+    natively (``datetime``, ``UUID``, ``Decimal``, ``Path``, ...) are stored as
+    strings, which is what a reload (``json.loads``) hands back.
+    """
+    return json.dumps(part.model_dump(), default=_json_default)
 
 
 async def _forward_part(
@@ -139,6 +157,10 @@ class MnesisSession:
         self._cumulative_tokens = TokenUsage()
         self._recent_tool_calls: list[tuple[str, str]] = []  # (tool_name, input_json)
         self._logger = structlog.get_logger("mnesis.session").bind(session_id=session_id)
+        # Tokens of the tool schemas passed to the most recent ``send()``. They ride
+        # along with every LLM call but live outside the stored history, so they
+        # are added to the context size the soft/hard thresholds compare.
+        self._tool_schema_tokens = 0
         # Per-turn history snapshots (see history() method)
         self._turn_snapshots: list[TurnSnapshot] = []
         # Holds a CompactionResult from compact() or a completed background task
@@ -183,7 +205,10 @@ class MnesisSession:
             An initialized MnesisSession ready to receive messages.
 
         Raises:
-            ValueError: If both ``db_path`` and ``config.store.db_path`` are supplied.
+            ValueError: If both ``db_path`` and ``config.store.db_path`` are
+                supplied, or if ``compaction.compaction_output_budget`` leaves no
+                usable context for ``model`` (``context_limit - max_output_tokens
+                <= compaction_output_budget``).
             aiosqlite.Error: If the database cannot be initialized.
         """
         cfg = config or MnesisConfig()
@@ -197,13 +222,16 @@ class MnesisSession:
                 update={"store": cfg.store.model_copy(update={"db_path": db_path})}
             )
 
+        model_info = ModelInfo.from_model_string(model)
+        if cfg.model_overrides:
+            model_info = model_info.model_copy(update=cfg.model_overrides)
+        # Reject an impossible compaction budget before opening the store.
+        check_compaction_budget(cfg.compaction, model_info)
+
         store = ImmutableStore(cfg.store, pool=pool)
         await store.initialize()
 
         session_id = make_id("sess")
-        model_info = ModelInfo.from_model_string(model)
-        if cfg.model_overrides:
-            model_info = model_info.model_copy(update=cfg.model_overrides)
         provider = model_info.provider_id
 
         await store.create_session(
@@ -329,6 +357,8 @@ class MnesisSession:
 
         Raises:
             SessionNotFoundError: If the session does not exist.
+            ValueError: If ``compaction.compaction_output_budget`` leaves no
+                usable context for the session's model.
 
         Note:
             Lifetime token usage is rebuilt from persisted turns. Compaction
@@ -360,6 +390,11 @@ class MnesisSession:
         model_info = ModelInfo.from_model_string(model)
         if cfg.model_overrides:
             model_info = model_info.model_copy(update=cfg.model_overrides)
+        try:
+            check_compaction_budget(cfg.compaction, model_info)
+        except ValueError:
+            await store.close()
+            raise
 
         dag_store = SummaryDAGStore(store)
         estimator = TokenEstimator()
@@ -454,7 +489,7 @@ class MnesisSession:
                 message_id=user_msg_id,
                 session_id=self._session_id,
                 part_type=part.type,
-                content=json.dumps(part.model_dump()),
+                content=_dump_part(part),
             )
             await self._store.append_part(raw)
 
@@ -475,6 +510,7 @@ class MnesisSession:
             sys_prompt,
             self._config,
         )
+        self._tool_schema_tokens = self._estimate_tool_schema_tokens(tools)
         context, compaction_result_obj = await self._ensure_under_hard_limit(context, sys_prompt)
 
         # Prepare LLM messages
@@ -952,7 +988,7 @@ class MnesisSession:
                 message_id=user_msg_id,
                 session_id=self._session_id,
                 part_type=part.type,
-                content=json.dumps(part.model_dump()),
+                content=_dump_part(part),
             )
             await self._store.append_part(raw)
 
@@ -987,7 +1023,9 @@ class MnesisSession:
                 tool_segments: list[str] = []
                 if part.input:
                     tool_segments.append(
-                        part.input if isinstance(part.input, str) else json.dumps(part.input)
+                        part.input
+                        if isinstance(part.input, str)
+                        else json.dumps(part.input, default=_json_default)
                     )
                 if part.output:
                     tool_segments.append(part.output)
@@ -1005,7 +1043,7 @@ class MnesisSession:
                 message_id=assistant_msg_id,
                 session_id=self._session_id,
                 part_type=part.type,
-                content=json.dumps(part.model_dump()),
+                content=_dump_part(part),
                 token_estimate=token_estimate,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -1189,7 +1227,12 @@ class MnesisSession:
         # not closed while a turn is still being persisted.
         if self._background_send_tasks:
             await asyncio.gather(*self._background_send_tasks, return_exceptions=True)
-        await self._compaction_engine.wait_for_pending()
+        # Drain: a finished run's handle is released by ``wait_for_pending``, but a
+        # run scheduled meanwhile replaces it and must be awaited too.
+        while True:
+            _ = await self._compaction_engine.wait_for_pending()
+            if not self._compaction_engine.has_pending:
+                break
         self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
         await self._store.close()
         self._logger.info("session_closed", session_id=self._session_id)
@@ -1276,15 +1319,28 @@ class MnesisSession:
     async def _measure_context(self, session_id: str) -> int:
         """Current context size (the measure the soft/hard triggers compare).
 
-        Uses the session's configured system prompt. ``send()`` may be called
-        with a per-turn ``system_prompt`` override that the hard check counts
-        instead, so the two can differ by the prompt-size delta; the single
-        bounded retry in :meth:`_ensure_under_hard_limit` covers that.
+        Uses the session's configured system prompt and the tool-schema tokens of
+        the latest ``send()``. ``send()`` may be called with a per-turn
+        ``system_prompt`` override that the hard check counts instead, so the
+        engine's fit check can differ from it by the prompt-size delta.
+        :meth:`_ensure_under_hard_limit` re-measures with the override and runs
+        at most one more compaction; the send then proceeds even if that was
+        not enough.
         """
         context = await self._context_builder.build(
             session_id, self._model_info, self._system_prompt, self._config
         )
-        return context.context_tokens
+        return self._threshold_tokens(context)
+
+    def _estimate_tool_schema_tokens(self, tools: list[Any] | None) -> int:
+        """Tokens the serialized tool definitions add to every LLM call."""
+        if not tools:
+            return 0
+        return self._estimator.estimate(json.dumps(tools, default=_json_default), self._model_info)
+
+    def _threshold_tokens(self, context: BuiltContext) -> int:
+        """Context size the soft/hard thresholds compare: history plus tool schemas."""
+        return context.context_tokens + self._tool_schema_tokens
 
     async def _ensure_under_hard_limit(
         self, context: BuiltContext, sys_prompt: str
@@ -1309,19 +1365,21 @@ class MnesisSession:
             )
 
         result: CompactionResult | None = None
-        if not engine.is_hard_overflow(context.context_tokens, self._model_info):
+        if not engine.is_hard_overflow(self._threshold_tokens(context), self._model_info):
             return context, result
         had_pending = engine.has_pending
         result = await engine.wait_for_pending()
         if had_pending:
             context = await rebuild()
-            if not engine.is_hard_overflow(context.context_tokens, self._model_info):
+            if not engine.is_hard_overflow(self._threshold_tokens(context), self._model_info):
                 return context, result
         # Also wait for a run another caller (e.g. a concurrent ``compact()``)
         # started meanwhile, so ``check_and_trigger`` returning False because one
         # is in flight does not let an over-hard context through.
         if (
-            engine.check_and_trigger(self._session_id, context.context_tokens, self._model_info)
+            engine.check_and_trigger(
+                self._session_id, self._threshold_tokens(context), self._model_info
+            )
             or engine.in_flight
         ):
             result = await engine.wait_for_pending() or result
@@ -1358,7 +1416,7 @@ class MnesisSession:
             )
             return False, None
         triggered = self._compaction_engine.check_and_trigger(
-            self._session_id, context.context_tokens, self._model_info
+            self._session_id, self._threshold_tokens(context), self._model_info
         )
         return triggered, context
 

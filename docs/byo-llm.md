@@ -33,6 +33,12 @@ Your code                           mnesis
     # Compaction-aware context: summaries replace compacted turns
     messages = await session.context_for_next_turn()
     messages.append({"role": "user", "content": user_text})
+    # After compaction the first item is the summary, with role "assistant".
+    # Anthropic's Messages API docs only show conversations that start with a
+    # user turn and do not say a leading assistant turn is accepted, so lead
+    # with a user turn to be safe.
+    if messages[0]["role"] != "user":
+        messages.insert(0, {"role": "user", "content": "[Conversation so far]"})
 
     # Call your SDK
     response = client.messages.create(
@@ -102,6 +108,15 @@ await session.record(
     tokens=TokenUsage(input=5, output=3),
 )
 ```
+
+!!! note "Leading summary role"
+    `context_for_next_turn()` returns compaction summaries as `assistant`
+    messages, so after a compaction the list can start with an `assistant`
+    entry. The [Anthropic Messages API
+    docs](https://platform.claude.com/docs/en/build-with-claude/working-with-messages)
+    only show user-first conversations and state no rule either way for a leading
+    assistant turn, so the Anthropic example inserts a short user turn first.
+    Mnesis does not reorder the list for you.
 
 ## Compaction still works automatically
 

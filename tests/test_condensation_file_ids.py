@@ -265,31 +265,31 @@ class TestCondensationLevels:
         result = await condense_level2(nodes, "test-model", budget, estimator, failing)
         assert result is None
 
-    def test_condense_level3_deterministic_always_succeeds(self, estimator):
+    def test_condense_level3_deterministic_always_succeeds(self, estimator, budget):
         """condense_level3_deterministic always returns a CondensationCandidate."""
         nodes = [
             _make_summary_node("sess", "n1", "Summary A content here."),
             _make_summary_node("sess", "n2", "Summary B content here."),
         ]
-        result = condense_level3_deterministic(nodes, estimator)
+        result = condense_level3_deterministic(nodes, estimator, budget)
         assert isinstance(result, CondensationCandidate)
         assert result.compaction_level == 3
         assert set(result.parent_node_ids) == {"n1", "n2"}
         assert "CONDENSED" in result.text
 
-    def test_condense_level3_preserves_file_ids(self, estimator):
+    def test_condense_level3_preserves_file_ids(self, estimator, budget):
         """condense_level3_deterministic preserves file IDs from all nodes."""
         nodes = [
             _make_summary_node("sess", "n1", "A.\n\n[LCM File IDs: file_aa112233bb445566]"),
             _make_summary_node("sess", "n2", "B.\n\n[LCM File IDs: file_cc778899dd001122]"),
         ]
-        result = condense_level3_deterministic(nodes, estimator)
+        result = condense_level3_deterministic(nodes, estimator, budget)
         assert "file_aa112233bb445566" in result.text
         assert "file_cc778899dd001122" in result.text
 
-    def test_condense_level3_empty_nodes(self, estimator):
+    def test_condense_level3_empty_nodes(self, estimator, budget):
         """condense_level3_deterministic handles an empty node list."""
-        result = condense_level3_deterministic([], estimator)
+        result = condense_level3_deterministic([], estimator, budget)
         assert isinstance(result, CondensationCandidate)
         assert result.parent_node_ids == []
 
@@ -1061,7 +1061,7 @@ class TestFooterTokenReservation:
         # We just confirm it does not massively overflow (within 2x as heuristic).
         assert result.token_count < tight_budget.usable * 2
 
-    def test_condense_level3_footer_does_not_overflow(self, estimator):
+    def test_condense_level3_footer_does_not_overflow(self, estimator, budget):
         """condense_level3_deterministic reserves footer space before building content."""
         # Many file IDs embedded in nodes to generate a large footer.
         nodes = []
@@ -1074,21 +1074,21 @@ class TestFooterTokenReservation:
             )
             nodes.append(node)
 
-        result = condense_level3_deterministic(nodes, estimator)
+        result = condense_level3_deterministic(nodes, estimator, budget)
         assert isinstance(result, CondensationCandidate)
         # All file IDs must be preserved in the footer.
         for i in range(6):
             fid = f"file_{i:08x}aabbccdd"
             assert fid in result.text
 
-    def test_condense_level3_available_clamps_to_zero(self, estimator):
+    def test_condense_level3_available_clamps_to_zero(self, estimator, budget):
         """condense_level3_deterministic clamps available to 0 when overhead exceeds cap."""
         # Create a node whose IDs alone consume the entire cap.
         # Generate enough IDs that footer + header > 512 tokens.
         many_ids = " ".join(f"file_{i:08x}1122334455667788" for i in range(50))
         node = _make_summary_node("sess", "n_clamp", f"content.\n\n[LCM File IDs: {many_ids}]")
 
-        result = condense_level3_deterministic([node], estimator)
+        result = condense_level3_deterministic([node], estimator, budget)
         # Must not raise and must return a candidate.
         assert isinstance(result, CondensationCandidate)
         assert result.compaction_level == 3

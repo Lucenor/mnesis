@@ -37,6 +37,30 @@ class TokenEstimator:
         self._encoder_cache: dict[str, Any] = {}
         self._count_cache: dict[str, int] = {}
         self._force_heuristic: bool = heuristic_only
+        self._default_model: ModelInfo | None = None
+
+    def for_model(self, model: ModelInfo | None) -> TokenEstimator:
+        """
+        Return a view of this estimator that tokenises for *model* by default.
+
+        Calls that omit the ``model`` argument use *model*'s tokeniser instead
+        of the model-less ``len // 4`` heuristic, so a component that sizes text
+        without threading a model through every call (the compaction engine and
+        its level functions) counts in the same units as
+        :class:`~mnesis.context.builder.ContextBuilder`. The encoder cache is
+        shared; the content-hash count cache is not, so counts for different
+        models can never collide.
+
+        Args:
+            model: Model whose tokeniser to use by default; ``None`` returns
+                ``self`` unchanged.
+        """
+        if model is None:
+            return self
+        view = TokenEstimator(heuristic_only=self._force_heuristic)
+        view._encoder_cache = self._encoder_cache
+        view._default_model = model
+        return view
 
     def estimate(self, text: str, model: ModelInfo | None = None) -> int:
         """
@@ -52,6 +76,8 @@ class TokenEstimator:
         """
         if not text:
             return 0
+        if model is None:
+            model = self._default_model
         if self._force_heuristic or model is None:
             return self._heuristic(text)
 
@@ -109,6 +135,8 @@ class TokenEstimator:
         Returns:
             Total estimated token count for the message.
         """
+        if model is None:
+            model = self._default_model
         total = 0
         # Role + overhead heuristic
         total += 4
@@ -143,7 +171,7 @@ class TokenEstimator:
                     f"[FILE: {part.path}]\n"
                     f"Content-ID: {part.content_id}\n"
                     f"Type: {part.file_type}\n"
-                    f"Tokens: {part.token_count}\n"
+                    f"Tokens: {part.token_count:,}\n"
                     f"Exploration Summary:\n{part.exploration_summary}\n"
                     f"[/FILE]"
                 )

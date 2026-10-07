@@ -29,6 +29,9 @@ from mnesis.compaction.file_ids import (
     append_file_ids_footer,
     collect_file_ids_from_nodes,
     extract_file_ids_from_messages,
+    most_recent_file_ids,
+    most_recent_file_ids_from_nodes,
+    strip_file_ids_footer,
 )
 from mnesis.models.message import ContextBudget, MessageWithParts, TextPart, ToolPart
 from mnesis.models.summary import SummaryNode
@@ -63,8 +66,17 @@ _CONDENSE_LEVEL2_NODE_MAX_CHARS: int = 800
 # out the others before the token budget check runs.
 _CONDENSE_LEVEL3_NODE_MAX_CHARS: int = 2000
 
-# Maximum tokens for a level 3 condensation fallback.
+# Used when the parent list would crowd the prose or displace file IDs.
+_CONDENSE_LEVEL3_MINIMAL_HEADER = "[CONDENSED]\n"
+
+# Maximum tokens of *prose* in a level 3 condensation fallback. The file-ID
+# footer is sized separately (against the budget) so it never displaces IDs.
 _CONDENSE_LEVEL3_MAX_TOKENS: int = 512
+
+# Upper bound on the ``max_tokens`` requested from the compaction LLM for a
+# level 1 summary or condensation. The summary must also fit ``budget.usable``,
+# which is the tighter bound for small-window models.
+_LEVEL1_MAX_OUTPUT_TOKENS: int = 8_192
 
 LEVEL1_PROMPT = """\
 You are creating a detailed context summary to allow continuing this conversation.
@@ -179,6 +191,11 @@ class CondensationCandidate:
     """Condensation escalation level: 1 = normal, 2 = aggressive, 3 = deterministic."""
 
 
+def _level1_max_tokens(budget: ContextBudget) -> int:
+    """``max_tokens`` for a level 1 LLM call: bounded by the budget the result must fit."""
+    return max(1, min(_LEVEL1_MAX_OUTPUT_TOKENS, budget.usable))
+
+
 def _extract_text(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHARS) -> str:
     """Extract readable text from a message; the result is at most ``max_chars`` long."""
     parts: list[str] = []
@@ -228,8 +245,12 @@ def _apply_input_cap(
     Trim *messages* so their total token count stays within the summarisation
     input cap (``MAX_SUMMARISATION_INPUT_FRACTION`` of *model_context_limit*).
 
-    At least :data:`MIN_MESSAGES_TO_SUMMARISE` messages are always included
-    even if they exceed the cap.
+    Messages are taken oldest-first, so the result is a contiguous prefix of
+    *messages*; callers must record the span of the *result* (not of the
+    input), leaving the rest raw for a later compaction. Oldest-first keeps the
+    summary chronologically contiguous with earlier summaries and leaves the
+    newest turns verbatim in context. At least :data:`MIN_MESSAGES_TO_SUMMARISE`
+    messages are always included even if they exceed the cap.
 
     Args:
         messages: Messages to cap (already filtered by ``_messages_to_summarise``).
@@ -300,10 +321,9 @@ async def level1_summarise(
         logger.debug("level1_skip_nothing_to_summarise")
         return None
 
-    # Remember original span before the input cap narrows the list.
-    original_to_summarise = to_summarise
-
-    # Apply input token cap before passing to LLM.
+    # Apply input token cap before passing to LLM. The oldest prefix is kept, and
+    # the span recorded below is exactly that prefix: messages past the cap stay
+    # raw in context for the next compaction instead of being swapped out unsummarised.
     to_summarise = _apply_input_cap(to_summarise, estimator, model_context_limit)
 
     # Collect file IDs from the capped input.
@@ -323,7 +343,7 @@ async def level1_summarise(
         summary_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=budget.reserved_output_tokens,
+            max_tokens=_level1_max_tokens(budget),
         )
     except Exception as exc:
         logger.warning("level1_llm_failed", error=str(exc))
@@ -354,10 +374,10 @@ async def level1_summarise(
     return SummaryCandidate(
         text=summary_text,
         token_count=token_count,
-        span_start_message_id=original_to_summarise[0].id,
-        span_end_message_id=original_to_summarise[-1].id,
+        span_start_message_id=to_summarise[0].id,
+        span_end_message_id=to_summarise[-1].id,
         compaction_level=1,
-        messages_covered=len(original_to_summarise),
+        messages_covered=len(to_summarise),
     )
 
 
@@ -393,9 +413,7 @@ async def level2_summarise(
     if not to_summarise:
         return None
 
-    original_to_summarise = to_summarise
-
-    # Apply input token cap.
+    # Apply input token cap (oldest prefix; the span below matches what is summarised).
     to_summarise = _apply_input_cap(to_summarise, estimator, model_context_limit)
 
     # Collect file IDs from input messages.
@@ -454,10 +472,10 @@ async def level2_summarise(
     return SummaryCandidate(
         text=summary_text,
         token_count=token_count,
-        span_start_message_id=original_to_summarise[0].id,
-        span_end_message_id=original_to_summarise[-1].id,
+        span_start_message_id=to_summarise[0].id,
+        span_end_message_id=to_summarise[-1].id,
         compaction_level=2,
-        messages_covered=len(original_to_summarise),
+        messages_covered=len(to_summarise),
     )
 
 
@@ -500,16 +518,53 @@ def _fit_file_ids(
     return file_ids[:lo]
 
 
-def _most_recent_file_ids(messages: list[MessageWithParts]) -> list[str]:
-    """File IDs ordered most-recently-referenced first (by last occurrence), deduplicated."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for msg in reversed(messages):
-        for fid in reversed(extract_file_ids_from_messages([msg])):
-            if fid not in seen:
-                seen.add(fid)
-                result.append(fid)
-    return result
+def _plan_header_and_file_ids(
+    *,
+    full_header: str,
+    minimal_header: str,
+    all_file_ids: list[str],
+    recent_first: list[str],
+    cap: int,
+    usable: int,
+    estimator: TokenEstimator,
+    log_event: str,
+) -> tuple[str, int, list[str]]:
+    """Choose a level-3 header and the file IDs to keep so header + footer fit *cap*.
+
+    File IDs take precedence over the decorative header: the full header is
+    used only when it does not displace any ID. When even the minimal header
+    plus the ID footer exceed *cap*, the least recently referenced IDs are
+    dropped (the footer stays in first-occurrence order) and a warning is
+    logged. If *usable* is smaller than the minimal header no output can fit,
+    so all IDs are kept (lossless wins).
+
+    Returns:
+        ``(header, header_tokens, file_ids)``.
+    """
+    minimal_tokens = estimator.estimate(minimal_header)
+    header, header_tokens = full_header, estimator.estimate(full_header)
+    if header_tokens > cap:
+        header, header_tokens = minimal_header, minimal_tokens
+
+    file_ids = all_file_ids
+    if usable >= minimal_tokens and all_file_ids:
+        fitted = _fit_file_ids(recent_first, header_tokens, cap, estimator)
+        if len(fitted) < len(recent_first) and header != minimal_header:
+            # The decorative header is not worth displacing IDs: retry minimal.
+            retry = _fit_file_ids(recent_first, minimal_tokens, cap, estimator)
+            if len(retry) > len(fitted):
+                header, header_tokens, fitted = minimal_header, minimal_tokens, retry
+        if len(fitted) < len(all_file_ids):
+            keep = set(fitted)
+            file_ids = [fid for fid in all_file_ids if fid in keep]
+    if len(file_ids) < len(all_file_ids):
+        logger.warning(
+            log_event,
+            kept=len(file_ids),
+            dropped=len(all_file_ids) - len(file_ids),
+            budget_usable=usable,
+        )
+    return header, header_tokens, file_ids
 
 
 def level3_deterministic(
@@ -529,14 +584,14 @@ def level3_deterministic(
 
     Precedence when the budget is tight: file IDs are reserved first, then
     prose fills what remains, so messages are dropped before any file ID is.
-    Only if the ID footer by itself cannot fit in 85% of ``budget.usable`` is
-    it truncated, keeping the *most recently referenced* IDs (by last
-    occurrence; the footer itself stays in first-occurrence order).  A warning
-    with the dropped count is logged; the raw files stay addressable in the
-    immutable store.  Truncating there is the only way to keep the "always
-    fits the budget" guarantee that lets compaction make progress.  If
-    ``budget.usable`` is smaller than the minimal header, no output can fit,
-    so all IDs are kept (lossless wins).
+    Only if the header plus the ID footer cannot fit in 85% of
+    ``budget.usable`` is the footer truncated, keeping the *most recently
+    referenced* IDs (by last occurrence; the footer itself stays in
+    first-occurrence order).  A warning with the dropped count is logged; the
+    raw files stay addressable in the immutable store.  Truncating there is the
+    only way to keep the "always fits the budget" guarantee that lets
+    compaction make progress.  If ``budget.usable`` is smaller than the minimal
+    header, no output can fit, so all IDs are kept (lossless wins).
 
     Args:
         messages: All non-summary messages in the session.
@@ -552,33 +607,16 @@ def level3_deterministic(
     all_file_ids = extract_file_ids_from_messages(messages)
 
     cap = int(budget.usable * _LEVEL3_BUDGET_FRACTION)
-    minimal_tokens = estimator.estimate(_LEVEL3_MINIMAL_HEADER)
-    satisfiable = budget.usable >= minimal_tokens
-
-    header = _LEVEL3_HEADER
-    header_tokens = estimator.estimate(header)
-    if header_tokens > cap:
-        header, header_tokens = _LEVEL3_MINIMAL_HEADER, minimal_tokens
-
-    file_ids = all_file_ids
-    if satisfiable and all_file_ids:
-        recent_first = _most_recent_file_ids(messages)
-        fitted = _fit_file_ids(recent_first, header_tokens, cap, estimator)
-        if len(fitted) < len(recent_first) and header is _LEVEL3_HEADER:
-            # The decorative header is not worth displacing IDs: retry minimal.
-            retry = _fit_file_ids(recent_first, minimal_tokens, cap, estimator)
-            if len(retry) > len(fitted):
-                header, header_tokens, fitted = _LEVEL3_MINIMAL_HEADER, minimal_tokens, retry
-        if len(fitted) < len(all_file_ids):
-            keep = set(fitted)
-            file_ids = [fid for fid in all_file_ids if fid in keep]
-    if len(file_ids) < len(all_file_ids):
-        logger.warning(
-            "level3_file_ids_truncated",
-            kept=len(file_ids),
-            dropped=len(all_file_ids) - len(file_ids),
-            budget_usable=budget.usable,
-        )
+    header, header_tokens, file_ids = _plan_header_and_file_ids(
+        full_header=_LEVEL3_HEADER,
+        minimal_header=_LEVEL3_MINIMAL_HEADER,
+        all_file_ids=all_file_ids,
+        recent_first=most_recent_file_ids(messages) if all_file_ids else [],
+        cap=cap,
+        usable=budget.usable,
+        estimator=estimator,
+        log_event="level3_file_ids_truncated",
+    )
     footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
     target = cap - footer_tokens
 
@@ -690,7 +728,7 @@ async def condense_level1(
         condensed_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=budget.reserved_output_tokens,
+            max_tokens=_level1_max_tokens(budget),
         )
     except Exception as exc:
         logger.warning("condense_level1_llm_failed", error=str(exc))
@@ -781,56 +819,114 @@ async def condense_level2(
     )
 
 
+def _truncate_to_tokens(text: str, max_tokens: int, estimator: TokenEstimator) -> str:
+    """Return the longest prefix of *text* that estimates to at most *max_tokens*.
+
+    Binary search over the prefix length: O(log n) estimator calls.
+    """
+    if max_tokens <= 0:
+        return ""
+    if estimator.estimate(text) <= max_tokens:
+        return text
+    lo, hi = 0, len(text)  # lo always fits (empty); hi never does
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if estimator.estimate(text[:mid]) <= max_tokens:
+            lo = mid
+        else:
+            hi = mid
+    return text[:lo]
+
+
 def condense_level3_deterministic(
     nodes: list[SummaryNode],
     estimator: TokenEstimator,
+    budget: ContextBudget,
 ) -> CondensationCandidate:
     """
     Level 3 deterministic condensation fallback (no LLM required).
 
-    Truncates the concatenated summary content to
-    :data:`_CONDENSE_LEVEL3_MAX_TOKENS` tokens while always preserving all
-    file IDs from every parent node.
+    Concatenates the parent summaries' prose (without their own file-ID
+    footers) up to :data:`_CONDENSE_LEVEL3_MAX_TOKENS` tokens, then appends a
+    single ``[LCM File IDs: ...]`` footer with the IDs from every parent node.
+
+    Bounded like :func:`level3_deterministic`: the footer and header are sized
+    against 85% of ``budget.usable`` with *estimator* and the assembled text
+    is validated against ``budget.usable``.  File IDs take precedence over
+    prose (prose gets what remains), and over the ``[Condensed from: ...]``
+    parent list, which is replaced by a minimal header when it would crowd the
+    prose.  Only when the footer cannot fit the budget are the least recently
+    referenced IDs dropped (with a warning); the raw files stay addressable in
+    the immutable store.
 
     Args:
         nodes: Summary nodes to condense.
         estimator: Token estimator.
+        budget: Token budget the result must fit within.
 
     Returns:
-        CondensationCandidate that always succeeds.
+        CondensationCandidate that always succeeds and fits ``budget.usable``
+        (barring a budget too small for even the minimal header).
     """
-    # Always collect all file IDs — these must survive regardless of truncation.
-    file_ids = collect_file_ids_from_nodes(nodes)
+    all_file_ids = collect_file_ids_from_nodes(nodes)
+
+    cap = int(budget.usable * _LEVEL3_BUDGET_FRACTION)
+    prose_cap = min(_CONDENSE_LEVEL3_MAX_TOKENS, cap)
 
     parent_ids_str = ", ".join(n.id for n in nodes)
-    ids_header = f"[Condensed from: {parent_ids_str}]\n\n"
-    fallback_header = "[CONDENSED — DETERMINISTIC FALLBACK]\n"
-
-    header = fallback_header + ids_header
-    header_tokens = estimator.estimate(header)
-
-    # Reserve space for the file IDs footer before building content so it
-    # never gets pushed past _CONDENSE_LEVEL3_MAX_TOKENS.
+    full_header = f"[CONDENSED — DETERMINISTIC FALLBACK]\n[Condensed from: {parent_ids_str}]\n\n"
+    if estimator.estimate(full_header) > prose_cap // 2:
+        full_header = _CONDENSE_LEVEL3_MINIMAL_HEADER
+    header, header_tokens, file_ids = _plan_header_and_file_ids(
+        full_header=full_header,
+        minimal_header=_CONDENSE_LEVEL3_MINIMAL_HEADER,
+        all_file_ids=all_file_ids,
+        recent_first=most_recent_file_ids_from_nodes(nodes) if all_file_ids else [],
+        cap=cap,
+        usable=budget.usable,
+        estimator=estimator,
+        log_event="condense_level3_file_ids_truncated",
+    )
     footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
-    available = _CONDENSE_LEVEL3_MAX_TOKENS - header_tokens - footer_tokens
-    if available < 0:
-        available = 0
+    available = prose_cap - header_tokens - footer_tokens
 
-    # Take as much content as fits from each node in order.
-    content_parts: list[str] = []
+    # Each node's own footer is dropped from the prose: the authoritative one is
+    # appended below. Take as much as fits from each node in order.
+    chunks: list[str] = []
     used = 0
     for node in nodes:
-        chunk = node.content[:_CONDENSE_LEVEL3_NODE_MAX_CHARS]
-        chunk_tokens = estimator.estimate(chunk)
-        if used + chunk_tokens > available and content_parts:
+        remaining = available - used
+        if remaining <= 0:
             break
-        content_parts.append(chunk)
+        chunk = strip_file_ids_footer(node.content)[:_CONDENSE_LEVEL3_NODE_MAX_CHARS]
+        chunk_tokens = estimator.estimate(chunk)
+        if chunk_tokens > remaining:
+            chunk = _truncate_to_tokens(chunk, remaining, estimator)
+            if chunk:
+                chunks.append(chunk)
+            break
+        chunks.append(chunk)
         used += chunk_tokens
 
-    combined = header + "\n\n---\n\n".join(content_parts)
-    combined = append_file_ids_footer(combined, file_ids)
+    def render(count: int) -> str:
+        body = header + "\n\n---\n\n".join(chunks[:count])
+        return append_file_ids_footer(body, file_ids)
 
+    # The sizing above ignores the "---" joiners; validate the assembled text
+    # against the hard budget by shedding trailing chunks (monotone, so
+    # binary-search the largest count that fits).
+    combined = render(len(chunks))
     token_count = estimator.estimate(combined)
+    if token_count > budget.usable and chunks:
+        lo, hi = 0, len(chunks)  # hi does not fit; lo (none kept) is the floor
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if estimator.estimate(render(mid)) <= budget.usable:
+                lo = mid
+            else:
+                hi = mid
+        combined = render(lo)
+        token_count = estimator.estimate(combined)
 
     logger.info(
         "condense_level3_deterministic_produced",

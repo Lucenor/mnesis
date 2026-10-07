@@ -8,6 +8,7 @@ import pytest
 
 from mnesis.compaction.engine import CompactionEngine
 from mnesis.compaction.levels import (
+    _LEVEL3_MINIMAL_HEADER,
     SummaryCandidate,
     level1_summarise,
     level2_summarise,
@@ -360,7 +361,7 @@ class TestLevel3FileIdBound:
         )
         assert tiny.usable == usable
         candidate = level3_deterministic(self._msgs_with_ids(3), tiny, estimator)
-        if usable >= estimator.estimate("[TRUNCATED]\n"):
+        if usable >= estimator.estimate(_LEVEL3_MINIMAL_HEADER):
             assert estimator.estimate(candidate.text) <= usable
         else:
             for i in range(3):
@@ -379,7 +380,8 @@ class TestLevel3FileIdBound:
                 return text.count("\n") + 2 * text.count("\n\n")
 
         n = 2_000
-        header_cost = 4  # newlines in the full header
+        # Estimator cost of the full header: 4 newlines plus 2 for each of its two "\n\n".
+        header_cost = 8
         usable = int((header_cost + n) / 0.85) + 2
         budget = ContextBudget(
             model_context_limit=usable + 20, reserved_output_tokens=10, compaction_buffer=10

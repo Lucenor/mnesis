@@ -317,7 +317,10 @@ class TestBuilderContextTokens:
 class TestEngineFitsMeasure:
     async def test_tokens_after_counts_older_summaries(self, tmp_path):
         """CompactionResult.tokens_after is the context size: tail plus all live summaries."""
-        async with MnesisSession.open(model=MODEL, config=_cfg(tmp_path)) as s:
+        cfg = _cfg(tmp_path).model_copy(
+            update={"compaction": CompactionConfig(compaction_output_budget=2000, auto=False)}
+        )
+        async with MnesisSession.open(model=MODEL, config=cfg) as s:
             for i in range(8):
                 await s.record(_big(i), _big(i))
             first = await s.compact()
