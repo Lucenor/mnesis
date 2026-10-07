@@ -218,6 +218,30 @@ class TestCompactionLevels:
         # Budget is so tight no messages fit — summary is only the truncation header
         assert "CONTEXT TRUNCATED" in candidate.text
 
+    def test_level3_sheds_oldest_when_join_overhead_exceeds_budget(self):
+        """Per-line sizing ignores "\\n" joiners; the validation loop sheds oldest messages."""
+
+        class NewlineEstimator:
+            # One token per newline: each rendered line costs 1 when sized but 2
+            # once the join separator is added, so assembled text overshoots.
+            def estimate(self, text: str, model: ModelInfo | None = None) -> int:
+                return text.count("\n")
+
+        budget = ContextBudget(
+            model_context_limit=27, reserved_output_tokens=5, compaction_buffer=5
+        )  # usable = 17, cap = 14 == header (4) + 10 one-token lines
+        messages = [
+            MessageWithParts(
+                message=make_message("sess_l3_shed", role="user", msg_id=f"msg_shed_{i:02d}"),
+                parts=[TextPart(text=f"m{i}")],
+            )
+            for i in range(10)
+        ]
+        candidate = level3_deterministic(messages, budget, NewlineEstimator())
+        assert candidate.token_count <= budget.usable
+        assert "m9" in candidate.text  # newest survives
+        assert "m0" not in candidate.text  # oldest shed
+
     def test_extract_text_includes_tool_output(self, estimator, budget):
         """_extract_text includes ToolPart output when compacted_at is None."""
         tool_part = ToolPart(
