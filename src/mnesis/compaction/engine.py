@@ -4,8 +4,9 @@ This engine implements the full Mnesis compaction flow:
 
 1. **Tool output pruning** — backward-scan and tombstone oversized tool outputs.
 2. **Summarisation** — level 1 → level 2 → level 3 escalation for raw messages.
-3. **Condensation** — if accumulated summary nodes still exceed the hard
-   threshold after summarisation, condense them (level 1 → 2 → 3).
+3. **Condensation** — if the context (live summaries included) is still at or
+   above half the soft threshold after summarisation, condense the summary nodes
+   (level 1 → 2 → 3).
 4. **Multi-round loop** — repeat steps 2-3 up to ``max_compaction_rounds``
    times until either the context fits or no progress is made.
 
@@ -16,6 +17,15 @@ Soft/hard threshold distinction:
 - **Hard** (100 % of usable) — blocks the *next* send until compaction
   finishes, preventing an over-limit context from reaching the LLM.
 
+Both thresholds compare against the size of the **current context window**
+(system prompt + live summaries + raw messages that the next LLM call would
+carry), not lifetime billed tokens. The size shrinks as soon as compaction
+swaps messages for a summary. The engine's own "does it fit" check uses the
+same measure (see ``context_measure``) and condenses summaries until the
+context is below half the soft threshold, which makes compactions rarer than
+stopping at the trigger (not guaranteed when the system prompt and recent turns
+alone exceed that target).
+
 File IDs are propagated through every compaction round; see
 :mod:`mnesis.compaction.file_ids` and :mod:`mnesis.compaction.levels`.
 """
@@ -24,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -83,6 +94,11 @@ def _make_llm_call(model: str) -> Any:
     return _call
 
 
+# Condensation runs until the context is below this fraction of the soft
+# threshold (see ``_run_compaction_inner``).
+_CONDENSE_TARGET_FRACTION = 0.5
+
+
 class CompactionEngine:
     """
     Orchestrates the full compaction protocol (summarise → condense → loop).
@@ -103,6 +119,12 @@ class CompactionEngine:
       before the LLM call; if exceeded, the caller should ``await
       wait_for_pending()`` to block until compaction completes.
 
+    Both thresholds take the size of the *current context window* in tokens
+    (see :attr:`mnesis.context.builder.BuiltContext.context_tokens`), never
+    lifetime usage. At most one compaction is in flight per engine:
+    :meth:`check_and_trigger` is a no-op while a previous task is running, and
+    :meth:`compact_exclusive` (manual compaction) waits for it first.
+
     Example::
 
         engine = CompactionEngine(store, dag_store, estimator, event_bus, config)
@@ -121,6 +143,8 @@ class CompactionEngine:
         config: MnesisConfig,
         id_generator: Any = None,
         session_model: str | None = None,
+        model_info: ModelInfo | None = None,
+        context_measure: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self._store = store
         self._dag_store = dag_store
@@ -128,10 +152,24 @@ class CompactionEngine:
         self._event_bus = event_bus
         self._config = config
         self._session_model = session_model
+        # Session model limits (including ``model_overrides``). When given, the
+        # multi-round loop stops below half the soft threshold that triggers
+        # compaction; otherwise it uses a fixed 200K-window hard budget.
+        self._model_info = model_info
+        # Async callable ``(session_id) -> int`` returning the session's current context size (the
+        # ``BuiltContext.context_tokens`` the trigger uses). When set, the
+        # engine's stop condition and ``tokens_before``/``tokens_after`` use it
+        # so they cannot diverge from the trigger; otherwise they fall back to
+        # an estimator-based count of raw messages plus live summaries.
+        self._context_measure = context_measure
         self._pruner = ToolOutputPruner(store, token_estimator, config)
         self._id_gen = id_generator or _default_id_generator
         self._logger = structlog.get_logger("mnesis.compaction")
         self._pending_task: asyncio.Task[CompactionResult] | None = None
+
+    def set_context_measure(self, measure: Callable[[str], Awaitable[int]] | None) -> None:
+        """Set the callable that returns the session's current context size."""
+        self._context_measure = measure
 
     # ── Threshold helpers ───────────────────────────────────────────────────────
 
@@ -140,18 +178,25 @@ class CompactionEngine:
         budget = self._config.compaction.compaction_output_budget
         return model.context_limit - model.max_output_tokens - budget
 
-    def is_soft_overflow(self, tokens: TokenUsage, model: ModelInfo) -> bool:
+    @staticmethod
+    def _as_count(tokens: TokenUsage | int) -> int:
+        """Normalise a token measure to an int (``TokenUsage`` is summed)."""
+        return tokens if isinstance(tokens, int) else tokens.effective_total()
+
+    def is_soft_overflow(self, tokens: TokenUsage | int, model: ModelInfo) -> bool:
         """
         Return True if the soft threshold has been crossed.
 
         The soft threshold triggers early background compaction (non-blocking).
 
         Args:
-            tokens: Current cumulative token usage.
+            tokens: Size of the current context window in tokens (an ``int``,
+                e.g. ``BuiltContext.context_tokens``). A ``TokenUsage`` is also
+                accepted and compared by its ``effective_total()``.
             model: Model metadata providing context limit.
 
         Returns:
-            True if tokens exceed ``soft_threshold_fraction * usable``.
+            True if tokens reach ``soft_threshold_fraction * usable``.
         """
         if not self._config.compaction.auto:
             return False
@@ -160,9 +205,9 @@ class CompactionEngine:
 
         usable = self._usable_tokens(model)
         soft_limit = int(usable * self._config.compaction.soft_threshold_fraction)
-        return tokens.effective_total() >= soft_limit
+        return self._as_count(tokens) >= soft_limit
 
-    def is_hard_overflow(self, tokens: TokenUsage, model: ModelInfo) -> bool:
+    def is_hard_overflow(self, tokens: TokenUsage | int, model: ModelInfo) -> bool:
         """
         Return True if the hard threshold has been crossed.
 
@@ -170,11 +215,12 @@ class CompactionEngine:
         the next LLM call to avoid an over-limit request.
 
         Args:
-            tokens: Current cumulative token usage.
+            tokens: Size of the current context window in tokens (see
+                :meth:`is_soft_overflow`).
             model: Model metadata providing context limit.
 
         Returns:
-            True if tokens exceed the full usable budget.
+            True if tokens reach the full usable budget.
         """
         if not self._config.compaction.auto:
             return False
@@ -182,9 +228,9 @@ class CompactionEngine:
             return False
 
         usable = self._usable_tokens(model)
-        return tokens.effective_total() >= usable
+        return self._as_count(tokens) >= usable
 
-    def is_overflow(self, tokens: TokenUsage, model: ModelInfo) -> bool:
+    def is_overflow(self, tokens: TokenUsage | int, model: ModelInfo) -> bool:
         """
         Return True if compaction should be triggered (soft threshold check).
 
@@ -192,7 +238,7 @@ class CompactionEngine:
         :meth:`is_soft_overflow`.
 
         Args:
-            tokens: Current cumulative token usage for the session.
+            tokens: Size of the current context window in tokens.
             model: Model metadata providing context limit.
 
         Returns:
@@ -205,7 +251,7 @@ class CompactionEngine:
     def check_and_trigger(
         self,
         session_id: str,
-        tokens: TokenUsage,
+        tokens: TokenUsage | int,
         model: ModelInfo,
         abort: asyncio.Event | None = None,
     ) -> bool:
@@ -214,28 +260,34 @@ class CompactionEngine:
 
         Non-blocking — schedules a background task and returns immediately.
         The task handle is stored in ``self._pending_task`` so callers can
-        await or cancel it during shutdown.
+        await or cancel it during shutdown. At most one compaction is in
+        flight: while a previous task is still running this is a no-op, so
+        rapid overflowing turns cannot run concurrent compactions (duplicate
+        summaries / conflicting context-item swaps) or orphan the tracked task.
 
         Args:
             session_id: The session to compact.
-            tokens: Current token usage.
+            tokens: Size of the current context window in tokens.
             model: Model info for overflow detection.
             abort: Optional event to signal early termination.
 
         Returns:
-            True if compaction was triggered, False otherwise.
+            True if a new compaction task was scheduled, False if the context
+            is under the soft threshold or a compaction is already in flight.
         """
         if not self.is_overflow(tokens, model):
+            return False
+        if self._pending_task is not None and not self._pending_task.done():
             return False
 
         self._logger.info(
             "compaction_triggered",
             session_id=session_id,
-            tokens=tokens.effective_total(),
+            tokens=self._as_count(tokens),
         )
         self._event_bus.publish(
             MnesisEvent.COMPACTION_TRIGGERED,
-            {"session_id": session_id, "tokens": tokens.effective_total()},
+            {"session_id": session_id, "tokens": self._as_count(tokens)},
         )
 
         task = asyncio.create_task(self.run_compaction(session_id, abort=abort))
@@ -263,8 +315,38 @@ class CompactionEngine:
                 self._logger.exception("background_compaction_failed", error=str(exc))
         elif task is not None and not task.cancelled() and task.exception() is None:
             result = task.result()
-        self._pending_task = None
+        # A newer run may have replaced the one awaited here; never drop its handle.
+        if self._pending_task is task:
+            self._pending_task = None
         return result
+
+    @property
+    def in_flight(self) -> bool:
+        """``True`` while a compaction task (background or manual) is running."""
+        task = self._pending_task
+        return task is not None and not task.done()
+
+    @property
+    def has_pending(self) -> bool:
+        """``True`` if a task handle is held, running or finished but not yet reaped."""
+        return self._pending_task is not None
+
+    async def compact_exclusive(self, session_id: str) -> CompactionResult:
+        """
+        Run a compaction as the tracked in-flight task, after any pending one.
+
+        Used for manual compaction so that it never overlaps a background run
+        (duplicate summaries / conflicting context-item swaps).
+        """
+        while self._pending_task is not None:
+            _ = await self.wait_for_pending()
+        task = asyncio.create_task(self.run_compaction(session_id))
+        self._pending_task = task
+        try:
+            return await task
+        finally:
+            if self._pending_task is task:
+                self._pending_task = None
 
     # ── Public compaction entry point ───────────────────────────────────────────
 
@@ -331,6 +413,9 @@ class CompactionEngine:
     ) -> CompactionResult:
         start_ms = time.time() * 1000
 
+        # Context size before this run, on the same basis as ``tokens_after``.
+        measured_before = await self._measure_session(session_id)
+
         # Step 1: Run pruner first to reduce input size
         prune_result = await self._pruner.prune(session_id)
         if prune_result.pruned_count > 0:
@@ -364,7 +449,19 @@ class CompactionEngine:
                 pruned_tokens=prune_result.pruned_tokens,
             )
 
-        tokens_before = sum(self._estimator.estimate_message(m) for m in non_summary)
+        # Raw messages still in the context (the store also holds messages that
+        # earlier compactions already replaced). Legacy databases without
+        # ``context_items`` rows count every message.
+        in_context_ids = {
+            item_id
+            for item_type, item_id in await self._store.get_context_items(session_id)
+            if item_type != "summary"
+        }
+        in_context = [m for m in non_summary if m.id in in_context_ids] or non_summary
+        raw_tokens = sum(self._estimator.estimate_message(m) for m in in_context)
+        if measured_before is None:
+            prior_nodes = await self._dag_store.get_active_nodes(session_id)
+            measured_before = raw_tokens + sum(n.token_count for n in prior_nodes)
 
         # Determine compaction model: explicit override → config → session model
         compaction_model = (
@@ -438,24 +535,44 @@ class CompactionEngine:
         last_messages_covered = candidate.messages_covered
         last_summary_tokens = candidate.token_count
 
-        tokens_after = (
-            tokens_before
-            - sum(self._estimator.estimate_message(m) for m in non_summary[: span_end_idx + 1])
-            + candidate.token_count
+        # Raw messages that stay in context after the leaf swap. Older leaf
+        # summaries stay in context until condensed, so the context after
+        # compaction is the tail plus every live summary node (plus the system
+        # prompt, when ``context_measure`` is set). The loop below stops once
+        # that is below ``fit_limit``: a fraction of the soft threshold that
+        # triggers compaction. Stopping exactly at the soft threshold would leave
+        # the context hovering at the trigger and re-compact on nearly every
+        # turn once summaries accumulate.
+        compacted_set = set(compacted_ids)
+        tail_tokens = sum(
+            self._estimator.estimate_message(m) for m in in_context if m.id not in compacted_set
         )
+        fit_limit = (
+            int(
+                self._usable_tokens(self._model_info)
+                * self._config.compaction.soft_threshold_fraction
+                * _CONDENSE_TARGET_FRACTION
+            )
+            if self._model_info is not None and self._model_info.context_limit > 0
+            else budget.usable
+        )
+        tokens_after = await self._measure(session_id, tail_tokens)
 
         # ── Condensation + multi-round loop ──────────────────────────────────────
         if self._config.compaction.condensation_enabled:
             max_rounds = self._config.compaction.max_compaction_rounds
             for round_num in range(max_rounds):
-                if tokens_after <= budget.usable:
-                    break  # Under budget — done.
-
                 if abort and abort.is_set():
                     raise asyncio.CancelledError("Compaction aborted during condensation")
 
-                # Fetch all live summary nodes.
+                # Fetch all live summary nodes (older leaves stay in context
+                # until condensed, so they count towards the context size).
+                # ``tokens_after`` is fresh here: measured after the leaf swap
+                # (round 0) or after the previous round's condensation.
                 active_nodes = await self._dag_store.get_active_nodes(session_id)
+                if tokens_after < fit_limit:
+                    break  # Under budget — done.
+
                 if len(active_nodes) < 2:
                     break  # Nothing to condense — can't make further progress.
 
@@ -513,7 +630,7 @@ class CompactionEngine:
                 last_summary_msg_id = condensed_msg_id
                 last_summary_level = cond.compaction_level
                 last_summary_tokens = cond.token_count
-                tokens_after = max(0, tokens_after - tokens_before_condense + cond.token_count)
+                tokens_after = await self._measure(session_id, tail_tokens)
 
                 self._logger.info(
                     "condensation_round_completed",
@@ -522,7 +639,7 @@ class CompactionEngine:
                     tokens_after=tokens_after,
                 )
 
-        tokens_after = max(0, tokens_after)
+        tokens_before = measured_before
         elapsed_ms = time.time() * 1000 - start_ms
         result = CompactionResult(
             session_id=session_id,
@@ -549,6 +666,33 @@ class CompactionEngine:
 
         self._event_bus.publish(MnesisEvent.COMPACTION_COMPLETED, result.model_dump())
         return result
+
+    async def _measure_session(self, session_id: str) -> int | None:
+        """Return the session's current context size, or ``None`` if unavailable.
+
+        This is the builder's un-truncated context size (system prompt, live
+        summaries and raw messages, session-model estimator): the number the
+        soft/hard triggers compare.
+        """
+        if self._context_measure is None:
+            return None
+        try:
+            return await self._context_measure(session_id)
+        except Exception:
+            self._logger.warning("context_measure_failed", session_id=session_id, exc_info=True)
+            return None
+
+    async def _measure(self, session_id: str, tail_tokens: int) -> int:
+        """Return the context size after the leaf swap.
+
+        Uses :meth:`_measure_session` when available; otherwise ``tail_tokens``
+        plus the live summary nodes (estimator-based, no system prompt).
+        """
+        measured = await self._measure_session(session_id)
+        if measured is not None:
+            return measured
+        nodes = await self._dag_store.get_active_nodes(session_id)
+        return tail_tokens + sum(n.token_count for n in nodes)
 
     async def _run_summarisation(
         self,

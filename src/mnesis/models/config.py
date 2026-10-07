@@ -75,7 +75,8 @@ class CompactionConfig(BaseModel):
         le=0.95,
         description=(
             "[Advanced] Fraction of the usable context window at which background compaction is "
-            "triggered early (soft threshold). Must be less than 1.0 so compaction "
+            "triggered early (soft threshold), measured against the current context window "
+            "size (not lifetime token usage). Must be less than 1.0 so compaction "
             "starts before the hard limit is reached."
         ),
     )
@@ -85,8 +86,9 @@ class CompactionConfig(BaseModel):
         ge=1,
         le=50,
         description=(
-            "[Advanced] Maximum number of summarise + condense cycles to run when the context "
-            "is still over the hard threshold after an initial compaction pass."
+            "[Advanced] Upper bound on condensation rounds per compaction run. Each round merges "
+            "all live summary nodes into one, so a run condenses at most once in practice "
+            "and this limit is effectively never reached."
         ),
     )
 

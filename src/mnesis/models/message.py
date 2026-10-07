@@ -337,8 +337,9 @@ class TurnResult(BaseModel):
     cost: float
     """Estimated USD cost of this turn. **Always ``0.0`` — not yet implemented.**"""
     compaction_triggered: bool = False
-    """``True`` if this turn's token usage crossed the soft threshold and a
-    *background* compaction was scheduled. The turn does not wait for it."""
+    """``True`` if the context window after this turn crossed the soft threshold and a
+    *background* compaction was scheduled. The turn does not wait for it. ``False``
+    when a compaction was already in flight (no second one is scheduled)."""
     compaction_result: CompactionResult | None = None
     """Result of a compaction that ran **before** this turn's LLM call.
 
@@ -364,7 +365,10 @@ class CompactionResult(BaseModel):
     compacted_message_count: int
     summary_token_count: int
     tokens_before: int
+    """Size of the active context window before the run, on the same basis as ``tokens_after``."""
     tokens_after: int
+    """Size of the active context window after the run, including older live summaries.
+    For sessions this is the measure the soft/hard thresholds use (system prompt included)."""
     elapsed_ms: float
     pruned_tool_outputs: int = 0
     """Number of tool output parts tombstoned by the ToolOutputPruner during this run."""

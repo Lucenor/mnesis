@@ -14,7 +14,7 @@ On each turn, the **ContextBuilder** assembles a curated *Active Context* — a 
 
 ## Three-Level Compaction
 
-When cumulative token usage crosses the threshold, the `CompactionEngine` escalates through three levels automatically:
+When the size of the current context window crosses the threshold, the `CompactionEngine` escalates through three levels automatically:
 
 | Level | Strategy | Failure mode |
 |---|---|---|
@@ -26,6 +26,8 @@ Level 3 is the unconditional safety net. At the soft threshold, compaction runs 
 
 !!! info "Soft vs. hard threshold"
     Compaction has two thresholds: a **soft threshold** (default 60% of usable context, `soft_threshold_fraction`) that triggers background compaction without blocking the current turn, and a **hard threshold** (100%) that blocks `send()` until compaction completes. Both are configurable via `CompactionConfig`.
+
+    Both thresholds compare against the size of the **current context window** — the system prompt, live summaries, and raw messages the next LLM call would carry — not lifetime billed usage (`session.token_usage`, which only grows). Compaction shrinks the context immediately and condenses summaries toward half the soft threshold, which makes compactions rare in typical sessions (not guaranteed when the system prompt and recent turns alone are large), including after `MnesisSession.load()`. At most one compaction is in flight per session (a manual `compact()` waits for a running background one first).
 
 ## Tool Output Pruning
 

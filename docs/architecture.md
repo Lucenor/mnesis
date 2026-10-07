@@ -130,27 +130,31 @@ Session -> Store: "append_part(raw_part) for each user part"
 Store -> Store: INSERT INTO message_parts
 Session -> Session: "event_bus.publish(MESSAGE_CREATED, user)"
 
-hard threshold check: {
-  Session -> Engine: "check_and_trigger() if no pending task"
-  Session -> Engine: "await wait_for_pending() [BLOCKS]"
-}
-
 Session -> Builder: "build(session_id, model_info, sys_prompt, config)"
 Builder -> Store: get_context_items(session_id)
 Builder -> Store: get_messages_with_parts_by_ids(message_ids)
 Builder -> SDS: "get_node_by_id(summary_id) for each summary item"
-Builder -> Session: "BuiltContext(messages, token_estimate)"
+Builder -> Session: "BuiltContext(messages, token_estimate, context_tokens)"
+
+hard threshold check: {
+  Session -> Engine: "is_hard_overflow(context_tokens)"
+  Session -> Engine: "check_and_trigger() if no pending task"
+  Session -> Engine: "await wait_for_pending() [BLOCKS]"
+  Session -> Builder: "build(...) again on the compacted context"
+}
+
 Session -> Store: "append_message(assistant_msg) [pre-commit row]"
 Session -> LLM: "litellm.acompletion(stream=True)"
 LLM -> Session: stream TextPart chunks
 Session -> Caller: "on_part(TextPart) callbacks"
 Session -> Store: append_part(text_raw with token_estimate)
 Session -> Store: "update_message_tokens(assistant_msg_id, final_tokens)"
-Session -> Session: "cumulative_tokens += final_tokens"
+Session -> Session: "cumulative_tokens += final_tokens (lifetime accounting only)"
 Session -> Session: _check_doom_loop()
 
 soft threshold check: {
-  Session -> Engine: "check_and_trigger() [non-blocking, asyncio.create_task]"
+  Session -> Builder: "build(...) [post-turn context, reused for the TurnSnapshot]"
+  Session -> Engine: "check_and_trigger(context_tokens) [non-blocking, asyncio.create_task]"
 }
 
 Session -> Session: "event_bus.publish(MESSAGE_CREATED, assistant)"
@@ -168,9 +172,10 @@ Session -> Caller: "TurnResult(text, tokens, compaction_triggered)"
    `update_message_tokens()`. This is the only mutation of a message row
    permitted by `ImmutableStore`.
 
-3. Hard-threshold blocking (`await wait_for_pending()`) happens *before*
-   `ContextBuilder.build()` is called, ensuring the LLM never sees an
-   over-limit context.
+3. Hard-threshold blocking (`await wait_for_pending()`) happens *before* the
+   LLM call. The hard check reads the context just assembled by
+   `ContextBuilder.build()`; if it blocks, the context is rebuilt after
+   compaction so the LLM never sees an over-limit context.
 
 4. Soft-threshold compaction fires *after* the turn completes via
    `asyncio.create_task()`. The current turn is not delayed.
@@ -351,15 +356,49 @@ CompactFailed -> Idle: "COMPACTION_FAILED published\nstub result returned"
 ### Thresholds
 
 - **Soft threshold**: `soft_threshold_fraction * usable` (default 60%).
-  Checked after each turn completes. If crossed, `check_and_trigger()` calls
-  `asyncio.create_task(run_compaction())` and returns `True` immediately. The
-  current turn is not affected.
+  Checked after each turn completes (`send()` and `record()`). If crossed,
+  `check_and_trigger()` calls `asyncio.create_task(run_compaction())` and
+  returns `True` immediately. The current turn is not affected. It is a no-op
+  (returns `False`) while a previous compaction is still running, so at most
+  one compaction is in flight per session. A manual `session.compact()` runs as
+  that same tracked task, after waiting for any running background one.
 
 - **Hard threshold**: `usable` (100%).
   Checked at the *start* of `send()`, before the LLM call. If the hard limit
-  is crossed, `send()` triggers or waits for the in-flight compaction task
-  (`await wait_for_pending()`) before proceeding. This prevents sending an
-  over-limit context to the provider.
+  is crossed, `send()` waits for the in-flight compaction task
+  (`await wait_for_pending()`), rebuilds the context and re-checks; if it is
+  still over the limit it starts one fresh run, waits for it once and rebuilds.
+  This prevents sending an over-limit context to the provider (the retry is
+  bounded so a context that cannot shrink cannot loop).
+
+**What the thresholds measure.** Both compare against
+`BuiltContext.context_tokens`: the estimated size of the *current context
+window* — system prompt + live summary nodes + every raw message in
+`context_items`, counted **before** the builder drops messages that do not fit
+the budget (`token_estimate` is capped at `usable` and so can never signal
+overflow). Compaction swaps messages for a summary in `context_items`, so this
+value drops immediately afterwards. It is derived from persisted state, so a
+reloaded session starts with the correct value. `MnesisSession.token_usage` (lifetime billed tokens,
+which only grows and counts the full prompt every turn) is accounting only and
+plays no part in these decisions.
+
+The multi-round loop in `_run_compaction_inner()` uses the same yardstick.
+The session hands the engine a measurement callback (`context_measure`) that
+builds the context with the session's model, estimator and system prompt, so the
+engine's "does it fit" check, `tokens_before` and `tokens_after` are exactly the
+numbers the trigger compares. When the engine knows the session's `ModelInfo`
+(including `model_overrides`), condensation runs until that measure is below half
+of the soft threshold (`usable * soft_threshold_fraction * 0.5`; the 0.5 is a
+private constant, not configuration). Stopping exactly at the soft threshold
+left the context hovering at the trigger and re-compacted on nearly every turn
+once leaf summaries accumulated; the lower target makes compactions rarer in
+practice. It is not a guarantee: when the system prompt, the most recent turns and
+a single summary already exceed the target, every compaction condenses and the
+target is never reached. Each run merges all live summary nodes into one, so a
+run condenses at most once and `max_compaction_rounds` is effectively never
+reached. Without a `ModelInfo` the stop target is the fixed 200K-window hard
+budget; without the callback the measure falls back to an estimator-based count
+of the raw tail plus live summaries (no system prompt).
 
 ### `run_compaction()` sequence
 
@@ -383,8 +422,9 @@ The inner sequence for each round:
    Then `ImmutableStore.swap_context_items()` atomically replaces the compacted
    message entries with one `'summary'` entry.
 
-4. **Condensation loop** (if `condensation_enabled=True`) — while
-   `tokens_after > budget.usable` and `len(active_nodes) >= 2`, the engine
+4. **Condensation loop** (if `condensation_enabled=True`) — while the
+   re-measured context is not below the condensation target (half the soft
+   threshold) and `len(active_nodes) >= 2`, the engine
    calls `_run_condensation()` to merge all live `SummaryNode` objects into a
    single condensed node. The consumed nodes are marked superseded via
    `SummaryDAGStore.mark_superseded()`. Loop runs up to `max_compaction_rounds`
@@ -719,12 +759,15 @@ mutations are `update_message_tokens()` (status fields only) and
 `CompactionEngine.check_and_trigger()` always uses `asyncio.create_task()` and
 returns immediately. The current turn completes before compaction begins.
 
-**Exception:** when `cumulative_tokens >= hard_threshold` at the start of
-`send()`, the call blocks via `await wait_for_pending()`. This is the designed
+**Exception:** when the current context size (`BuiltContext.context_tokens`)
+is `>= hard_threshold` at the start of `send()`, the call blocks via
+`await wait_for_pending()`. This is the designed
 safety valve that prevents over-limit contexts from reaching the provider.
 
-**Enforced by:** `send()` in `session.py`, lines checking
-`is_hard_overflow()` before `ContextBuilder.build()`.
+**Enforced by:** `send()` in `session.py`: it builds the context, then
+`_ensure_under_hard_limit()` checks `is_hard_overflow()` on it, waits for any
+in-flight compaction, re-measures, and starts at most one fresh run if the
+context is still over the hard limit.
 
 ### 3. Level 3 compaction always succeeds
 
