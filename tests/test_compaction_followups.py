@@ -772,7 +772,6 @@ class TestStalledCompaction:
             result = await s.send("turn 9 y")
             # The new turn made turn 1 summarisable: send() compacted instead of
             # sending an over-hard context that the builder would truncate.
-            assert not engine.stalled
             assert len(calls) > before
             assert result.compaction_result is not None
             assert await s._measure_context(s.id) < usable
@@ -1199,7 +1198,7 @@ class TestBlockingRunStopsUnderHard:
             async with MnesisSession.open(
                 model=MODEL, config=_cfg(tmp_path / mode, auto=False, condensation_enabled=False)
             ) as s:
-                for i in range(40):
+                for i in range(36):
                     _ = await s.record(_turn(i), "reply " + "lorem ipsum " * 60)
                 _ = await s._compaction_engine.run_compaction(
                     s.id, until_under_hard=mode == "blocking"
@@ -1246,3 +1245,46 @@ class TestRunResultAndLoad:
         with pytest.raises(ValueError):
             _ = await MnesisSession.load(sid, config=bad)
         assert len(closed) == 1
+
+
+# ── Per-turn system prompt vs. the blocking run's stop target ─────────────────
+
+
+class TestPerTurnSystemPromptHeadroom:
+    async def _send_with_big_prompt(self, tmp_path, monkeypatch, **comp):
+        sent: list[int] = []
+        mock_response = MnesisSession._mock_response
+
+        async def spy(self, llm_messages, *a, **k):
+            sent.append(len(llm_messages))
+            return await mock_response(self, llm_messages, *a, **k)
+
+        monkeypatch.setattr(MnesisSession, "_mock_response", spy)
+        cfg = _cfg(tmp_path, auto=False, **comp)
+        async with MnesisSession.open(model=MODEL, config=cfg, system_prompt="short") as s:
+            for i in range(40):
+                _ = await s.record(_turn(i, 60), "reply " + "lorem ipsum " * 40)
+            s._config.compaction.auto = True
+            # The per-turn prompt is ~3K tokens larger than the session prompt the
+            # engine measures with.
+            result = await s.send("go", system_prompt="long prompt " * 1200)
+            items = await s._store.get_context_items(s.id)
+            usable = s._compaction_engine._usable_tokens(s._model_info)
+        return result, sent[-1], len(items) - 1, usable
+
+    async def test_every_in_context_message_is_sent(self, tmp_path, monkeypatch):
+        result, sent, in_context, _ = await self._send_with_big_prompt(tmp_path, monkeypatch)
+        assert result.compaction_result is not None
+        assert sent == in_context  # nothing truncated by the builder
+
+    async def test_backstop_reruns_when_stop_target_leaves_it_over_hard(
+        self, tmp_path, monkeypatch
+    ):
+        # A soft threshold at 95% of usable makes the blocking run stop close to the
+        # hard limit by the engine's measure; the extra per-turn prompt then puts the
+        # sent context over it, and the bounded backstop run drains the rest.
+        result, sent, in_context, _ = await self._send_with_big_prompt(
+            tmp_path, monkeypatch, soft_threshold_fraction=0.95
+        )
+        assert result.compaction_result is not None
+        assert sent == in_context

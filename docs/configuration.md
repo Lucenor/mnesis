@@ -81,8 +81,9 @@ MnesisConfig(
 )
 ```
 
-A run that blocks `send()` at the hard limit stops as soon as the context is
-under it; a background run can make up to `2 * max_compaction_rounds` sequential
+A run that blocks `send()` at the hard limit stops once the context is under
+the soft threshold (leaving the rest for the background run; a bounded extra run
+covers a per-turn `system_prompt` that is larger than the session prompt); a background run can make up to `2 * max_compaction_rounds` sequential
 summariser calls in the worst case (20 with the default), typically 1 to 2.
 
 ### Custom compaction prompt

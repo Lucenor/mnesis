@@ -575,24 +575,27 @@ def _append_bounded_footer(
     budget: ContextBudget,
     estimator: TokenEstimator,
 ) -> str:
-    """Append the file-ID footer to an LLM summary, bounded by ``budget.usable``.
+    """Append the file-ID footer to an LLM summary.
 
-    An unbounded footer could push an otherwise-fine summary over budget and
-    force escalation. When the footer does not fit, the least recently
-    referenced IDs are dropped (the footer stays in first-occurrence order),
-    mirroring level 3; the raw files stay addressable in the immutable store.
+    File IDs take priority over the model's prose (invariant: references are
+    never lost). IDs are dropped only when the footer *alone* (plus the prose
+    already present) cannot fit ``budget.usable``, which no escalation can
+    avoid; the least recently referenced go first and the footer stays in
+    first-occurrence order, as in level 3. When the footer fits alone but
+    text + footer does not, the full footer is appended and the caller's budget
+    check rejects the candidate, so the run escalates to the next level.
     """
-    if file_ids:
-        fitted = _fit_file_ids(recent_first, estimator.estimate(text), budget.usable, estimator)
-        if len(fitted) < len(file_ids):
-            keep = set(fitted)
-            logger.warning(
-                "summary_file_ids_truncated",
-                kept=len(fitted),
-                dropped=len(file_ids) - len(fitted),
-                budget_usable=budget.usable,
-            )
-            file_ids = [fid for fid in file_ids if fid in keep]
+    if file_ids and estimator.estimate(append_file_ids_footer("", file_ids)) > budget.usable:
+        prose_tokens = estimator.estimate(strip_file_ids_footer(text))
+        fitted = _fit_file_ids(recent_first, prose_tokens, budget.usable, estimator)
+        keep = set(fitted)
+        logger.warning(
+            "summary_file_ids_truncated",
+            kept=len(fitted),
+            dropped=len(file_ids) - len(fitted),
+            budget_usable=budget.usable,
+        )
+        file_ids = [fid for fid in file_ids if fid in keep]
     return append_file_ids_footer(text, file_ids)
 
 

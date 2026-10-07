@@ -88,7 +88,10 @@ class CompactionCompletedPayload(TypedDict):
     level_used: int
     """Escalation level: 1 = selective LLM, 2 = aggressive LLM, 3 = deterministic."""
     compacted_message_count: int
+    """Messages summarised by the run, cumulative across its summarisation passes."""
     summary_token_count: int
+    """Tokens of the summary content produced: the sum over the run's leaf passes, or the
+    condensed node's size after condensation."""
     tokens_before: int
     tokens_after: int
     elapsed_ms: float

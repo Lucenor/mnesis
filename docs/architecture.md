@@ -386,21 +386,41 @@ CompactFailed -> Idle: "COMPACTION_FAILED published\nstub result returned"
   (soft) trigger is paused (`CompactionEngine.stalled`) and logs a
   `compaction_cannot_reduce_context` warning once. A new user turn re-arms it
   (it can make older messages summarisable); a turn that arrives while a run is
-  in flight prevents that run from pausing on its stale view. The pause never
-  applies to the hard limit: the next `send()` that finds the context over the
-  hard limit still blocks on a compaction run, which makes no LLM calls when
-  nothing is summarisable. Level 3 is unaffected (a run always produces its
+  in flight prevents that run from pausing on its stale view. The warning is
+  logged once per pause episode (reset when a run gets under the soft threshold
+  or finds work left). The pause never applies to the hard limit: the next
+  `send()` that finds the context over the hard limit still blocks on a
+  compaction run. Such a run makes no summarisation calls when nothing is
+  summarisable; the only LLM call it can make is a condensation, and only for a
+  set of live summary nodes that is new since the last condensation that failed
+  to shrink them (that set is remembered and skipped while unchanged). Level 3 is unaffected (a run always produces its
   summary first), and the engine never truncates the protected tail to force a
   fit: Level 3 runs only over the summarisable messages, so the last two user
   turns, including the message being answered, stay raw. A manual `compact()`
   always runs and re-evaluates the state.
 - **Blocking runs stop early.** The run that `send()` waits for at the hard limit
-  stops draining as soon as the context is under the hard limit; the rest of the
-  drain is left to the background run that the post-turn soft check schedules.
-  A background run can use up to `max_compaction_rounds` summarisation passes (each
+  stops draining once the context is under the *soft* threshold (not the hard
+  limit); the rest of the drain is left to the background run that the post-turn
+  soft check schedules. The soft threshold is the target because the engine's
+  measure uses the session system prompt while `send()` checks the hard limit
+  with a per-turn `system_prompt` override: stopping just under hard would let
+  the override push the sent context back over it. As a bounded backstop, if
+  the rebuilt context is still over the hard limit and the run left work, `send()`
+  runs one more compaction to the full drain target (at most one extra run, no
+  loop). A background run can use up to `max_compaction_rounds` summarisation passes (each
   Level 1 then Level 2 on failure), so the worst case is
   `2 * max_compaction_rounds` sequential summariser calls (20 with the default);
   typically 1 to 2.
+- **A session stuck above the soft threshold** (the protected turns plus live
+  summaries alone exceed it) re-arms on every new user turn, so it compacts once
+  per user turn: one summarisation of whatever left the protected tail plus a
+  condensation attempt. That is accepted: each run does real work (the turn that
+  just left the tail), and the alternative, staying paused, risks sending an
+  over-hard context.
+- **Not fixable by compaction.** A single user message larger than the usable
+  window, or a protected last-two-turns tail that is itself over the hard limit,
+  cannot be shrunk: those turns are never summarised, so the request is sent as
+  is (the builder may truncate older messages) and the provider may reject it.
 
 **What the thresholds measure.** Both compare against
 `BuiltContext.context_tokens`: the estimated size of the *current context
@@ -460,9 +480,10 @@ The inner sequence for each round:
    protected last two user turns), the leaf step is skipped rather than
    truncating that tail. The summariser's request is sized to the compaction
    model: `max_tokens` is bounded by its output limit, and the input cap leaves
-   room for `max_tokens` plus the prompt. File-ID footers on LLM summaries are
-   bounded by the summary budget (least recently referenced IDs dropped first,
-   as in Level 3).
+   room for `max_tokens` plus the prompt. File IDs outrank the model's
+   prose: a summary whose text plus footer exceeds the budget is rejected so the
+   run escalates (Level 2, then Level 3), and IDs are dropped (least recently
+   referenced first, as in Level 3) only when the footer alone cannot fit.
 
 3. **Commit** — `SummaryDAGStore.insert_node()` writes the summary as a
    `Message(is_summary=True)` row plus a `TextPart` and a `CompactionMarkerPart`.

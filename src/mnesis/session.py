@@ -229,19 +229,21 @@ class MnesisSession:
         check_compaction_budget(cfg.compaction, model_info)
 
         store = ImmutableStore(cfg.store, pool=pool)
-        await store.initialize()
-
         session_id = make_id("sess")
         provider = model_info.provider_id
-
-        await store.create_session(
-            session_id,
-            model_id=model,
-            provider_id=provider,
-            agent=agent,
-            parent_id=parent_id,
-            system_prompt=system_prompt,
-        )
+        try:
+            await store.initialize()
+            await store.create_session(
+                session_id,
+                model_id=model,
+                provider_id=provider,
+                agent=agent,
+                parent_id=parent_id,
+                system_prompt=system_prompt,
+            )
+        except BaseException:
+            await store.close()
+            raise
 
         dag_store = SummaryDAGStore(store)
         estimator = TokenEstimator()
@@ -379,9 +381,8 @@ class MnesisSession:
             )
 
         store = ImmutableStore(cfg.store, pool=pool)
-        await store.initialize()
-
         try:
+            await store.initialize()
             db_session = await store.get_session(session_id)
             if not db_session.model_id:
                 raise ValueError(
@@ -392,6 +393,11 @@ class MnesisSession:
             if cfg.model_overrides:
                 model_info = model_info.model_copy(update=cfg.model_overrides)
             check_compaction_budget(cfg.compaction, model_info)
+            # Rebuild lifetime usage from persisted assistant turns so ``token_usage``
+            # reflects the prior conversation. Summary messages are excluded:
+            # send()/record() never count them. Compaction thresholds do NOT use
+            # this: they measure the current context from ``context_items``.
+            cumulative_tokens = await store.sum_token_usage(session_id)
         except BaseException:
             await store.close()
             raise
@@ -410,12 +416,6 @@ class MnesisSession:
             session_model=model,
             model_info=model_info,
         )
-
-        # Rebuild lifetime usage from persisted assistant turns so ``token_usage``
-        # reflects the prior conversation. Summary messages are excluded:
-        # send()/record() never count them. Compaction thresholds do NOT use
-        # this: they measure the current context from ``context_items``.
-        cumulative_tokens = await store.sum_token_usage(session_id)
 
         session = cls(
             session_id=session_id,
@@ -1352,8 +1352,10 @@ class MnesisSession:
         A compaction already in flight (or just finished) is awaited first and
         the context re-measured, since it may have shrunk it after *context*
         was built. Only if the rebuilt context is still over the hard limit is
-        one fresh compaction run and awaited, so this performs at most one
-        retry and cannot loop when compaction cannot shrink the context.
+        one fresh compaction run and awaited; if that leaves it over the hard
+        limit with work remaining, one more run to the full drain target. So
+        this performs at most two runs and cannot loop when compaction cannot
+        shrink the context.
 
         Returns:
             ``(context, compaction_result)``: the context to send, rebuilt if
@@ -1386,6 +1388,22 @@ class MnesisSession:
         ):
             result = await engine.wait_for_pending() or result
             context = await rebuild()
+        # Bounded backstop: the blocking run stops at the soft threshold by the
+        # engine's own measure, which ignores a per-turn ``system_prompt``. If the
+        # context sent is still over the hard limit and the run left work, run once
+        # more to the full condensation target. At most one extra run; never loops.
+        if engine.is_hard_overflow(self._threshold_tokens(context), self._model_info) and (
+            engine.more_to_compact
+        ):
+            if engine.check_and_trigger(
+                self._session_id,
+                self._threshold_tokens(context),
+                self._model_info,
+                force=True,
+                full_drain=True,
+            ):
+                result = await engine.wait_for_pending() or result
+                context = await rebuild()
         return context, result
 
     async def _check_overflow_and_trigger(self) -> tuple[bool, BuiltContext | None]:
