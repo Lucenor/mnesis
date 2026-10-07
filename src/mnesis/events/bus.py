@@ -9,7 +9,7 @@ from typing import Any
 
 import structlog
 
-Handler = Callable[["MnesisEvent", dict[str, Any]], None | Awaitable[None]]
+Handler = Callable[["MnesisEvent", dict[str, Any]], Awaitable[None] | None]
 
 
 class MnesisEvent(StrEnum):

@@ -372,7 +372,7 @@ class MnesisSession:
         message: str | list[MessagePart],
         *,
         tools: list[Any] | None = None,
-        on_part: Callable[[MessagePart], None | Awaitable[None]] | None = None,
+        on_part: Callable[[MessagePart], Awaitable[None] | None] | None = None,
         system_prompt: str | None = None,
     ) -> TurnResult:
         """
@@ -749,7 +749,7 @@ class MnesisSession:
         llm_messages: list[dict[str, Any]],
         system_prompt: str,
         tools: list[Any] | None,
-        on_part: Callable[[MessagePart], None | Awaitable[None]] | None,
+        on_part: Callable[[MessagePart], Awaitable[None] | None] | None,
         assistant_msg_id: str,
     ) -> tuple[str, TokenUsage, str]:
         """Stream response from LLM provider via litellm."""
@@ -802,7 +802,7 @@ class MnesisSession:
     async def _mock_response(
         self,
         llm_messages: list[dict[str, Any]],
-        on_part: Callable[[MessagePart], None | Awaitable[None]] | None,
+        on_part: Callable[[MessagePart], Awaitable[None] | None] | None,
         assistant_msg_id: str,
     ) -> tuple[str, TokenUsage, str]:
         """Return a mock response for demonstration purposes (MNESIS_MOCK_LLM=1)."""
