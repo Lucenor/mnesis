@@ -299,8 +299,11 @@ class LargeFileHandler:
                 return "text"
             if "application/octet-stream" in mime:
                 return "binary"
-        except Exception:
-            pass
+        except Exception as exc:
+            # python-magic is an optional, best-effort heuristic: it raises ImportError
+            # when absent and a library-specific error when libmagic is unusable.
+            # Neither should fail ingestion, so fall through to "unknown".
+            self._logger.debug("magic_detection_failed", path=path, error=str(exc))
 
         return "unknown"
 

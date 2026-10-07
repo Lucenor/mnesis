@@ -117,7 +117,14 @@ result.user_message_id      # ID of the persisted user message
 result.assistant_message_id # ID of the persisted assistant message
 result.tokens               # TokenUsage (provided or estimated)
 result.compaction_triggered # True if compaction was scheduled
+result.doom_loop_detected   # True if the same tool call was recorded `doom_loop_threshold` times in a row
 ```
+
+`record()` tracks `ToolPart` calls (tool name plus input) for doom-loop detection. When
+`doom_loop_threshold` consecutive identical tool calls are seen (within one turn or across turns),
+`doom_loop_detected` is `True` and a `DOOM_LOOP_DETECTED` event is published. A turn with no tool
+call breaks the run, as does a managed `send()` turn. The detection window lives in memory only:
+`MnesisSession.load()` does not restore it, so detection starts fresh after a reload.
 
 ## Runnable example
 

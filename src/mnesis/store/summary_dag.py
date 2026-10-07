@@ -158,16 +158,15 @@ class SummaryDAGStore:
         latest = await self._store.get_last_summary_message(session_id)
         if latest is None:
             # No summary at all — the entire history is uncovered
-            if non_summary:
-                return [
-                    MessageSpan(
-                        start_message_id=non_summary[0].id,
-                        end_message_id=non_summary[-1].id,
-                        message_count=len(non_summary),
-                        estimated_tokens=0,
-                    )
-                ]
-            return []
+            # (``non_summary`` is non-empty: the empty case returned above).
+            return [
+                MessageSpan(
+                    start_message_id=non_summary[0].id,
+                    end_message_id=non_summary[-1].id,
+                    message_count=len(non_summary),
+                    estimated_tokens=0,
+                )
+            ]
 
         # Find messages after the latest summary
         after_summary = [m for m in messages if m.created_at > latest.created_at]
@@ -496,14 +495,17 @@ class SummaryDAGStore:
                     d = json.loads(raw.content)
                     content = d.get("text", "")
                     token_count = raw.token_estimate
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, AttributeError):
+                    # Corrupt/non-object part payload (e.g. pre-Phase-3 rows): keep
+                    # the empty-content default rather than failing DAG reconstruction.
+                    self._logger.debug("summary_part_unparseable", message_id=summary_msg.id)
             elif raw.part_type == "compaction":
                 try:
                     d = json.loads(raw.content)
                     compaction_level = d.get("level", 1)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, AttributeError):
+                    # Unparseable marker: fall back to the default level 1.
+                    self._logger.debug("summary_marker_unparseable", message_id=summary_msg.id)
 
         return SummaryNode(
             id=summary_msg.id,

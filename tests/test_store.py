@@ -241,6 +241,26 @@ class TestImmutableStore:
         assert loaded.tokens.output == 200
         assert loaded.finish_reason == "stop"
 
+    async def test_sum_token_usage_matches_python_aggregation(self, session_id, store):
+        """SQL aggregation mirrors TokenUsage.__add__ and skips summary messages."""
+        usages = [
+            ("msg_sum_a", TokenUsage(input=10, output=20, total=0), False),
+            ("msg_sum_b", TokenUsage(input=5, output=5, cache_read=7, total=100), False),
+            ("msg_sum_c", TokenUsage(input=999, output=999, total=1998), True),
+        ]
+        expected = TokenUsage()
+        for msg_id, usage, is_summary in usages:
+            await store.append_message(
+                make_message(session_id, role="assistant", msg_id=msg_id, is_summary=is_summary)
+            )
+            await store.update_message_tokens(msg_id, usage, 0.0, "stop")
+            if not is_summary:
+                expected = expected + usage
+
+        got = await store.sum_token_usage(session_id)
+        assert got == expected
+        assert got.effective_total() == 130
+
     async def test_file_reference_upsert(self, store):
         """Storing a file reference twice updates the existing row."""
         ref1 = FileReference(
@@ -391,8 +411,6 @@ class TestDAGPersistence:
             ("node_condensed_01",),
         ) as cursor:
             row = await cursor.fetchone()
-
-        import json
 
         assert row is not None
         assert row["kind"] == "condensed"
@@ -715,7 +733,6 @@ class TestDAGPersistence:
 
     async def test_get_node_by_id_pre_phase3_fallback(self, config, pool):
         """get_node_by_id falls back to _build_node_from_message for pre-Phase-3 nodes."""
-        import json
 
         from mnesis.models.message import Message
         from mnesis.session import make_id
@@ -767,7 +784,6 @@ class TestDAGPersistence:
 
     async def test_get_node_by_id_pre_phase3_second_summary(self, config, pool):
         """get_node_by_id fallback for pre-Phase-3 node when it is not the first summary."""
-        import json
         import time as time_mod
 
         from mnesis.models.message import Message

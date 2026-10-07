@@ -44,6 +44,25 @@ MAX_SUMMARISATION_INPUT_FRACTION: float = 0.75
 # the input cap would exclude them.
 MIN_MESSAGES_TO_SUMMARISE: int = 3
 
+# Character caps used when rendering messages/summaries as text.  Deliberately
+# small: they bound prompt size (levels 1-2) and the size of the deterministic
+# fallback (level 3), which must never depend on an LLM.
+#
+# Default per-message cap (level 1 transcripts).
+_MESSAGE_TEXT_MAX_CHARS: int = 2000
+# Cap on a single tool output included in a message's text.
+_TOOL_OUTPUT_EXCERPT_CHARS: int = 500
+# Per-message cap for the aggressive level-2 transcript.
+_LEVEL2_MESSAGE_MAX_CHARS: int = 500
+# Per-message cap for level-3 truncation; used for both sizing and rendering so
+# the budget check measures exactly the text that is emitted.
+_LEVEL3_MESSAGE_MAX_CHARS: int = 500
+# Per-summary excerpt cap in the level-2 condensation prompt.
+_CONDENSE_LEVEL2_NODE_MAX_CHARS: int = 800
+# Per-node cap in level-3 condensation, so one oversized summary cannot crowd
+# out the others before the token budget check runs.
+_CONDENSE_LEVEL3_NODE_MAX_CHARS: int = 2000
+
 # Maximum tokens for a level 3 condensation fallback.
 _CONDENSE_LEVEL3_MAX_TOKENS: int = 512
 
@@ -160,16 +179,23 @@ class CondensationCandidate:
     """Condensation escalation level: 1 = normal, 2 = aggressive, 3 = deterministic."""
 
 
-def _extract_text(msg: MessageWithParts, max_chars: int = 2000) -> str:
-    """Extract readable text from a message, capped at max_chars per message."""
+def _extract_text(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHARS) -> str:
+    """Extract readable text from a message; the result is at most ``max_chars`` long."""
     parts: list[str] = []
+    remaining = max_chars
     for part in msg.parts:
+        if remaining <= 0:
+            break
         if isinstance(part, TextPart):
-            parts.append(part.text[:max_chars])
-        elif isinstance(part, ToolPart):
-            if part.compacted_at is None and part.output:
-                parts.append(f"[Tool {part.tool_name}]: {part.output[:500]}")
-    return "\n".join(parts)[:max_chars]
+            piece = part.text
+        elif isinstance(part, ToolPart) and part.compacted_at is None and part.output:
+            piece = f"[Tool {part.tool_name}]: {part.output[:_TOOL_OUTPUT_EXCERPT_CHARS]}"
+        else:
+            continue
+        piece = piece[:remaining]
+        parts.append(piece)
+        remaining -= len(piece) + 1  # +1 for the "\n" separator
+    return "\n".join(parts)
 
 
 def _build_messages_text(messages: list[MessageWithParts]) -> str:
@@ -378,7 +404,7 @@ async def level2_summarise(
     # For level 2, cap transcript length more aggressively
     transcript_parts: list[str] = []
     for msg in to_summarise:
-        text = _extract_text(msg, max_chars=500)
+        text = _extract_text(msg, max_chars=_LEVEL2_MESSAGE_MAX_CHARS)
         if text:
             role = "U" if msg.role == "user" else "A"
             transcript_parts.append(f"[{role}]: {text}")
@@ -473,9 +499,9 @@ def level3_deterministic(
     kept: list[MessageWithParts] = []
     tokens_used = header_tokens
     for msg in reversed(messages):
-        text = _extract_text(msg, max_chars=800)
+        text = _extract_text(msg, max_chars=_LEVEL3_MESSAGE_MAX_CHARS)
         role = "USER" if msg.role == "user" else "ASSISTANT"
-        line = f"[{role}]: {text[:500]}\n"
+        line = f"[{role}]: {text}\n"
         line_tokens = estimator.estimate(line)
         if tokens_used + line_tokens > target:
             break
@@ -486,7 +512,7 @@ def level3_deterministic(
 
     lines = [header]
     for msg in kept:
-        text = _extract_text(msg, max_chars=500)
+        text = _extract_text(msg, max_chars=_LEVEL3_MESSAGE_MAX_CHARS)
         role = "USER" if msg.role == "user" else "ASSISTANT"
         lines.append(f"[{role}]: {text}\n")
 
@@ -620,7 +646,8 @@ async def condense_level2(
 
     # Use a truncated excerpt from each summary for the aggressive prompt.
     summaries_text = "\n\n".join(
-        f"[S{i + 1}]: {node.content[:800]}" for i, node in enumerate(nodes)
+        f"[S{i + 1}]: {node.content[:_CONDENSE_LEVEL2_NODE_MAX_CHARS]}"
+        for i, node in enumerate(nodes)
     )
     prompt_messages = [
         {
@@ -697,7 +724,7 @@ def condense_level3_deterministic(
     content_parts: list[str] = []
     used = 0
     for node in nodes:
-        chunk = node.content[:2000]  # per-node safety cap
+        chunk = node.content[:_CONDENSE_LEVEL3_NODE_MAX_CHARS]
         chunk_tokens = estimator.estimate(chunk)
         if used + chunk_tokens > available and content_parts:
             break

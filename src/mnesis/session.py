@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import random
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
@@ -47,6 +48,16 @@ def make_id(prefix: str) -> str:
         ID string in the format ``"{prefix}_{ulid}"``.
     """
     return f"{prefix}_{ULID()}"
+
+
+async def _forward_part(
+    on_part: Callable[[MessagePart], Awaitable[None] | None],
+    part: MessagePart,
+) -> None:
+    """Invoke a sync-or-async ``on_part`` callback, awaiting it if it returns an awaitable."""
+    result: Any = on_part(part)
+    if inspect.isawaitable(result):
+        _ = await result
 
 
 class MnesisSession:
@@ -313,6 +324,11 @@ class MnesisSession:
 
         Raises:
             SessionNotFoundError: If the session does not exist.
+
+        Note:
+            Cumulative token usage is rebuilt from persisted turns, but the
+            doom-loop window (recent tool calls) is not restored: detection
+            starts fresh after a reload.
         """
         cfg = config or MnesisConfig()
         if db_path is not None:
@@ -352,7 +368,12 @@ class MnesisSession:
             session_model=model,
         )
 
-        return cls(
+        # Rebuild cumulative usage from persisted assistant turns so overflow and
+        # compaction checks (and ``token_usage``) reflect the prior conversation.
+        # Summary messages are excluded: send()/record() never count them.
+        cumulative_tokens = await store.sum_token_usage(session_id)
+
+        session = cls(
             session_id=session_id,
             model=model,
             model_info=model_info,
@@ -366,6 +387,8 @@ class MnesisSession:
             token_estimator=estimator,
             event_bus=event_bus,
         )
+        session._cumulative_tokens = cumulative_tokens
+        return session
 
     async def send(
         self,
@@ -433,14 +456,20 @@ class MnesisSession:
         # Hard threshold check: if the context is over the hard limit, ensure
         # compaction is triggered (if not already in flight) and then block
         # until it completes.  This prevents an over-limit context reaching the LLM.
+        # The result of that blocking run is surfaced as TurnResult.compaction_result.
+        compaction_result_obj: CompactionResult | None = None
         if self._compaction_engine.is_hard_overflow(self._cumulative_tokens, self._model_info):
-            if not self._compaction_engine._pending_task:
+            pending = self._compaction_engine._pending_task
+            if pending is None or pending.done():
+                # A finished background run is stale: its result was already
+                # reported (COMPACTION_COMPLETED) and did not bring us under the
+                # hard limit, so schedule a fresh run and block on it.
                 self._compaction_engine.check_and_trigger(
                     self._session_id,
                     self._cumulative_tokens,
                     self._model_info,
                 )
-            await self._compaction_engine.wait_for_pending()
+            compaction_result_obj = await self._compaction_engine.wait_for_pending()
 
         # Build context
         context = await self._context_builder.build(
@@ -469,7 +498,6 @@ class MnesisSession:
         final_tokens = TokenUsage()
         finish_reason = "stop"
         compaction_triggered = False
-        compaction_result_obj: CompactionResult | None = None
 
         # Retry loop: wraps ONLY the LLM call, not the message shell creation.
         # The assistant message row (assistant_msg_id) was already appended above
@@ -517,9 +545,7 @@ class MnesisSession:
                 # Attempt succeeded — forward buffered parts to caller now.
                 if on_part is not None:
                     for _part in _buffered_parts:
-                        _result = on_part(_part)
-                        if asyncio.iscoroutine(_result):
-                            await _result
+                        await _forward_part(on_part, _part)
                 break  # success — exit retry loop
             except Exception as exc:
                 if not self._is_retryable(exc) or _attempt >= retry_cfg.max_retries:
@@ -581,8 +607,10 @@ class MnesisSession:
         # Accumulate session-level tokens
         self._cumulative_tokens = self._cumulative_tokens + final_tokens
 
-        # Doom loop detection
-        doom_loop = self._check_doom_loop()
+        # Doom loop detection: send() turns carry no tracked tool calls, so a
+        # text-only turn breaks any "consecutive" run left over from record().
+        self._recent_tool_calls.clear()
+        doom_loop = False
 
         # Check for overflow and trigger compaction
         if self._compaction_engine.is_overflow(self._cumulative_tokens, self._model_info):
@@ -781,9 +809,7 @@ class MnesisSession:
                 text_accumulator += delta.content
                 part = TextPart(text=delta.content)
                 if on_part is not None:
-                    result = on_part(part)
-                    if asyncio.iscoroutine(result):
-                        await result
+                    await _forward_part(on_part, part)
 
             # Finish reason
             if chunk.choices[0].finish_reason:
@@ -820,9 +846,7 @@ class MnesisSession:
         for word in mock_text.split():
             part = TextPart(text=word + " ")
             if on_part is not None:
-                result = on_part(part)
-                if asyncio.iscoroutine(result):
-                    await result
+                await _forward_part(on_part, part)
 
         usage = TokenUsage(
             input=self._estimator.estimate(str(llm_messages)),
@@ -845,6 +869,18 @@ class MnesisSession:
                 {"session_id": self._session_id, "tool": first[0]},
             )
         return detected
+
+    def _track_tool_call(self, part: ToolPart) -> None:
+        """Append a tool call to the doom-loop window as ``(tool_name, input_json)``."""
+        try:
+            key = json.dumps(part.input, sort_keys=True, default=str)
+        except TypeError:
+            # Nested dicts with mixed key types can't be sorted; order is then
+            # insertion order, which is still stable for identical calls.
+            key = json.dumps(part.input, default=str)
+        self._recent_tool_calls.append((part.tool_name, key))
+        # Only the last ``doom_loop_threshold`` entries are ever inspected.
+        del self._recent_tool_calls[: -self._config.session.doom_loop_threshold]
 
     async def record(
         self,
@@ -983,6 +1019,12 @@ class MnesisSession:
             )
             await self._store.append_part(raw)
 
+        # Track tool calls only once everything is persisted, so a failed
+        # record() never mutates the doom-loop window.
+        for part in assistant_parts:
+            if isinstance(part, ToolPart):
+                self._track_tool_call(part)
+
         # Resolve token usage — estimate from all parts if not provided
         if tokens is None:
             user_input_tokens = sum(
@@ -999,6 +1041,14 @@ class MnesisSession:
         await self._store.update_message_tokens(assistant_msg_id, tokens, 0.0, finish_reason)
 
         self._cumulative_tokens = self._cumulative_tokens + tokens
+
+        # Doom loop detection. Tool calls were tracked after persisting parts above;
+        # a turn without any tool call breaks the "consecutive" run, so reset.
+        if any(isinstance(p, ToolPart) for p in assistant_parts):
+            doom_loop = self._check_doom_loop()
+        else:
+            self._recent_tool_calls.clear()
+            doom_loop = False
 
         self._event_bus.publish(
             MnesisEvent.MESSAGE_CREATED,
@@ -1026,6 +1076,7 @@ class MnesisSession:
             assistant_message_id=assistant_msg_id,
             tokens=tokens,
             compaction_triggered=compaction_triggered,
+            doom_loop_detected=doom_loop,
         )
 
     async def messages(self) -> list[MessageWithParts]:

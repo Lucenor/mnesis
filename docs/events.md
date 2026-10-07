@@ -10,7 +10,7 @@ Each `MnesisSession` owns its own `EventBus` instance. Operators (`LLMMap`, `Age
 
 - Sync handlers are called inline within `publish()`. For a given event, handlers registered with `subscribe()` run first (in their registration order), followed by handlers registered with `subscribe_all()` (also in their registration order).
 - Async handlers are scheduled as background tasks (`asyncio.create_task`), non-blocking; they follow the same per-event-then-global ordering as sync handlers.
-- Sync handler exceptions are logged and swallowed — they never propagate to the publisher. Async handler exceptions follow normal `asyncio` task semantics and are not caught or logged by the `EventBus`.
+- Handler exceptions are logged (`event_handler_error`) and swallowed — they never propagate to the publisher. For async handlers the error is logged when the handler task finishes; the bus keeps a strong reference to each in-flight handler task so it cannot be garbage-collected mid-flight.
 - `unsubscribe()` is a silent no-op if the handler is not registered.
 
 ---
