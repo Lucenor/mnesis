@@ -166,6 +166,22 @@ class TestCompactionRetry:
         assert failed == [{"session_id": session_id, "error": "boom", "aborted": False}]
 
 
+class TestIsRetryable:
+    def test_classification(self):
+        from mnesis.retry import is_retryable
+
+        assert is_retryable(_rate_limit())
+        assert not is_retryable(ValueError("x"))
+
+    def test_without_litellm_nothing_is_retryable(self, monkeypatch):
+        import sys
+
+        from mnesis.retry import is_retryable
+
+        monkeypatch.setitem(sys.modules, "litellm.exceptions", None)
+        assert not is_retryable(_rate_limit())
+
+
 class TestCallWithRetry:
     async def test_external_cancel_during_backoff_propagates(self):
         cfg = RetryConfig(max_retries=2, base_delay=30, jitter=False)
