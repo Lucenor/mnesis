@@ -1,0 +1,217 @@
+"""``path (file_<hex>)`` pairing in file-ID footers (A2) across compaction levels."""
+
+from __future__ import annotations
+
+import pytest
+
+from mnesis.compaction.file_ids import (
+    append_file_ids_footer,
+    collect_file_id_paths_from_nodes,
+    collect_file_ids_from_nodes,
+    extract_file_id_paths,
+    extract_file_id_paths_from_messages,
+    extract_file_ids,
+    footer_file_id_paths,
+    strip_file_ids_footer,
+)
+from mnesis.compaction.levels import (
+    condense_level1,
+    condense_level2,
+    condense_level3_deterministic,
+    level1_summarise,
+    level2_summarise,
+    level3_deterministic,
+)
+from mnesis.models.message import ContextBudget, Message, MessageWithParts, TextPart
+from mnesis.models.summary import SummaryNode
+from mnesis.tokens.estimator import TokenEstimator
+
+RATES = "file_3fa9c2d17b8e4a60"
+MIGRATE = "file_9b1e0c44a7d2f381"
+LONE = "file_deadbeef01234567"
+RATES_PATH = "services/billing/config/rates.yaml"
+MIGRATE_PATH = "scripts/migrate_ledger.py"
+
+
+@pytest.fixture
+def estimator() -> TokenEstimator:
+    e = TokenEstimator()
+    e._force_heuristic = True
+    return e
+
+
+@pytest.fixture
+def budget() -> ContextBudget:
+    return ContextBudget(
+        model_context_limit=50_000, reserved_output_tokens=4_000, compaction_buffer=10_000
+    )
+
+
+def _msgs() -> list[MessageWithParts]:
+    texts = [
+        f"The rates config lives at {RATES_PATH} (content id {RATES}).",
+        "Acknowledged.",
+        f"Migration is scripts/migrate_ledger.py -- file id: {MIGRATE}. Also see {LONE}.",
+        "Noted.",
+        "Third question " + "x" * 50,
+        "Answer " + "y" * 50,
+        "Fourth question",
+        "Answer four",
+    ]
+    out = []
+    for i, text in enumerate(texts):
+        msg = Message(id=f"msg_{i:03d}", session_id="s", role="user" if i % 2 == 0 else "assistant")
+        out.append(MessageWithParts(message=msg, parts=[TextPart(text=text)]))
+    return out
+
+
+def _node(node_id: str, content: str) -> SummaryNode:
+    return SummaryNode(
+        id=node_id,
+        session_id="s",
+        kind="leaf",
+        span_start_message_id="a",
+        span_end_message_id="b",
+        content=content,
+        token_count=max(1, len(content) // 4),
+    )
+
+
+class TestFooterFormat:
+    def test_pairs_render_and_round_trip(self):
+        text = append_file_ids_footer(
+            "prose", [RATES, MIGRATE, LONE], {RATES: RATES_PATH, MIGRATE: MIGRATE_PATH}
+        )
+        assert text.endswith(
+            f"[LCM File IDs: {RATES_PATH} ({RATES}), {MIGRATE_PATH} ({MIGRATE}), {LONE}]"
+        )
+        assert footer_file_id_paths(text) == {RATES: RATES_PATH, MIGRATE: MIGRATE_PATH}
+        assert extract_file_ids(text) == [RATES, MIGRATE, LONE]  # unpaired id kept
+        assert strip_file_ids_footer(text) == "prose"
+        # Idempotent: re-appending replaces the footer instead of duplicating it.
+        again = append_file_ids_footer(text, [RATES, MIGRATE, LONE], {RATES: RATES_PATH})
+        assert again.count("[LCM File IDs:") == 1
+
+    def test_old_bare_format_still_parses(self):
+        old = f"summary\n\n[LCM File IDs: {RATES}, {MIGRATE}]"
+        assert extract_file_ids(old) == [RATES, MIGRATE]
+        assert footer_file_id_paths(old) == {}
+        assert collect_file_ids_from_nodes([_node("n", old)]) == [RATES, MIGRATE]
+        assert strip_file_ids_footer(old) == "summary"
+        # Bare ids with no path anywhere stay bare when re-footered.
+        assert append_file_ids_footer("x", [RATES, MIGRATE], {}).endswith(
+            f"[LCM File IDs: {RATES}, {MIGRATE}]"
+        )
+
+    def test_no_ids_no_footer(self):
+        assert append_file_ids_footer("x", [], {RATES: RATES_PATH}) == "x"
+
+    def test_mixed_old_and_new_entries(self):
+        text = f"s\n\n[LCM File IDs: {RATES}, {MIGRATE_PATH} ({MIGRATE})]"
+        assert footer_file_id_paths(text) == {MIGRATE: MIGRATE_PATH}
+
+
+class TestPathExtraction:
+    def test_pairs_with_nearest_path_on_the_line(self):
+        text = (
+            f"- {RATES_PATH} (or other.yaml) -- file id: {RATES}\n"
+            f"`{MIGRATE_PATH}` content id {MIGRATE}\n"
+            f"e.g. {LONE} has no path\n"
+        )
+        pairs = extract_file_id_paths(text)
+        assert pairs[MIGRATE] == MIGRATE_PATH
+        assert RATES in pairs
+        assert LONE not in pairs  # "e.g" is not a path
+
+    def test_from_messages(self):
+        assert extract_file_id_paths_from_messages(_msgs()) == {
+            RATES: RATES_PATH,
+            MIGRATE: MIGRATE_PATH,
+        }
+
+    def test_footer_pairs_outrank_prose_for_nodes(self):
+        node = _node(
+            "n1",
+            f"- other_name.yaml file id: {RATES}\n\n[LCM File IDs: {RATES_PATH} ({RATES})]",
+        )
+        assert collect_file_id_paths_from_nodes([node]) == {RATES: RATES_PATH}
+
+    def test_earliest_node_wins(self):
+        a = _node("a", f"[LCM File IDs: first.py ({RATES})]")
+        b = _node("b", f"[LCM File IDs: second.py ({RATES})]")
+        assert collect_file_id_paths_from_nodes([a, b]) == {RATES: "first.py"}
+
+
+class TestLevelsKeepPairs:
+    async def test_level1_and_level2_summaries(self, estimator, budget):
+        async def llm(**kwargs: object) -> str:
+            return "## Goal\nProse that names no ids.\n"
+
+        for fn in (level1_summarise, level2_summarise):
+            cand = await fn(_msgs(), "m", budget, estimator, llm)
+            assert cand is not None
+            assert footer_file_id_paths(cand.text) == {RATES: RATES_PATH, MIGRATE: MIGRATE_PATH}
+            assert LONE in extract_file_ids(cand.text)
+
+    def test_level3_summary(self, estimator, budget):
+        cand = level3_deterministic(_msgs(), budget, estimator)
+        assert footer_file_id_paths(cand.text) == {RATES: RATES_PATH, MIGRATE: MIGRATE_PATH}
+
+    async def test_condensed_l1_l2_l3_keep_pairing_from_leaf_footers(self, estimator, budget):
+        leaf1 = _node("n1", f"## Goal\nstuff\n\n[LCM File IDs: {RATES_PATH} ({RATES}), {LONE}]")
+        leaf2 = _node("n2", f"## Goal\nmore\n\n[LCM File IDs: {MIGRATE_PATH} ({MIGRATE})]")
+        nodes = [leaf1, leaf2]
+
+        async def llm(**kwargs: object) -> str:
+            return "GOAL: merged. FILES: (no ids written)"
+
+        expected = {RATES: RATES_PATH, MIGRATE: MIGRATE_PATH}
+        for cond in (
+            await condense_level1(nodes, "m", budget, estimator, llm),
+            await condense_level2(nodes, "m", budget, estimator, llm),
+            condense_level3_deterministic(nodes, estimator, budget),
+        ):
+            assert cond is not None
+            assert footer_file_id_paths(cond.text) == expected
+            assert set(extract_file_ids(cond.text)) == {RATES, MIGRATE, LONE}
+
+    async def test_pairing_survives_two_generations(self, estimator, budget):
+        """leaf footer -> condensed footer -> condensed-of-condensed footer."""
+
+        async def llm(**kwargs: object) -> str:
+            return "GOAL: g"
+
+        leaf = _node("n1", f"s\n\n[LCM File IDs: {RATES_PATH} ({RATES})]")
+        other = _node("n2", f"t\n\n[LCM File IDs: {MIGRATE_PATH} ({MIGRATE})]")
+        gen1 = await condense_level2([leaf, other], "m", budget, estimator, llm)
+        assert gen1 is not None
+        node1 = _node("c1", gen1.text)
+        gen2 = await condense_level2([node1, _node("n3", "plain")], "m", budget, estimator, llm)
+        assert gen2 is not None
+        assert footer_file_id_paths(gen2.text) == {RATES: RATES_PATH, MIGRATE: MIGRATE_PATH}
+
+
+class TestPairsAreSecondaryToIds:
+    def test_paths_dropped_when_paired_footer_does_not_fit(self, estimator):
+        """Ids outrank paths: a tight budget keeps every id, bare."""
+        ids = [f"file_{i:016x}" for i in range(40)]
+        long_path = "d/" * 40 + "x.py"
+        msgs = []
+        for i in range(8):
+            text = " ".join(f"{long_path}{j} {fid}" for j, fid in enumerate(ids[i * 5 : i * 5 + 5]))
+            msg = Message(id=f"m{i}", session_id="s", role="user" if i % 2 == 0 else "assistant")
+            msgs.append(MessageWithParts(message=msg, parts=[TextPart(text=text)]))
+        # Budget sized so bare ids fit but their paired form does not.
+        bare = estimator.estimate(append_file_ids_footer("", ids))
+        tiny = ContextBudget(
+            model_context_limit=int(bare / 0.85) + 60,
+            reserved_output_tokens=0,
+            compaction_buffer=0,
+        )
+        assert tiny.usable < estimator.estimate(
+            append_file_ids_footer("", ids, extract_file_id_paths_from_messages(msgs))
+        )
+        cand = level3_deterministic(msgs, tiny, estimator)
+        assert set(extract_file_ids(cand.text)) == set(ids)
+        assert footer_file_id_paths(cand.text) == {}
+        assert cand.token_count <= tiny.usable

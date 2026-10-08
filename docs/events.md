@@ -74,7 +74,7 @@ session.event_bus.subscribe_all(log_all)
 | `COMPACTION_FAILED` | `compaction.failed` | Compaction raises an unhandled exception, or is aborted (`aborted=True`) | `CompactionFailedPayload` |
 | `PRUNE_COMPLETED` | `prune.completed` | A compaction run's pruning step tombstoned at least one tool output (not published when nothing was pruned) | `PruneCompletedPayload` |
 | `DOOM_LOOP_DETECTED` | `doom_loop.detected` | The same tool call repeats past the threshold | `DoomLoopDetectedPayload` |
-| `LLM_RETRY` | `llm.retry` | `send()` is about to retry after a transient LLM error | `LlmRetryPayload` |
+| `LLM_RETRY` | `llm.retry` | `send()` or a compaction LLM call is about to retry after a transient LLM error | `LlmRetryPayload` |
 | `MAP_STARTED` | `map.started` | An operator begins processing its item list | `MapStartedPayload` |
 | `MAP_ITEM_COMPLETED` | `map.item_completed` | One item finishes (success or failure) | `MapItemCompletedPayload` |
 | `MAP_COMPLETED` | `map.completed` | All items have been processed | `MapCompletedPayload` |
@@ -155,7 +155,7 @@ Fired by: `MnesisEvent.COMPACTION_FAILED`
 |---|---|---|
 | `session_id` | `str` | The session whose compaction failed |
 | `error` | `str` | Human-readable error description |
-| `aborted` | `bool` | `True` only for an engine-level abort (the `abort` event passed to `run_compaction()` / `check_and_trigger()`); a session never sets it, so `session.close()` does not produce it |
+| `aborted` | `bool` | `True` only for an abort: the `abort` event passed to `run_compaction()` / `check_and_trigger()`, or `session.close(abort_compaction=True)`; a plain `session.close()` waits for the run instead |
 
 ### `PruneCompletedPayload`
 
@@ -182,7 +182,7 @@ Fired by: `MnesisEvent.DOOM_LOOP_DETECTED`
 
 Fired by: `MnesisEvent.LLM_RETRY`
 
-Published on each retry attempt, immediately before the backoff sleep begins. Only fires when `RetryConfig.max_retries > 0` and the error is retryable.
+Published on each retry attempt, immediately before the backoff sleep begins, for `send()` turns and for compaction LLM calls. Only fires when `RetryConfig.max_retries > 0` and the error is retryable. `source` tells the two apart; `stage` and `level` are present only for compaction.
 
 | Field | Type | Description |
 |---|---|---|
@@ -192,6 +192,9 @@ Published on each retry attempt, immediately before the backoff sleep begins. On
 | `error_type` | `str` | Fully-qualified exception class name (e.g. `"litellm.exceptions.RateLimitError"`) |
 | `error_message` | `str` | Human-readable error message from the exception |
 | `delay_seconds` | `float` | Seconds the session will sleep before the next attempt |
+| `source` | `str` (optional) | `"send"` for a turn's LLM call, `"compaction"` for a compaction call. Absent on payloads from versions before this key existed: treat a missing value as `"send"` |
+| `stage` | `str` (optional) | Compaction only: `"summarisation"` or `"condensation"` |
+| `level` | `int` (optional) | Compaction only: escalation level (`1` or `2`) of the call being retried |
 
 ---
 

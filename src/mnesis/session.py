@@ -168,6 +168,9 @@ class MnesisSession:
         self._pending_compact_result: CompactionResult | None = None
         # Holds the current retry backoff sleep task so close() can cancel it.
         self._retry_sleep_task: asyncio.Task[None] | None = None
+        # Set by ``close(abort_compaction=True)``; every compaction run this session
+        # starts watches it, so a backoff wait ends promptly instead of being waited out.
+        self._compaction_abort = asyncio.Event()
         # Tracks background send() tasks spawned by stream() so close() can
         # await them, preventing DB-closed errors on abandoned iterators.
         self._background_send_tasks: set[asyncio.Task[None]] = set()
@@ -606,13 +609,20 @@ class MnesisSession:
                         "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
                         "error_message": str(exc),
                         "delay_seconds": delay,
+                        "source": "send",
                     },
                 )
                 # Sleep in a cancellable task so close() can abort the wait.
-                self._retry_sleep_task = asyncio.create_task(asyncio.sleep(delay))
+                sleep_task = asyncio.create_task(asyncio.sleep(delay))
+                self._retry_sleep_task = sleep_task
                 try:
-                    await self._retry_sleep_task
+                    # ``asyncio.wait`` does not raise when the sleep task is
+                    # cancelled (by ``close()``), so that is checked explicitly.
+                    _ = await asyncio.wait({sleep_task})
+                    if sleep_task.cancelled():
+                        raise asyncio.CancelledError
                 except asyncio.CancelledError:
+                    sleep_task.cancel()  # send() itself cancelled: stop the sleep too
                     self._logger.info("llm_retry_cancelled")
                     finish_reason = "error"
                     text_accumulator = "[Error: retry cancelled]"
@@ -1184,11 +1194,13 @@ class MnesisSession:
         """
         self._logger.info("manual_compaction_triggered", session_id=self._session_id)
         # Runs as the engine's tracked task, after any background compaction.
-        result = await self._compaction_engine.compact_exclusive(self._session_id)
+        result = await self._compaction_engine.compact_exclusive(
+            self._session_id, abort=self._compaction_abort
+        )
         self._pending_compact_result = result
         return result
 
-    async def close(self) -> None:
+    async def close(self, *, abort_compaction: bool = False) -> None:
         """
         Clean up session resources.
 
@@ -1197,12 +1209,29 @@ class MnesisSession:
         no in-flight write is interrupted and that the compaction summary is
         fully persisted before the DB handle is closed.
 
+        With retries enabled (``SessionConfig.retry.max_retries > 0``) that wait
+        can include compaction retry backoffs. Pass ``abort_compaction=True`` to
+        bound it: the in-flight run is told to stop, its backoff wait ends
+        immediately and it returns the failed stub result
+        (``COMPACTION_FAILED`` with ``aborted=True``). Work the run had already
+        committed (earlier rounds) stays; the abandoned round is not summarised,
+        so the history is simply left for the next session to compact. An LLM
+        request already on the wire is not interrupted: the run stops when it
+        returns. A boolean is used rather than a timeout because an interrupted
+        ``close()`` could not release the database connection.
+
+        Args:
+            abort_compaction: Abort the in-flight compaction instead of waiting
+                for it to finish. Default ``False`` (wait; summary fully persisted).
+
         Publishes :attr:`~mnesis.events.bus.MnesisEvent.SESSION_CLOSED` after
         cleanup.
         """
         # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
         if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
             self._retry_sleep_task.cancel()
+        if abort_compaction:
+            self._compaction_abort.set()
         # Await any background send() tasks spawned by stream() so the DB is
         # not closed while a turn is still being persisted.
         if self._background_send_tasks:
@@ -1360,7 +1389,11 @@ class MnesisSession:
         # is in flight does not let an over-hard context through.
         if (
             engine.check_and_trigger(
-                self._session_id, self._threshold_tokens(context), self._model_info, force=True
+                self._session_id,
+                self._threshold_tokens(context),
+                self._model_info,
+                abort=self._compaction_abort,
+                force=True,
             )
             or engine.in_flight
         ):
@@ -1378,6 +1411,7 @@ class MnesisSession:
                     self._session_id,
                     self._threshold_tokens(context),
                     self._model_info,
+                    abort=self._compaction_abort,
                     force=True,
                     full_drain=True,
                 )
@@ -1417,7 +1451,10 @@ class MnesisSession:
             )
             return False, None
         triggered = self._compaction_engine.check_and_trigger(
-            self._session_id, self._threshold_tokens(context), self._model_info
+            self._session_id,
+            self._threshold_tokens(context),
+            self._model_info,
+            abort=self._compaction_abort,
         )
         return triggered, context
 

@@ -36,8 +36,10 @@ File IDs are propagated through every compaction round; see
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import structlog
@@ -62,6 +64,23 @@ from mnesis.retry import RetriesExhaustedError, call_with_retry
 from mnesis.store.immutable import ImmutableStore
 from mnesis.store.summary_dag import SummaryDAGStore
 from mnesis.tokens.estimator import TokenEstimator
+
+# ``(stage, level)`` of the LLM call being made, read by the retry hook so a
+# ``LLM_RETRY`` event says which compaction call is retrying. A context variable
+# (task-local) keeps the level functions' ``llm_call`` signature unchanged.
+_call_stage: contextvars.ContextVar[tuple[str, int] | None] = contextvars.ContextVar(
+    "mnesis_compaction_call_stage", default=None
+)
+
+
+@contextlib.contextmanager
+def _in_stage(stage: str, level: int) -> Iterator[None]:
+    """Tag LLM calls made inside the block with their compaction stage and level."""
+    token = _call_stage.set((stage, level))
+    try:
+        yield
+    finally:
+        _call_stage.reset(token)
 
 
 class CompactionTruncatedError(Exception):
@@ -405,6 +424,11 @@ class CompactionEngine:
         The handle is released unless a newer run replaced it while waiting
         (that run stays tracked; loop on :attr:`has_pending` to drain).
 
+        Cancelling the caller does not cancel the compaction: it is shielded, so
+        the run continues in the background, the handle is kept, and a later
+        call (or ``close()``) collects it. ``asyncio.CancelledError`` still
+        propagates to the cancelled caller.
+
         Returns:
             The :class:`CompactionResult` of the pending task (whether it was
             still running or had already finished), or ``None`` if no task was
@@ -417,7 +441,11 @@ class CompactionEngine:
         result: CompactionResult | None = None
         if task is not None and not task.done():
             try:
-                result = await task
+                # Shielded: cancelling the *caller* (e.g. ``asyncio.timeout`` around
+                # ``send()``) must not cancel the background compaction. The task
+                # keeps running, stays tracked, and is awaited by a later call or
+                # ``close()``. The task's own cancellation still raises here.
+                result = await asyncio.shield(task)
             except Exception as exc:
                 self._logger.exception("background_compaction_failed", error=str(exc))
         elif task is not None and not task.cancelled() and task.exception() is None:
@@ -438,16 +466,19 @@ class CompactionEngine:
         """``True`` if a task handle is held, running or finished but not yet reaped."""
         return self._pending_task is not None
 
-    async def compact_exclusive(self, session_id: str) -> CompactionResult:
+    async def compact_exclusive(
+        self, session_id: str, abort: asyncio.Event | None = None
+    ) -> CompactionResult:
         """
         Run a compaction as the tracked in-flight task, after any pending one.
 
         Used for manual compaction so that it never overlaps a background run
-        (duplicate summaries / conflicting context-item swaps).
+        (duplicate summaries / conflicting context-item swaps). ``abort`` ends the
+        run early with the stub result, as for :meth:`run_compaction`.
         """
         while self._pending_task is not None:
             _ = await self.wait_for_pending()
-        task = asyncio.create_task(self.run_compaction(session_id))
+        task = asyncio.create_task(self.run_compaction(session_id, abort=abort))
         self._pending_task = task
         try:
             return await task
@@ -677,12 +708,32 @@ class CompactionEngine:
             # starting a fresh retry sequence per level (bounds blocking time).
             if outage:
                 raise outage[0]
+            stage = _call_stage.get()
+            retry_log = self._logger.bind(session_id=session_id)
+            if stage is not None:
+                retry_log = retry_log.bind(stage=stage[0], compaction_level=stage[1])
+
+            def on_retry(attempt: int, delay: float, exc: Exception) -> None:
+                payload: dict[str, Any] = {
+                    "session_id": session_id,
+                    "attempt": attempt,
+                    "max_retries": retry_cfg.max_retries,
+                    "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                    "error_message": str(exc),
+                    "delay_seconds": delay,
+                    "source": "compaction",
+                }
+                if stage is not None:
+                    payload["stage"], payload["level"] = stage
+                self._event_bus.publish(MnesisEvent.LLM_RETRY, payload)
+
             try:
                 return await call_with_retry(
                     lambda: raw_llm_call(**kwargs),
                     retry_cfg,
                     abort=abort,
-                    logger=self._logger,
+                    logger=retry_log,
+                    on_retry=on_retry,
                 )
             except RetriesExhaustedError as exc:
                 outage.append(exc)
@@ -854,8 +905,6 @@ class CompactionEngine:
                     can_condense = False
                     break  # This exact set already failed to shrink; don't pay for it again.
 
-                tokens_before_condense = sum(n.token_count for n in active_nodes)
-
                 cond = await self._run_condensation(
                     active_nodes,
                     compaction_model,
@@ -865,11 +914,18 @@ class CompactionEngine:
                     compaction_model_info,
                 )
 
+                # The candidate may cover only the oldest nodes that fit the
+                # compaction model's window; only those are replaced.
+                consumed = self._consumed_nodes(active_nodes, cond)
+                tokens_before_condense = sum(n.token_count for n in consumed)
+
                 if cond.token_count >= tokens_before_condense and cond.compaction_level < 3:
                     # An LLM condensation that did not shrink the nodes (levels 1-2 have
                     # no convergence check): fall back to the deterministic level, which
                     # always fits the budget, before giving up.
                     cond = condense_level3_deterministic(active_nodes, self._estimator, budget)
+                    consumed = self._consumed_nodes(active_nodes, cond)
+                    tokens_before_condense = sum(n.token_count for n in consumed)
 
                 if cond.token_count >= tokens_before_condense:
                     # No progress even from the deterministic level, so this exact set
@@ -886,8 +942,8 @@ class CompactionEngine:
 
                 self._failed_condense_ids = None
                 # Determine span from the consumed nodes.
-                span_start = active_nodes[0].span_start_message_id
-                span_end = active_nodes[-1].span_end_message_id
+                span_start = consumed[0].span_start_message_id
+                span_end = consumed[-1].span_end_message_id
 
                 condensed_msg_id = self._id_gen("msg")
                 condensed_node = SummaryNode(
@@ -924,7 +980,7 @@ class CompactionEngine:
                 self._logger.info(
                     "condensation_round_completed",
                     round=round_num,
-                    level=cond.compaction_level,
+                    compaction_level=cond.compaction_level,
                     tokens_after=tokens_after,
                 )
 
@@ -955,7 +1011,7 @@ class CompactionEngine:
         self._logger.info(
             "compaction_completed",
             session_id=session_id,
-            level=last_summary_level,
+            compaction_level=last_summary_level,
             messages_compacted=last_messages_covered,
             tokens_before=tokens_before,
             tokens_after=tokens_after,
@@ -964,6 +1020,18 @@ class CompactionEngine:
 
         self._event_bus.publish(MnesisEvent.COMPACTION_COMPLETED, result.model_dump())
         return result
+
+    @staticmethod
+    def _consumed_nodes(
+        active_nodes: list[SummaryNode], cond: CondensationCandidate
+    ) -> list[SummaryNode]:
+        """The live nodes a condensation candidate replaces, in context order.
+
+        A candidate names its parents; this is a subset of *active_nodes* when the
+        compaction model's window could not take them all.
+        """
+        parents = set(cond.parent_node_ids)
+        return [n for n in active_nodes if n.id in parents]
 
     def _summary_budget(self) -> ContextBudget:
         """Token budget a summary must fit: the *session* window's usable tokens.
@@ -1088,23 +1156,8 @@ class CompactionEngine:
             raise asyncio.CancelledError("Compaction aborted")
         # A RetriesExhaustedError (provider outage) skips the remaining LLM levels.
         try:
-            candidate = await level1_summarise(
-                non_summary,
-                compaction_model,
-                budget,
-                self._estimator,
-                llm_call,
-                compaction_prompt=compaction_prompt,
-                model_context_limit=compaction_info.context_limit,
-                model_max_output_tokens=compaction_info.max_output_tokens,
-                compaction_estimator=compaction_estimator,
-            )
-
-            # Level 2 (if Level 1 failed and level2 is enabled)
-            if candidate is None and self._config.compaction.level2_enabled:
-                if abort and abort.is_set():
-                    raise asyncio.CancelledError("Compaction aborted")
-                candidate = await level2_summarise(
+            with _in_stage("summarisation", 1):
+                candidate = await level1_summarise(
                     non_summary,
                     compaction_model,
                     budget,
@@ -1115,6 +1168,23 @@ class CompactionEngine:
                     model_max_output_tokens=compaction_info.max_output_tokens,
                     compaction_estimator=compaction_estimator,
                 )
+
+            # Level 2 (if Level 1 failed and level2 is enabled)
+            if candidate is None and self._config.compaction.level2_enabled:
+                if abort and abort.is_set():
+                    raise asyncio.CancelledError("Compaction aborted")
+                with _in_stage("summarisation", 2):
+                    candidate = await level2_summarise(
+                        non_summary,
+                        compaction_model,
+                        budget,
+                        self._estimator,
+                        llm_call,
+                        compaction_prompt=compaction_prompt,
+                        model_context_limit=compaction_info.context_limit,
+                        model_max_output_tokens=compaction_info.max_output_tokens,
+                        compaction_estimator=compaction_estimator,
+                    )
         except RetriesExhaustedError:
             self._logger.warning("compaction_llm_outage_skipping_levels", stage="summarisation")
 
@@ -1144,32 +1214,40 @@ class CompactionEngine:
                 else ModelInfo.from_model_string(compaction_model)
             )
         max_out = compaction_info.max_output_tokens
+        window = compaction_info.context_limit
+        compaction_estimator = self._base_estimator.for_model(compaction_info)
 
         # Level 1
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
         try:
-            cond = await condense_level1(
-                nodes,
-                compaction_model,
-                budget,
-                self._estimator,
-                llm_call,
-                model_max_output_tokens=max_out,
-            )
-
-            # Level 2
-            if cond is None and self._config.compaction.level2_enabled:
-                if abort and abort.is_set():
-                    raise asyncio.CancelledError("Compaction aborted")
-                cond = await condense_level2(
+            with _in_stage("condensation", 1):
+                cond = await condense_level1(
                     nodes,
                     compaction_model,
                     budget,
                     self._estimator,
                     llm_call,
                     model_max_output_tokens=max_out,
+                    model_context_limit=window,
+                    compaction_estimator=compaction_estimator,
                 )
+
+            # Level 2
+            if cond is None and self._config.compaction.level2_enabled:
+                if abort and abort.is_set():
+                    raise asyncio.CancelledError("Compaction aborted")
+                with _in_stage("condensation", 2):
+                    cond = await condense_level2(
+                        nodes,
+                        compaction_model,
+                        budget,
+                        self._estimator,
+                        llm_call,
+                        model_max_output_tokens=max_out,
+                        model_context_limit=window,
+                        compaction_estimator=compaction_estimator,
+                    )
         except RetriesExhaustedError:
             self._logger.warning("compaction_llm_outage_skipping_levels", stage="condensation")
 

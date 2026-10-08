@@ -108,9 +108,10 @@ class CompactionFailedPayload(TypedDict):
     error: str
     """Human-readable error description."""
     aborted: bool
-    """``True`` only for an engine-level abort: the ``abort`` event passed to
-    ``run_compaction()`` / ``check_and_trigger()`` was set. A session never sets
-    it, so ``session.close()`` does not produce it."""
+    """``True`` only for an abort: the ``abort`` event passed to
+    ``run_compaction()`` / ``check_and_trigger()`` was set, or the session was
+    closed with ``close(abort_compaction=True)``. A plain ``close()`` waits for
+    the run instead."""
 
 
 # ── Pruning ───────────────────────────────────────────────────────────────────
@@ -133,7 +134,8 @@ class PruneCompletedPayload(TypedDict):
 class LlmRetryPayload(TypedDict):
     """Payload for :attr:`MnesisEvent.LLM_RETRY`.
 
-    Published on each retry attempt before the backoff sleep begins.
+    Published on each retry attempt before the backoff sleep begins, for both
+    ``send()`` turns and compaction LLM calls (told apart by ``source``).
     """
 
     session_id: str
@@ -148,6 +150,16 @@ class LlmRetryPayload(TypedDict):
     """Human-readable error message from the exception."""
     delay_seconds: float
     """Seconds the session will sleep before the next attempt."""
+    source: NotRequired[str]
+    """What is retrying: ``"send"`` (a turn's LLM call) or ``"compaction"``.
+
+    Absent on events from versions that predate this key; treat a missing value
+    as ``"send"``.
+    """
+    stage: NotRequired[str]
+    """Compaction only: ``"summarisation"`` or ``"condensation"``."""
+    level: NotRequired[int]
+    """Compaction only: the escalation level (1 or 2) of the call being retried."""
 
 
 # ── Safety ────────────────────────────────────────────────────────────────────

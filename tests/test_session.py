@@ -1258,6 +1258,9 @@ class TestRetryResilience:
         assert "ServiceUnavailableError" in payload["error_type"]
         assert "service down" in payload["error_message"]
         assert isinstance(payload["delay_seconds"], float)
+        # Additive key: send() retries are labelled, and carry no compaction-only keys.
+        assert payload["source"] == "send"
+        assert "stage" not in payload and "level" not in payload
 
     # ------------------------------------------------------------------
     # Test 6: close() during retry backoff cancels the sleep promptly
@@ -1937,3 +1940,80 @@ class TestSessionCoverageGaps:
 
         assert all(not m.is_summary for m in conv)
         assert len(conv) <= len(all_msgs)
+
+
+class TestRetrySleepSemantics:
+    """D2: the cancellable retry backoff keeps its semantics."""
+
+    @staticmethod
+    async def _session(tmp_path, base_delay: float):
+        from mnesis import MnesisSession
+        from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig
+
+        cfg = MnesisConfig(
+            session=SessionConfig(
+                retry=RetryConfig(max_retries=2, base_delay=base_delay, jitter=False)
+            )
+        )
+        return await MnesisSession.create(
+            model="anthropic/claude-opus-4-6", config=cfg, db_path=str(tmp_path / "rs.db")
+        )
+
+    @staticmethod
+    async def _sleep_task(session) -> asyncio.Task:
+        for _ in range(500):
+            if session._retry_sleep_task is not None:
+                return session._retry_sleep_task
+            await asyncio.sleep(0.01)
+        raise AssertionError("retry sleep never started")
+
+    @staticmethod
+    def _flaky(fail_times: int):
+        from litellm.exceptions import ServiceUnavailableError
+
+        from mnesis.models.message import TokenUsage
+
+        calls = {"n": 0}
+
+        async def _stream(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= fail_times:
+                raise ServiceUnavailableError(
+                    message="down", llm_provider="anthropic", model="claude-opus-4-6"
+                )
+            return "recovered", TokenUsage(input=5, output=3, total=8), "stop"
+
+        return _stream, calls
+
+    async def test_backoff_elapses_then_call_is_retried(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        stream, calls = self._flaky(1)
+        session = await self._session(tmp_path, base_delay=0.05)
+        try:
+            with patch.object(session, "_stream_response", new=AsyncMock(side_effect=stream)):
+                result = await session.send("hi")
+        finally:
+            await session.close()
+        assert result.text == "recovered"
+        assert calls["n"] == 2
+        assert session._retry_sleep_task is None
+
+    async def test_cancelling_send_cancels_the_sleep(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        stream, _ = self._flaky(5)
+        session = await self._session(tmp_path, base_delay=60.0)
+        try:
+            with patch.object(session, "_stream_response", new=AsyncMock(side_effect=stream)):
+                task = asyncio.create_task(session.send("hi"))
+                sleeper = await asyncio.wait_for(self._sleep_task(session), timeout=5)
+                _ = task.cancel()
+                result = await asyncio.wait_for(task, timeout=5)
+            # The pre-existing contract: a cancelled backoff ends the turn as an error.
+            assert result.text == "[Error: retry cancelled]"
+            assert sleeper.cancelled()
+        finally:
+            await session.close()

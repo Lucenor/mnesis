@@ -439,3 +439,188 @@ class TestRunAfterOutage:
         second = await engine.run_compaction(session_id)
         assert calls  # the LLM was called again; the outage did not persist
         assert second.level_used == 1
+
+
+class TestCompactionRetryEvents:
+    """B3: compaction retries publish LLM_RETRY with source/stage/level."""
+
+    async def test_retry_publishes_event_with_source_and_level(
+        self, session_id, store, dag_store, estimator, event_bus, retry_config, monkeypatch
+    ):
+        calls: list[int] = []
+
+        async def flaky(**kwargs: object) -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise _rate_limit()
+            return _SUMMARY
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: flaky)
+        engine = await _engine(session_id, store, dag_store, estimator, event_bus, retry_config)
+        with structlog_capture() as logs:
+            _ = await engine.run_compaction(session_id)
+
+        retries = [p for e, p in event_bus.collected if e == MnesisEvent.LLM_RETRY]
+        assert len(retries) == 1
+        payload = retries[0]
+        assert payload["source"] == "compaction"
+        assert payload["stage"] == "summarisation"
+        assert payload["level"] == 1
+        assert payload["session_id"] == session_id
+        assert payload["attempt"] == 1
+        assert payload["max_retries"] == 2
+        assert payload["error_type"].endswith("RateLimitError")
+        assert payload["delay_seconds"] == pytest.approx(0.01)
+
+        retry_logs = [entry for entry in logs if entry["event"] == "llm_call_retrying"]
+        assert len(retry_logs) == 1
+        assert retry_logs[0]["session_id"] == session_id
+        assert retry_logs[0]["stage"] == "summarisation"
+        assert retry_logs[0]["compaction_level"] == 1
+        # The structlog ``level`` key stays the log level (not overwritten data).
+        assert retry_logs[0]["log_level"] == "warning"
+
+    async def test_stage_tag_set_around_condensation_calls(
+        self, store, dag_store, estimator, event_bus
+    ):
+        engine = engine_mod.CompactionEngine(
+            store, dag_store, estimator, event_bus, MnesisConfig(), session_model="m"
+        )
+        seen: list[tuple[str, int] | None] = []
+
+        async def spy(**kwargs: object) -> str:
+            seen.append(engine_mod._call_stage.get())
+            return _SUMMARY
+
+        nodes = [_node("a", "alpha " * 20), _node("b", "beta " * 20)]
+        _ = await engine._run_condensation(nodes, "m", _BUDGET, spy, None)
+        assert seen == [("condensation", 1)]
+        assert engine_mod._call_stage.get() is None  # reset after the call
+
+    async def test_callback_failure_does_not_fail_the_call(self):
+        calls: list[int] = []
+
+        async def flaky() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise _rate_limit()
+            return "ok"
+
+        def boom(attempt: int, delay: float, exc: Exception) -> None:
+            raise RuntimeError("subscriber bug")
+
+        assert await call_with_retry(flaky, _FAST, on_retry=boom) == "ok"
+
+
+def structlog_capture():
+    from structlog.testing import capture_logs
+
+    return capture_logs()
+
+
+class TestWaitForPendingShield:
+    """B1: cancelling a waiter must not cancel the background compaction."""
+
+    async def test_cancelled_waiter_leaves_background_run_alive(
+        self, store, dag_store, estimator, event_bus
+    ):
+        engine = engine_mod.CompactionEngine(
+            store, dag_store, estimator, event_bus, MnesisConfig(), session_model="m"
+        )
+        release = asyncio.Event()
+
+        async def slow_run(session_id: str, **kwargs: object):
+            await release.wait()
+            return engine._failure_result(session_id, RuntimeError("x"), 0.0)
+
+        engine.run_compaction = slow_run  # type: ignore[method-assign]
+        bg = asyncio.create_task(engine.run_compaction("s"))
+        engine._pending_task = bg
+
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.02):
+                _ = await engine.wait_for_pending()
+
+        assert not bg.cancelled() and not bg.done()
+        assert engine.in_flight and engine.has_pending  # still tracked
+
+        release.set()
+        result = await engine.wait_for_pending()  # a later call collects it
+        assert result is not None
+        assert not engine.has_pending
+
+    async def test_task_own_cancellation_still_propagates(
+        self, store, dag_store, estimator, event_bus
+    ):
+        engine = engine_mod.CompactionEngine(
+            store, dag_store, estimator, event_bus, MnesisConfig(), session_model="m"
+        )
+
+        async def forever() -> None:
+            await asyncio.sleep(60)
+
+        bg = asyncio.ensure_future(forever())
+        engine._pending_task = bg  # type: ignore[assignment]
+        waiter = asyncio.create_task(engine.wait_for_pending())
+        await asyncio.sleep(0.01)
+        _ = bg.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            _ = await waiter
+        # The cancelled handle is reaped by the next call.
+        assert await engine.wait_for_pending() is None
+        assert not engine.has_pending
+
+
+class TestCloseAbortCompaction:
+    """B2: close(abort_compaction=True) ends a backoff wait promptly."""
+
+    @staticmethod
+    async def _session(tmp_path, monkeypatch, base_delay: float):
+        from mnesis import MnesisSession
+
+        cfg = MnesisConfig(
+            store=StoreConfig(db_path=str(tmp_path / "abort.db")),
+            session=SessionConfig(
+                retry=RetryConfig(max_retries=2, base_delay=base_delay, jitter=False)
+            ),
+        )
+        entered = asyncio.Event()
+
+        async def always_429(**kwargs: object) -> str:
+            entered.set()
+            raise _rate_limit()
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: always_429)
+        session = await MnesisSession.create(model="anthropic/claude-haiku-4-5", config=cfg)
+        for i in range(4):
+            _ = await session.record(f"question {i} " * 20, f"answer {i} " * 20)
+        return session, entered
+
+    async def test_abort_ends_backoff_and_returns_stub(self, tmp_path, monkeypatch):
+        session, entered = await self._session(tmp_path, monkeypatch, base_delay=60.0)
+        failed: list[dict] = []
+        session.subscribe(MnesisEvent.COMPACTION_FAILED, lambda e, p: failed.append(p))
+        compaction = asyncio.create_task(session.compact())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await asyncio.sleep(0.05)  # now in the 60 s backoff
+
+        t0 = time.monotonic()
+        await session.close(abort_compaction=True)
+        assert time.monotonic() - t0 < 5
+        result = await asyncio.wait_for(compaction, timeout=5)
+        assert result.level_used == 0 and result.summary_message_id == ""
+        assert failed and failed[0]["aborted"] is True
+
+    async def test_default_close_waits_for_the_run(self, tmp_path, monkeypatch):
+        """Without the option the run finishes (L3 after the outage) before close returns."""
+        session, entered = await self._session(tmp_path, monkeypatch, base_delay=0.05)
+        completed: list[dict] = []
+        session.subscribe(MnesisEvent.COMPACTION_COMPLETED, lambda e, p: completed.append(p))
+        engine = session._compaction_engine
+        assert engine.check_and_trigger(
+            session.id, 10**9, session._model_info, abort=session._compaction_abort
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await session.close()
+        assert completed and completed[0]["level_used"] == 3
+        assert not session._compaction_abort.is_set()

@@ -10,13 +10,24 @@ This module provides:
   a summary string when file IDs are present.
 - :func:`collect_file_ids_from_nodes` — aggregate file IDs from a list of
   ``SummaryNode`` objects (for condensation input propagation).
+- :func:`extract_file_id_paths` and friends — recover which path each ID
+  belongs to, so the footer can record ``path (file_<hex>)`` pairs. Without
+  them a summary can keep an ID and a path that are no longer associated.
+
+Footer format::
+
+    [LCM File IDs: services/billing/rates.yaml (file_3fa9c2d17b8e4a60), file_9b1e0c44a7d2f381]
+
+A bare ``file_<hex>`` entry means the path was not known. The older footer
+(bare IDs only) is still parsed everywhere; ID extraction only looks for
+``file_<hex>`` tokens, so both forms yield the same IDs.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from mnesis.models.message import MessageWithParts, TextPart, ToolPart
 from mnesis.models.summary import SummaryNode
@@ -27,6 +38,22 @@ _FILE_ID_RE = re.compile(r"\bfile_[0-9a-fA-F]{8,32}\b")
 
 # Footer template for the ``[LCM File IDs: ...]`` footer.
 _FILE_IDS_FOOTER_TEMPLATE = "\n\n[LCM File IDs: {ids}]"
+
+# A path-like token: ``dir/sub/file.ext`` (any number of separators) or a bare
+# ``name.ext`` with a 2+ character name and extension (so ``e.g`` is not one).
+# Characters that would break the footer grammar (``,`` ``(`` ``)`` ``]``) are
+# never part of a path.
+_PATH_RE = re.compile(
+    r"(?<![\w/.~-])(?:~?/?[\w.-]+(?:/[\w.-]+)+|[\w-]{2,}\.[A-Za-z][\w]+)(?![\w/-])"
+)
+
+# The body of a ``[LCM File IDs: ...]`` footer.
+_FOOTER_BODY_RE = re.compile(r"\[LCM File IDs:([^\]]*)\]")
+
+# One footer entry: ``path (file_<hex>)`` or a bare ``file_<hex>``.
+_FOOTER_ENTRY_RE = re.compile(
+    r"(?:(?P<path>[^,()\[\]]+?)\s*\(\s*)?(?P<id>file_[0-9a-fA-F]{8,32})\b\)?"
+)
 
 # A trailing ``[LCM File IDs: ...]`` footer (with any blank lines before it).
 _EXISTING_FOOTER_RE = re.compile(r"\n*\[LCM File IDs:[^\]]*\]\s*$", re.MULTILINE)
@@ -167,7 +194,114 @@ def collect_file_ids_from_nodes(nodes: list[SummaryNode]) -> list[str]:
     return result
 
 
-def append_file_ids_footer(text: str, file_ids: list[str]) -> str:
+def _clean_path(raw: str) -> str:
+    """Normalise a candidate path: strip surrounding punctuation and trailing dots."""
+    return raw.strip().strip("`'\"").rstrip(".")
+
+
+def _gap(a: re.Match[str], b: re.Match[str]) -> int:
+    """Characters between two matches on one line (0 if adjacent or overlapping)."""
+    return max(a.start() - b.end(), b.start() - a.end(), 0)
+
+
+def _heuristic_pairs(text: str) -> dict[str, str]:
+    """Pair each file ID with the nearest path-like token on the same line."""
+    pairs: dict[str, str] = {}
+    for line in text.splitlines():
+        id_matches = list(_FILE_ID_RE.finditer(line))
+        if not id_matches:
+            continue
+        path_matches = [
+            m
+            for m in _PATH_RE.finditer(line)
+            if "file_" not in m.group() and _clean_path(m.group())
+        ]
+        if not path_matches:
+            continue
+        # One-to-one, closest first: with more IDs than paths on a line, only the
+        # IDs nearest a path get it, rather than pairing every ID with the same file.
+        candidates = sorted(
+            (_gap(pm, im), i, j)
+            for i, im in enumerate(id_matches)
+            for j, pm in enumerate(path_matches)
+        )
+        used_ids: set[int] = set()
+        used_paths: set[int] = set()
+        for _gap_size, i, j in candidates:
+            if i in used_ids or j in used_paths:
+                continue
+            used_ids.add(i)
+            used_paths.add(j)
+            pairs.setdefault(id_matches[i].group(), _clean_path(path_matches[j].group()))
+    return pairs
+
+
+def footer_file_id_paths(text: str) -> dict[str, str]:
+    """Return the ``{file_id: path}`` pairs recorded in *text*'s footer(s).
+
+    Entries without a path (the older bare-ID footer) are skipped.
+    """
+    pairs: dict[str, str] = {}
+    for body in _FOOTER_BODY_RE.finditer(text):
+        for entry in _FOOTER_ENTRY_RE.finditer(body.group(1)):
+            path = entry.group("path")
+            fid = entry.group("id")
+            if path and path.strip() and fid not in pairs:
+                pairs[fid] = path.strip()
+    return pairs
+
+
+def extract_file_id_paths(text: str) -> dict[str, str]:
+    """
+    Map each file ID in *text* to its path, where one can be determined.
+
+    A pair recorded in a ``[LCM File IDs: ...]`` footer wins; otherwise an ID is
+    paired with the nearest path-like token on the same line (best effort: IDs
+    with no path on their line stay unpaired). The first pairing found for an
+    ID wins.
+
+    Args:
+        text: Text that may contain file IDs, paths and a footer.
+
+    Returns:
+        ``{file_id: path}`` for the IDs whose path is known.
+    """
+    pairs = footer_file_id_paths(text)
+    for fid, path in _heuristic_pairs(strip_file_ids_footer(text)).items():
+        pairs.setdefault(fid, path)
+    return pairs
+
+
+def extract_file_id_paths_from_messages(messages: list[MessageWithParts]) -> dict[str, str]:
+    """Like :func:`extract_file_id_paths`, over the raw text of *messages* (first pairing wins)."""
+    pairs: dict[str, str] = {}
+    for msg in messages:
+        for fid, path in extract_file_id_paths(message_id_text(msg)).items():
+            pairs.setdefault(fid, path)
+    return pairs
+
+
+def collect_file_id_paths_from_nodes(nodes: list[SummaryNode]) -> dict[str, str]:
+    """
+    Aggregate ``{file_id: path}`` pairs from summary nodes (for condensation).
+
+    Footer pairs (derived from the original messages when a leaf was written)
+    take precedence over pairs inferred from a node's prose, which an LLM may
+    have mangled. Within each tier the earliest node wins.
+    """
+    pairs: dict[str, str] = {}
+    for node in nodes:
+        for fid, path in footer_file_id_paths(node.content).items():
+            pairs.setdefault(fid, path)
+    for node in nodes:
+        for fid, path in _heuristic_pairs(strip_file_ids_footer(node.content)).items():
+            pairs.setdefault(fid, path)
+    return pairs
+
+
+def append_file_ids_footer(
+    text: str, file_ids: list[str], paths: Mapping[str, str] | None = None
+) -> str:
     """
     Append a ``[LCM File IDs: ...]`` footer to *text* when *file_ids* is non-empty.
 
@@ -177,6 +311,8 @@ def append_file_ids_footer(text: str, file_ids: list[str]) -> str:
     Args:
         text: The summary text to annotate.
         file_ids: File IDs to include in the footer.
+        paths: Optional ``{file_id: path}``; an ID with a path is written as
+            ``path (file_<hex>)``, others as the bare ID.
 
     Returns:
         Annotated text, or the original text unchanged if *file_ids* is empty.
@@ -184,7 +320,8 @@ def append_file_ids_footer(text: str, file_ids: list[str]) -> str:
     if not file_ids:
         return text
 
-    ids_str = ", ".join(file_ids)
+    paths = paths or {}
+    ids_str = ", ".join(f"{paths[fid]} ({fid})" if fid in paths else fid for fid in file_ids)
     footer = _FILE_IDS_FOOTER_TEMPLATE.format(ids=ids_str)
 
     # Strip any existing footer before appending the authoritative one.

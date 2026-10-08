@@ -89,6 +89,7 @@ async def call_with_retry[T](
     *,
     abort: asyncio.Event | None = None,
     logger: structlog.stdlib.BoundLogger | None = None,
+    on_retry: Callable[[int, float, Exception], None] | None = None,
 ) -> T:
     """Await ``call()``, retrying transient errors per ``cfg``.
 
@@ -96,6 +97,10 @@ async def call_with_retry[T](
     ``cfg.max_retries`` (> 0) raises :class:`RetriesExhaustedError`. If ``abort``
     is set during backoff the wait ends immediately with ``asyncio.CancelledError``; external task
     cancellation also propagates.
+
+    ``on_retry(attempt, delay, exc)`` is called (1-based ``attempt``) just before
+    each backoff sleep, e.g. to publish an ``LLM_RETRY`` event. An exception it
+    raises is logged and swallowed: observability must not fail the call.
     """
     log = logger or structlog.get_logger("mnesis.retry")
     attempt = 0
@@ -117,5 +122,10 @@ async def call_with_retry[T](
                 delay=delay,
                 error=str(exc),
             )
+            if on_retry is not None:
+                try:
+                    on_retry(attempt + 1, delay, exc)
+                except Exception:
+                    log.warning("llm_retry_callback_failed", exc_info=True)
             await _sleep_unless_aborted(delay, abort)
             attempt += 1
