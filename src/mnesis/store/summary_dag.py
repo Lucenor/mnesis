@@ -421,10 +421,13 @@ class SummaryDAGStore:
     async def _session_has_any_summary_nodes(self, session_id: str) -> bool:
         """Return True if summary_nodes has any row (active or superseded) for the session."""
         conn = self._store._conn_or_raise()
-        async with conn.execute(
-            "SELECT 1 FROM summary_nodes WHERE session_id=? LIMIT 1",
-            (session_id,),
-        ) as cursor:
+        async with (
+            self._store._lock,
+            conn.execute(
+                "SELECT 1 FROM summary_nodes WHERE session_id=? LIMIT 1",
+                (session_id,),
+            ) as cursor,
+        ):
             return await cursor.fetchone() is not None
 
     async def _get_active_nodes_from_messages(self, session_id: str) -> list[SummaryNode]:
@@ -446,10 +449,16 @@ class SummaryDAGStore:
     async def _get_summary_node_row(self, node_id: str) -> aiosqlite.Row | None:
         """Fetch a single summary_nodes row by ID, or None."""
         conn = self._store._conn_or_raise()
-        async with conn.execute(
-            "SELECT * FROM summary_nodes WHERE id=?",
-            (node_id,),
-        ) as cursor:
+        # Under the connection lock so a concurrent ``commit_summary_node`` on a
+        # shared connection is seen whole or not at all. Never called with the
+        # lock already held (asyncio.Lock is not reentrant).
+        async with (
+            self._store._lock,
+            conn.execute(
+                "SELECT * FROM summary_nodes WHERE id=?",
+                (node_id,),
+            ) as cursor,
+        ):
             return await cursor.fetchone()
 
     async def _build_node_from_row(

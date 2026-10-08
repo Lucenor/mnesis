@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, OperatorConfig
 from mnesis.models.message import TokenUsage
+from mnesis.operators._tasks import cancel_and_drain
 from mnesis.operators.template_utils import require_item_variable
 from mnesis.store.pool import StorePool
 
@@ -196,21 +197,30 @@ class AgenticMap:
         ]
 
         completed = 0
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            completed += 1
+        try:
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+                completed += 1
+                if self._event_bus:
+                    self._event_bus.publish(
+                        MnesisEvent.MAP_ITEM_COMPLETED,
+                        {"completed": completed, "total": len(inputs), "success": result.success},
+                    )
+                yield result
+
             if self._event_bus:
-                self._event_bus.publish(
-                    MnesisEvent.MAP_ITEM_COMPLETED,
-                    {"completed": completed, "total": len(inputs), "success": result.success},
-                )
-            yield result
-
-        if self._event_bus:
-            self._event_bus.publish(MnesisEvent.MAP_COMPLETED, {"total": len(inputs)})
-
-        if owned_pool:
-            await effective_pool.close_all()
+                self._event_bus.publish(MnesisEvent.MAP_COMPLETED, {"total": len(inputs)})
+        finally:
+            # Runs on normal completion and whenever the generator is closed
+            # (``aclose()``, asyncgen finalization, an error, or cancellation). A
+            # bare ``break`` does not close it by itself. Cancel the remaining
+            # sub-agents (their sessions close in ``_run_sub_agent``); the owned pool
+            # is closed even if this drain is itself interrupted.
+            try:
+                await cancel_and_drain(tasks)
+            finally:
+                if owned_pool:
+                    await effective_pool.close_all()
 
     async def run_all(
         self,
@@ -291,6 +301,7 @@ class AgenticMap:
 
             prompt = compiled_template.render(item=item)
             session: MnesisSession | None = None
+            cancelled = False
 
             try:
                 session = await MnesisSession.create(
@@ -327,13 +338,8 @@ class AgenticMap:
                     # Stop conditions
                     if result.finish_reason in ("stop", "end_turn"):
                         break
-                    if result.doom_loop_detected:
-                        self._logger.warning(
-                            "sub_agent_doom_loop",
-                            session_id=session.id,
-                            item=str(item)[:100],
-                        )
-                        break
+                    # No doom-loop stop: sub-agents use send(), which never reports
+                    # doom loops (detection is record()-only).
                     if result.finish_reason == "max_tokens":
                         break
 
@@ -346,6 +352,9 @@ class AgenticMap:
                     intermediate_outputs=intermediate_outputs,
                 )
 
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             except Exception as exc:
                 self._logger.error(
                     "sub_agent_failed",
@@ -362,4 +371,7 @@ class AgenticMap:
                 )
             finally:
                 if session is not None:
-                    await session.close()
+                    # A cancelled sub-agent (early close of the map) must not wait for
+                    # a background compaction to run to completion: abort it, bounding
+                    # the wait to at most one request already on the wire.
+                    await session.close(abort_compaction=cancelled)

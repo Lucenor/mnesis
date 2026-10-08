@@ -222,4 +222,5 @@ class MapCompletedPayload(TypedDict):
     total: int
     """Total number of items processed."""
     completed: NotRequired[int]
-    """Number of items that completed. Present for LLMMap; absent for AgenticMap."""
+    """Number of items that have finished, including failures (not a success count).
+    Present for LLMMap; absent for AgenticMap."""
