@@ -610,8 +610,17 @@ class ImmutableStore:
             output: Tool result output string (merged into content JSON).
             error_message: Tool error message (merged into content JSON).
 
+        The content merge is done in SQL with ``json_set``, which requires
+        SQLite JSON1 (built in since SQLite 3.38; the project supports
+        Python 3.12+, whose bundled SQLite is newer). SQLite re-serializes the
+        whole content JSON, so non-standard literals elsewhere in it are
+        normalized (``NaN`` becomes ``null``, ``Infinity`` becomes ``9e999``);
+        on SQLite < 3.42 such content fails with "malformed JSON".
+
         Raises:
             PartNotFoundError: If the part does not exist.
+            TypeError: If ``output``/``error_message`` is given and the part's
+                content is not a JSON object (nothing is updated).
         """
         conn = self._conn_or_raise()
 
@@ -634,14 +643,16 @@ class ImmutableStore:
 
         # Merge into the content JSON inside the UPDATE itself (json_set), so
         # concurrent updates to different fields cannot lose each other's write
-        # via a read-modify-write race. A text bind is stored as a JSON string.
+        # via a read-modify-write race. Values are bound as ``json(?)`` of
+        # ``json.dumps(value)`` so they are stored as JSON strings with the same
+        # escaping as before (e.g. lone surrogates become ``\udXXX`` escapes).
         json_updates: list[str] = []
         if output is not None:
-            json_updates.append("'$.output', ?")
-            params.append(output)
+            json_updates.append("'$.output', json(?)")
+            params.append(json.dumps(output))
         if error_message is not None:
-            json_updates.append("'$.error_message', ?")
-            params.append(error_message)
+            json_updates.append("'$.error_message', json(?)")
+            params.append(json.dumps(error_message))
         if json_updates:
             set_clauses.append(f"content = json_set(content, {', '.join(json_updates)})")
 
@@ -649,12 +660,23 @@ class ImmutableStore:
             return
 
         params.append(part_id)
+        # json_set on non-object content would silently no-op; only match object
+        # content so that case can be told apart from a missing part below.
+        object_only = " AND json_type(content) = 'object'" if json_updates else ""
         result = await conn.execute(
-            f"UPDATE message_parts SET {', '.join(set_clauses)} WHERE id = ?",
+            f"UPDATE message_parts SET {', '.join(set_clauses)} WHERE id = ?{object_only}",
             params,
         )
         await conn.commit()
         if result.rowcount == 0:
+            if json_updates:
+                async with conn.execute(
+                    "SELECT 1 FROM message_parts WHERE id = ?", (part_id,)
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        raise TypeError(
+                            f"Part {part_id} content is not a JSON object; cannot merge fields"
+                        )
             raise PartNotFoundError(part_id)
 
     async def batch_set_compacted_at(self, part_ids: list[str], compacted_at: int) -> None:

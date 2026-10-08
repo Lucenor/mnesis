@@ -1189,6 +1189,44 @@ class TestImmutableStoreCoverageGaps:
         assert content["error_message"] == "something failed"
         assert content["status"]["state"] == "running"
 
+    async def test_update_part_status_lone_surrogate_is_escaped(self, session_id, store):
+        """Lone surrogates in output/error_message are stored escaped, not rejected."""
+        from tests.conftest import make_message, make_raw_part
+
+        msg = make_message(session_id, role="assistant", msg_id="msg_sur_001")
+        await store.append_message(msg)
+        await store.append_part(
+            make_raw_part("msg_sur_001", session_id, part_type="tool", part_id="part_sur_001")
+        )
+
+        await store.update_part_status(
+            "part_sur_001", output="a\ud800b", error_message='q"\né\udc00'
+        )
+        content = json.loads((await store.get_parts("msg_sur_001"))[0].content)
+        assert content["output"] == "a\ud800b"
+        assert content["error_message"] == 'q"\né\udc00'
+
+    @pytest.mark.parametrize("raw", ["[1, 2]", '"text"', "null", "42"])
+    async def test_update_part_status_non_object_content_raises(self, session_id, store, raw):
+        """Merging into non-object content raises (as before) and changes nothing."""
+        from tests.conftest import make_message, make_raw_part
+
+        msg = make_message(session_id, role="assistant", msg_id="msg_nonobj_001")
+        await store.append_message(msg)
+        part = make_raw_part("msg_nonobj_001", session_id, part_id="part_nonobj_001")
+        part.content = raw
+        await store.append_part(part)
+
+        with pytest.raises(TypeError):
+            await store.update_part_status("part_nonobj_001", output="x", tool_state="done")
+        stored = (await store.get_parts("msg_nonobj_001"))[0]
+        assert stored.content == raw
+        assert stored.tool_state != "done"
+
+    async def test_update_part_status_missing_part_with_output_raises_not_found(self, store):
+        with pytest.raises(PartNotFoundError):
+            await store.update_part_status("part_missing", output="x")
+
     async def test_update_part_status_no_fields_is_noop(self, session_id, store):
         """update_part_status() with no kwargs is a no-op (line 646: early return)."""
         from tests.conftest import make_message, make_raw_part
