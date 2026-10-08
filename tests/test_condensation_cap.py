@@ -246,14 +246,12 @@ class TestEngineCondensesSubsets:
     async def test_over_window_node_set_is_condensed_in_subsets(
         self, session_id, store, dag_store, est, event_bus, tmp_path, monkeypatch
     ):
-        import mnesis.compaction.engine as engine_mod
-
         engine, nodes = await _engine_with_nodes(
             store, dag_store, est, event_bus, tmp_path, 6, session_id
         )
         assert sum(n.token_count for n in nodes) > WINDOW
         rec = Recorder(est)
-        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: rec)
+        monkeypatch.setattr("mnesis.compaction.engine._make_llm_call", lambda model, **kw: rec)
 
         result = await engine.run_compaction(session_id)
 
@@ -274,13 +272,11 @@ class TestEngineCondensesSubsets:
     async def test_uncondensed_nodes_stay_live_after_a_capped_round(
         self, session_id, store, dag_store, est, event_bus, tmp_path, monkeypatch
     ):
-        import mnesis.compaction.engine as engine_mod
-
         engine, nodes = await _engine_with_nodes(
             store, dag_store, est, event_bus, tmp_path, 6, session_id
         )
         rec = Recorder(est)
-        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: rec)
+        monkeypatch.setattr("mnesis.compaction.engine._make_llm_call", lambda model, **kw: rec)
         budget = engine._summary_budget()
         info = engine._model_info
         assert info is not None

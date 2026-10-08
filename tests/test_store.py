@@ -1728,7 +1728,8 @@ class TestConnectionSerialization:
             await asyncio.sleep(0.05)
             assert not reader.done()  # blocked, not served the half-swapped state
             release.set()
-            await swap
+            _ = await asyncio.wait({swap})
+            swap.result()
             items = await reader
         finally:
             restore()
@@ -1751,8 +1752,9 @@ class TestConnectionSerialization:
             assert not unrelated.done()  # queued behind the open swap transaction
             release.set()
             with pytest.raises(RuntimeError, match="insert failed"):
-                await swap
-            await unrelated  # commits only its own work
+                _ = await asyncio.wait({swap})
+                swap.result()
+            _ = await unrelated  # commits only its own work
         finally:
             restore()
         items = await store.get_context_items(session_id)
@@ -1767,7 +1769,8 @@ class TestConnectionSerialization:
             await asyncio.wait_for(at_insert.wait(), 5)
             _ = swap.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await swap
+                _ = await asyncio.wait({swap})
+                swap.result()
         finally:
             restore()
         # Nothing half-applied, and the lock was released for later writers.
@@ -1813,6 +1816,7 @@ class TestConnectionSerialization:
             reading = asyncio.create_task(dag_store.get_active_nodes(session_id))
             await asyncio.sleep(0.05)
             assert not marking.done() and not reading.done()
-        await marking
+        _ = await asyncio.wait({marking})
+        marking.result()
         assert [n.id for n in await reading] in (["node_a", "node_b"], ["node_b"])
         assert [n.id for n in await dag_store.get_active_nodes(session_id)] == ["node_b"]
