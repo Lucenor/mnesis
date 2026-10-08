@@ -179,6 +179,35 @@ class TestPathExtraction:
     def test_prefixed_and_extension_paths_pair(self, path):
         assert extract_file_id_paths(f"{path} ({RATES})") == {RATES: path}
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "logs/2024/01/app.log",
+            "data/2023/report.csv",
+            "docker/Dockerfile",
+            "Makefile",
+            "src/Procfile",
+            "LICENSE",
+            "README",
+            "config/.env",
+            ".env",
+            ".gitignore",
+            "~/.zshrc",
+            "dist/app.tar.gz",
+            "types/index.d.ts",
+            "settings/tsconfig.jsonc",
+            "docs/guide.markdown",
+            "src/node.js",
+        ],
+    )
+    def test_realistic_paths_pair(self, path):
+        assert extract_file_id_paths(f"{path} ({RATES})") == {RATES: path}
+
+    @pytest.mark.parametrize("token", ["3/4", "2024/01", "1/2", "10/20/30"])
+    def test_numeric_last_segment_is_not_a_path(self, token):
+        assert extract_file_id_paths(f"{RATES} ({token} done)") == {}
+        assert extract_file_id_paths(f"{token} ({RATES})") == {}
+
     def test_each_path_names_one_id(self):
         pairs = extract_file_id_paths(f"{RATES} {MIGRATE}: scripts/m.py")
         assert pairs == {MIGRATE: "scripts/m.py"}

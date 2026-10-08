@@ -49,7 +49,7 @@ _PATH_RE = re.compile(r"(?<![\w/.~@-])[\w.~/@-]+")
 _PATH_EXTENSIONS = frozenset(
     "py pyi ts tsx js jsx mjs cjs json jsonl yaml yml toml ini cfg conf env md rst txt csv tsv "
     "sql sh bash zsh go rs java kt rb php c h cc cpp hpp cs swift scala html css scss xml lock "
-    "log ipynb parquet db sqlite proto tf".split()
+    "log ipynb parquet db sqlite proto tf jsonc markdown gz tgz zip tar bz2 xz".split()
 )
 
 # What may separate a file ID from the path it names: an opening parenthesis, a
@@ -219,6 +219,13 @@ _NOT_FILES = frozenset(
 )
 # A path that starts like this is a path even without a file extension.
 _PATH_PREFIXES = ("/", "./", "../", "~/")
+# Well-known files with no extension.
+_KNOWN_FILENAMES = frozenset(
+    "Dockerfile Makefile Procfile Gemfile Rakefile Vagrantfile Pipfile Brewfile LICENSE README "
+    "CHANGELOG CODEOWNERS .env .gitignore .gitattributes .dockerignore .editorconfig .npmrc "
+    ".nvmrc .bashrc .zshrc .prettierrc .eslintrc".split()
+)
+_DOTFILE_RE = re.compile(r"\.[A-Za-z][\w.-]*")
 
 
 def _has_known_extension(name: str) -> bool:
@@ -230,13 +237,14 @@ def _is_path(token: str, line: str, end: int) -> bool:
     """Whether the token ending at ``line[end]`` is a file path rather than code/prose.
 
     A path is a token whose last segment has a known file extension
-    (``src/a.py``, ``README.md``), or one with an explicit path prefix
+    (``src/a.py``, ``README.md``, ``app.tar.gz``), or one with an explicit path prefix
     (``/``, ``./``, ``../``, ``~/``) and a non-empty remainder. A bare ``/`` is
     not enough: ``N/A``, ``TCP/IP``, ``and/or``, ``input/output`` and ``3/4`` are
     prose, and a directory-looking ``a/b/c`` is too ambiguous to trust. Tokens
     touching ``@`` (e-mail), URLs, calls (``name.ext(``), framework names
-    (``Node.js``), pure-numeric segments and bare file IDs are rejected. When
-    unsure, no.
+    (``Node.js``), a purely numeric last segment and bare file IDs are rejected.
+    Well-known extensionless names (``Dockerfile``, ``Makefile``, ``.env``...) and
+    dotfiles inside a directory (``config/.env``) count. When unsure, no.
     """
     token = token.rstrip(".")
     if not token or "@" in token or "://" in token or token.startswith("//"):
@@ -246,12 +254,17 @@ def _is_path(token: str, line: str, end: int) -> bool:
     if line[end : end + 1] == "(":
         return False
     segments = [seg for seg in token.split("/") if seg]
-    if not segments or any(seg.isdigit() for seg in segments):
+    # A purely numeric last segment is a ratio/date (``3/4``), not a file; numeric
+    # directories (``logs/2024/01/app.log``) are fine.
+    if not segments or segments[-1].isdigit():
         return False
     if token.lower() in _NOT_FILES:
         return False
-    if _has_known_extension(segments[-1]):
+    last = segments[-1]
+    if _has_known_extension(last) or last in _KNOWN_FILENAMES:
         return True
+    if "/" in token and _DOTFILE_RE.fullmatch(last):
+        return True  # ``config/.env``, ``~/.zshrc``
     return token.startswith(_PATH_PREFIXES) and any(c.isalpha() for c in token)
 
 
