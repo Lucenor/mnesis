@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -190,7 +191,9 @@ class TestLevelFunctions:
         assert dense_cand is None or len(dense_cand.parent_node_ids) < 4
 
 
-async def _engine_with_nodes(store, dag_store, est, event_bus, tmp_path, n_nodes, session_id):
+async def _engine_with_nodes(
+    store, dag_store, est, event_bus, tmp_path, n_nodes, session_id, sizes=None
+):
     cfg = MnesisConfig(
         store=StoreConfig(db_path=str(tmp_path / "cap.db")),
         compaction=CompactionConfig(compaction_output_budget=1_000, max_compaction_rounds=5),
@@ -226,7 +229,7 @@ async def _engine_with_nodes(store, dag_store, est, event_bus, tmp_path, n_nodes
         )
     nodes = []
     for i in range(n_nodes):
-        node = _big_node(i, est)
+        node = _big_node(i, est, sizes[i] if sizes else 1_800)
         node.session_id = session_id
         node.id = f"msg_node_{i}"
         node.span_start_message_id = f"msg_cap_{0}"
@@ -291,3 +294,65 @@ class TestEngineCondensesSubsets:
         rec.assert_within_window()
         # Nothing was superseded by merely producing the candidate.
         assert {n.id for n in await dag_store.get_active_nodes(session_id)} == {n.id for n in nodes}
+
+
+class _LabelRecorder(Recorder):
+    """Replies ``merged-<n>`` so later prompts show which merge they contain."""
+
+    async def __call__(self, **kwargs: Any) -> str:
+        _ = await super().__call__(**kwargs)
+        return f"## Goal\nmerged-{len(self.calls)}\n"
+
+
+class TestContextOrder:
+    """F1 review: subsets are the oldest *in the context*, not by creation time."""
+
+    async def test_rounds_keep_chronological_order(
+        self, session_id, store, dag_store, est, event_bus, tmp_path, monkeypatch
+    ):
+        engine, _nodes = await _engine_with_nodes(
+            store,
+            dag_store,
+            est,
+            event_bus,
+            tmp_path,
+            6,
+            session_id,
+            sizes=[1800, 1800, 1800, 2500, 2500, 4800],
+        )
+        rec = _LabelRecorder(est)
+        monkeypatch.setattr("mnesis.compaction.engine._make_llm_call", lambda model, **kw: rec)
+
+        _ = await engine.run_compaction(session_id)
+
+        assert len(rec.calls) >= 2
+        rows = await dag_store._query_summary_nodes(
+            session_id, superseded=True
+        ) + await dag_store._query_summary_nodes(session_id, superseded=False)
+        parents_of = {r["id"]: json.loads(r["parent_node_ids"]) for r in rows}
+
+        def leaves(node_id: str) -> set[int]:
+            if not parents_of[node_id]:
+                return {int(node_id.rsplit("_", 1)[1])}
+            return set().union(*(leaves(p) for p in parents_of[node_id]))
+
+        label_leaves: dict[str, set[int]] = {f"node {i} ": {i} for i in range(6)}
+        for r in rows:
+            m = re.search(r"merged-(\d+)", r["content"])
+            if m:
+                label_leaves[f"merged-{m.group(1)}"] = leaves(r["id"])
+
+        # 1. Every round's prompt lists its inputs oldest first.
+        for prompt, _max in rec.calls:
+            found = re.findall(r"node \d+ |merged-\d+", prompt)
+            firsts = [min(label_leaves[label]) for label in found]
+            assert firsts == sorted(firsts), found
+        # 2. Each condensed node merges a contiguous run of the original leaves.
+        for r in rows:
+            if parents_of[r["id"]]:
+                covered = sorted(leaves(r["id"]))
+                assert covered == list(range(covered[0], covered[-1] + 1)), covered
+        # 3. The final context lists the summaries in chronological order.
+        items = [i for t, i in await store.get_context_items(session_id) if t == "summary"]
+        final = [min(leaves(i)) for i in items]
+        assert final == sorted(final), final

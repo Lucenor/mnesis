@@ -888,7 +888,7 @@ class CompactionEngine:
                 # until condensed, so they count towards the context size).
                 # ``tokens_after`` is fresh here: measured after the leaf swap
                 # (round 0) or after the previous round's condensation.
-                active_nodes = await self._dag_store.get_active_nodes(session_id)
+                active_nodes = await self._active_nodes_in_context_order(session_id)
                 node_ids = frozenset(n.id for n in active_nodes)
                 if tokens_after < fit_limit:
                     # Under target — done. Work is left only if there is a set of
@@ -922,8 +922,9 @@ class CompactionEngine:
                     # An LLM condensation that did not shrink the nodes (levels 1-2 have
                     # no convergence check): fall back to the deterministic level, which
                     # always fits the budget, before giving up.
-                    cond = condense_level3_deterministic(active_nodes, self._estimator, budget)
-                    consumed = self._consumed_nodes(active_nodes, cond)
+                    # Only the nodes this round consumed: the deterministic level
+                    # needs no window, but must not swallow nodes the LLM level left.
+                    cond = condense_level3_deterministic(consumed, self._estimator, budget)
                     tokens_before_condense = sum(n.token_count for n in consumed)
 
                 if cond.token_count >= tokens_before_condense:
@@ -1016,6 +1017,20 @@ class CompactionEngine:
 
         self._event_bus.publish(MnesisEvent.COMPACTION_COMPLETED, result.model_dump())
         return result
+
+    async def _active_nodes_in_context_order(self, session_id: str) -> list[SummaryNode]:
+        """Live summary nodes, oldest first *in the context*.
+
+        ``get_active_nodes`` orders by creation time, but a condensed node is
+        created after (and so sorts behind) newer leaves while covering the oldest
+        span. Condensing subsets, recency ranking of file ids and the "oldest
+        first" prefix all need the order the nodes actually have in the context.
+        """
+        nodes = await self._dag_store.get_active_nodes(session_id)
+        items = await self._store.get_context_items(session_id)
+        position = {item_id: i for i, (kind, item_id) in enumerate(items) if kind == "summary"}
+        # Nodes missing from the context (legacy data) keep creation order, last.
+        return sorted(nodes, key=lambda n: position.get(n.id, len(items)))
 
     @staticmethod
     def _consumed_nodes(
