@@ -1101,9 +1101,15 @@ class ImmutableStore:
     async def get_file_reference(self, content_id: str) -> FileReference | None:
         """Fetch a file reference by content hash. Returns None if not found."""
         conn = self._conn_or_raise()
-        async with conn.execute(
-            "SELECT * FROM file_references WHERE content_id=?", (content_id,)
-        ) as cursor:
+        # Under the shared connection lock: file references dedup globally by content
+        # hash, so a hit on another session's uncommitted insert that later rolls back
+        # would leave a FileRefPart with no row behind it.
+        async with (
+            self._lock,
+            conn.execute(
+                "SELECT * FROM file_references WHERE content_id=?", (content_id,)
+            ) as cursor,
+        ):
             row = await cursor.fetchone()
         if row is None:
             return None
@@ -1112,10 +1118,14 @@ class ImmutableStore:
     async def get_file_reference_by_path(self, path: str) -> FileReference | None:
         """Fetch the most recently stored file reference for a given path."""
         conn = self._conn_or_raise()
-        async with conn.execute(
-            "SELECT * FROM file_references WHERE path=? ORDER BY created_at DESC LIMIT 1",
-            (path,),
-        ) as cursor:
+        # Under the shared connection lock; see :meth:`get_file_reference`.
+        async with (
+            self._lock,
+            conn.execute(
+                "SELECT * FROM file_references WHERE path=? ORDER BY created_at DESC LIMIT 1",
+                (path,),
+            ) as cursor,
+        ):
             row = await cursor.fetchone()
         if row is None:
             return None

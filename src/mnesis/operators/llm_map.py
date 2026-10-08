@@ -216,8 +216,10 @@ class LLMMap:
                     MnesisEvent.MAP_COMPLETED, {"total": len(inputs), "completed": completed}
                 )
         finally:
-            # Early close (consumer break / error / cancellation): stop the
-            # remaining in-flight work instead of leaving it running unobserved.
+            # Runs on normal completion and whenever the generator is closed
+            # (``aclose()``, asyncgen finalization, an error, or cancellation); a bare
+            # ``break`` does not close it by itself. Stop the remaining in-flight work
+            # instead of leaving it running unobserved. LLMMap owns no other resource.
             await cancel_and_drain(tasks)
 
     async def run_all(

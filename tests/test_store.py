@@ -1823,16 +1823,79 @@ class TestConnectionSerialization:
 
     async def test_single_node_lookups_use_the_same_lock(self, session_id, store, dag_store):
         _ = await _insert_leaf_node(dag_store, session_id, "node_a")
-        # Hold the lock: the summary_nodes row lookups must wait for it so they
-        # cannot observe another store's in-flight transaction.
-        async with store._lock:
-            by_id = asyncio.create_task(dag_store.get_node_by_id("node_a"))
-            has_any = asyncio.create_task(dag_store._session_has_any_summary_nodes(session_id))
-            await asyncio.sleep(0.05)
-            assert not by_id.done() and not has_any.done()
-        node = await by_id
+
+        class SpyLock:
+            """Delegates to the real lock and counts acquisitions (no timing)."""
+
+            def __init__(self, inner):
+                self.inner = inner
+                self.acquired = 0
+
+            async def __aenter__(self):
+                await self.inner.acquire()
+                self.acquired += 1
+
+            async def __aexit__(self, *exc):
+                self.inner.release()
+
+        spy = SpyLock(store._lock)
+        store._lock = spy  # type: ignore[assignment]
+        row = await dag_store._get_summary_node_row("node_a")
+        assert row is not None and spy.acquired == 1
+        assert await dag_store._session_has_any_summary_nodes(session_id) is True
+        assert spy.acquired == 2
+        node = await dag_store.get_node_by_id("node_a")
         assert node is not None and node.id == "node_a"
-        assert await has_any is True
+        assert spy.acquired >= 3  # its row lookup took the lock too
+
+    async def test_file_reference_reads_do_not_see_uncommitted_rows(self, config, pool, store):
+        """Dedup lookups skip another store's in-flight insert that then rolls back."""
+        other = ImmutableStore(config.store, pool=pool)
+        await other.initialize()
+        ref = FileReference(
+            content_id="rolled_back",
+            path="/tmp/rb.py",
+            file_type="python",
+            token_count=100,
+            exploration_summary="s",
+        )
+        inserted = asyncio.Event()
+        seen: dict[str, object] = {}
+
+        async def inserter():
+            try:
+                async with other._transaction() as conn:
+                    await conn.execute(
+                        "INSERT INTO file_references "
+                        "(content_id, path, file_type, token_count, exploration_summary, "
+                        "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            ref.content_id,
+                            ref.path,
+                            ref.file_type,
+                            ref.token_count,
+                            ref.exploration_summary,
+                            ref.created_at,
+                        ),
+                    )
+                    inserted.set()
+                    # Hold the transaction open until the readers have finished.
+                    # With the lock they cannot, so this times out; without it they
+                    # finish early (having seen the dirty row) and the test fails.
+                    _ = await asyncio.wait({reader_task}, timeout=0.5)
+                    raise RuntimeError("force rollback")
+            except RuntimeError:
+                pass
+
+        async def readers():
+            _ = await inserted.wait()
+            seen["by_id"] = await store.get_file_reference("rolled_back")
+            seen["by_path"] = await store.get_file_reference_by_path("/tmp/rb.py")
+
+        reader_task = asyncio.create_task(readers())
+        await inserter()
+        await reader_task
+        assert seen == {"by_id": None, "by_path": None}
 
 
 class TestAtomicNodeCommit:

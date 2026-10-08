@@ -227,10 +227,12 @@ Each sub-session stops when any of the following occurs (checked in order after
 each turn):
 
 1. `finish_reason` is `"stop"` or `"end_turn"` — natural completion.
-2. `doom_loop_detected` is `True` — consecutive identical tool calls detected.
-3. `finish_reason` is `"max_tokens"` — output token limit hit.
-4. `max_turns` turns have been executed.
-5. `continuation_message` is empty and turn > 0 — single-turn mode.
+2. `finish_reason` is `"max_tokens"` — output token limit hit.
+3. `max_turns` turns have been executed.
+4. `continuation_message` is empty and turn > 0 — single-turn mode.
+
+Sub-agents run on `send()`, which never reports doom loops (detection is
+`record()`-only), so a repeating sub-agent is bounded by `max_turns` only.
 
 ### Collecting all results at once
 
@@ -309,12 +311,25 @@ async for result in llm_map.run(inputs=items, ...):
 
 ### Stopping early
 
-Both operators are async generators. If you stop iterating early (`break`, an
-exception, or cancellation) and the generator is closed, all unfinished
-items are cancelled and awaited: no further LLM calls are made and no
-background task is left running. For deterministic cleanup, wrap the generator
-in `contextlib.aclosing()`. `AgenticMap` also closes the sub-sessions of
-cancelled items.
+Both operators are async generators. A bare `break` does not close a
+generator: cleanup runs when it is closed (`aclose()`), finalized by the
+event loop, or interrupted by an exception or cancellation. At that point all
+unfinished items are cancelled and awaited, so no new items start and no
+background task is left running. `AgenticMap` also closes the sub-sessions of
+cancelled items, aborting any background compaction in flight: the close waits
+for at most one LLM request already on the wire, not for the compaction to
+finish. For deterministic cleanup, wrap the generator in `contextlib.aclosing()`:
+
+```python
+from contextlib import aclosing
+
+async with aclosing(llm_map.run(inputs=items, ...)) as results:
+    async for result in results:
+        if result.success:
+            break  # remaining items are cancelled when the block exits
+```
+
+`MAP_COMPLETED` is not published when a map is stopped early.
 
 ---
 
@@ -342,7 +357,10 @@ cancelled items.
   Retried with exponential backoff: `min(0.5 * 2^(attempt-1), 8.0)` seconds.
   This backoff is applied only to non-timeout exceptions.
   The concurrency slot is released before the backoff sleep, so a failing item
-  never blocks other items from making progress.
+  never blocks other items from making progress. Trade-off: backoff no longer
+  throttles the map, so under heavy rate limiting (HTTP 429) new items keep
+  firing while failed ones wait. Lower `llm_map_concurrency` or raise the retry
+  delays if the provider is rate limiting.
 
 - **Timeout failures** — `TimeoutError` consumes one attempt and counts toward
   `max_retries`, but does **not** apply the exponential backoff. Timeout retries

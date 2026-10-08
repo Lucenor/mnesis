@@ -1077,50 +1077,6 @@ class TestAgenticMap:
         assert results[0].success is True
         assert call_count == 2  # turn 0 + turn 1 (with continuation)
 
-    async def test_doom_loop_detected_stops_agent(self, tmp_path, op_config, monkeypatch):
-        """doom_loop_detected=True in TurnResult causes the sub-agent to stop."""
-        from mnesis.models.message import TokenUsage, TurnResult
-        from mnesis.operators.agentic_map import AgenticMap
-
-        async def fake_send(user_message, *, tools=None):
-            return TurnResult(
-                message_id="msg_1",
-                text="looping...",
-                finish_reason="tool_calls",
-                tokens=TokenUsage(),
-                cost=0.0,
-                doom_loop_detected=True,
-            )
-
-        import mnesis.session as session_module
-
-        original_create = session_module.MnesisSession.create
-
-        async def patched_create(*args, **kwargs):
-            sess = await original_create(*args, **kwargs)
-            sess.send = fake_send  # type: ignore
-            return sess
-
-        monkeypatch.setattr(session_module.MnesisSession, "create", patched_create)
-
-        agentic_map = AgenticMap(op_config)
-        results = []
-        async for result in agentic_map.run(
-            inputs=["x"],
-            agent_prompt_template="Do: {{ item }}",
-            model="anthropic/claude-opus-4-6",
-            read_only=False,
-            continuation_message="Continue.",
-            db_path=str(tmp_path / "doom_loop.db"),
-            max_turns=5,
-        ):
-            results.append(result)
-
-        assert len(results) == 1
-        assert results[0].success is True
-        # Only turn 0 ran — doom loop detected immediately
-        assert len(results[0].intermediate_outputs) == 1
-
     async def test_max_tokens_finish_reason_stops_agent(self, tmp_path, op_config, monkeypatch):
         """finish_reason='max_tokens' causes the sub-agent to stop the loop."""
         from mnesis.models.message import TokenUsage, TurnResult
@@ -1203,12 +1159,15 @@ class TestOperatorLifecycle:
     """Early close cancels remaining work; backoff does not hold a concurrency slot."""
 
     async def test_llm_map_early_close_cancels_remaining(self, op_config, monkeypatch):
+        import gc
+
         monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
         started: list[str] = []
         cancelled: list[str] = []
         never = asyncio.Event()
         errors: list[dict] = []
-        asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: errors.append(ctx))
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, ctx: errors.append(ctx))
 
         async def call(**kwargs):
             item = kwargs["prompt"].removeprefix("Process ")
@@ -1222,25 +1181,37 @@ class TestOperatorLifecycle:
                 raise
             return "{}"
 
-        llm_map = LLMMap(op_config)
-        llm_map._call_llm = call  # type: ignore
-        gen = llm_map.run(
-            inputs=[f"item_{i}" for i in range(5)],
-            prompt_template="Process {{ item }}",
-            output_schema={"type": "object"},
-            model="test-model",
-            concurrency=5,
-        )
-        first = await anext(gen)
-        assert first.input == "item_0"
-        await gen.aclose()
+        try:
+            llm_map = LLMMap(op_config)
+            llm_map._call_llm = call  # type: ignore
+            gen = llm_map.run(
+                inputs=[f"item_{i}" for i in range(5)],
+                prompt_template="Process {{ item }}",
+                output_schema={"type": "object"},
+                model="test-model",
+                concurrency=5,
+            )
+            first = await anext(gen)
+            assert first.input == "item_0"
+            item_tasks = _other_tasks()
+            assert len(item_tasks) == 4  # the 4 unfinished items
+            await gen.aclose()
 
-        assert sorted(cancelled) == [f"item_{i}" for i in range(1, 5)]
-        assert not _other_tasks()
-        calls_before = len(started)
-        await asyncio.sleep(0.05)
-        assert len(started) == calls_before  # no further LLM calls
-        assert errors == []  # no "Task exception was never retrieved"
+            # Every unfinished item task was cancelled and awaited.
+            assert all(t.done() for t in item_tasks)
+            assert sum(t.cancelled() for t in item_tasks) == 4
+            assert sorted(cancelled) == [f"item_{i}" for i in range(1, 5)]
+            assert not _other_tasks()
+            calls_before = len(started)
+            await asyncio.sleep(0.05)
+            assert len(started) == calls_before  # no further LLM calls
+            # "Task exception was never retrieved" only fires on GC: force it.
+            del item_tasks
+            gc.collect()
+            await asyncio.sleep(0)
+            assert errors == []
+        finally:
+            loop.set_exception_handler(None)
 
     async def test_llm_map_backoff_does_not_hold_semaphore(self, op_config, monkeypatch):
         monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
@@ -1287,42 +1258,123 @@ class TestOperatorLifecycle:
         assert second.attempts == 2
         await gen.aclose()
 
-    async def test_agentic_map_early_close_cancels_remaining(
-        self, tmp_path, op_config, monkeypatch
-    ):
-        from mnesis.operators.agentic_map import AgenticMap
+    @staticmethod
+    def _patch_slow_send(monkeypatch, *, pending_compaction: bool = False):
+        """Make non-``fast`` sub-agents hang in send(); returns observation state."""
         from mnesis.session import MnesisSession
 
         original_send = MnesisSession.send
-        cancelled: list[str] = []
+        state = {
+            "cancelled": [],
+            "slow_started": 0,
+            "both_started": asyncio.Event(),
+            "compaction_aborted": [],
+        }
         never = asyncio.Event()
 
         async def send(self, message, **kwargs):
             if message.endswith("fast"):
                 return await original_send(self, message, **kwargs)
+            if pending_compaction:
+                # A background compaction in flight that only ends when aborted.
+                async def fake_compaction():
+                    _ = await self._compaction_abort.wait()
+                    state["compaction_aborted"].append(message)
+
+                self._compaction_engine._pending_task = asyncio.create_task(fake_compaction())
+            state["slow_started"] += 1
+            if state["slow_started"] == 2:
+                state["both_started"].set()
             try:
                 _ = await never.wait()
             except asyncio.CancelledError:
-                cancelled.append(message)
+                state["cancelled"].append(message)
                 raise
             raise AssertionError("slow sub-agent should only exit by cancellation")
 
         monkeypatch.setattr(MnesisSession, "send", send)
-        gen = AgenticMap(op_config).run(
+        return state
+
+    @staticmethod
+    def _agentic_gen(tmp_path, op_config, name):
+        from mnesis.operators.agentic_map import AgenticMap
+
+        return AgenticMap(op_config).run(
             inputs=["fast", "slow_a", "slow_b"],
             agent_prompt_template="Task {{ item }}",
             model="anthropic/claude-opus-4-6",
             read_only=False,
-            db_path=str(tmp_path / "early_close.db"),
+            db_path=str(tmp_path / f"{name}.db"),
             concurrency=3,
             max_turns=1,
         )
+
+    async def test_agentic_map_early_close_cancels_remaining(
+        self, tmp_path, op_config, monkeypatch
+    ):
+        state = self._patch_slow_send(monkeypatch)
+        gen = self._agentic_gen(tmp_path, op_config, "early_close")
         first = await anext(gen)
         assert first.input == "fast"
+        # Both slow sub-agents must be inside send() before the close.
+        await asyncio.wait_for(state["both_started"].wait(), timeout=5)
         await gen.aclose()
 
-        assert sorted(cancelled) == ["Task slow_a", "Task slow_b"]
+        assert sorted(state["cancelled"]) == ["Task slow_a", "Task slow_b"]
         assert not _other_tasks()
+
+    async def test_agentic_map_early_close_aborts_pending_compaction(
+        self, tmp_path, op_config, monkeypatch
+    ):
+        """Closing cancelled sub-sessions aborts, rather than awaits, their compaction."""
+        state = self._patch_slow_send(monkeypatch, pending_compaction=True)
+        gen = self._agentic_gen(tmp_path, op_config, "abort_compaction")
+        _ = await anext(gen)
+        await asyncio.wait_for(state["both_started"].wait(), timeout=5)
+        # Without abort_compaction=True the fake compaction never ends: this hangs.
+        await asyncio.wait_for(gen.aclose(), timeout=5)
+
+        assert sorted(state["compaction_aborted"]) == ["Task slow_a", "Task slow_b"]
+        assert not _other_tasks()
+
+    async def test_agentic_map_closes_owned_pool_when_drain_interrupted(
+        self, tmp_path, op_config, monkeypatch
+    ):
+        """A second cancel during the drain must not skip closing the owned pool."""
+        import mnesis.operators.agentic_map as am_mod
+        from mnesis.store.pool import StorePool
+
+        pools: list[StorePool] = []
+
+        class SpyPool(StorePool):
+            def __init__(self) -> None:
+                super().__init__()
+                pools.append(self)
+
+        async def stuck_drain(_tasks):
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(am_mod, "StorePool", SpyPool)
+        state = self._patch_slow_send(monkeypatch)
+        gen = self._agentic_gen(tmp_path, op_config, "double_cancel")
+
+        async def consume() -> None:
+            async for _ in gen:
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(state["both_started"].wait(), timeout=5)
+        assert len(pools) == 1 and len(pools[0]._connections) == 1
+        real_drain = am_mod.cancel_and_drain
+        monkeypatch.setattr(am_mod, "cancel_and_drain", stuck_drain)
+        _ = task.cancel()  # first cancel: enters the (stuck) drain in the finally
+        await asyncio.sleep(0.05)
+        _ = task.cancel()  # second cancel: interrupts the drain
+        _ = await asyncio.wait({task}, timeout=5)
+        assert task.cancelled()
+        assert pools[0]._connections == {}
+        # Clean up the still-running sub-agent tasks left by the stuck drain.
+        await real_drain(_other_tasks())
 
 
 class TestLiteLLMRetryInteraction:
