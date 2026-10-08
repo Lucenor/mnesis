@@ -307,6 +307,15 @@ async for result in llm_map.run(inputs=items, ...):
     results_by_input[id(result.input)] = result
 ```
 
+### Stopping early
+
+Both operators are async generators. If you stop iterating early (`break`, an
+exception, or cancellation) and the generator is closed, all unfinished
+items are cancelled and awaited: no further LLM calls are made and no
+background task is left running. For deterministic cleanup, wrap the generator
+in `contextlib.aclosing()`. `AgenticMap` also closes the sub-sessions of
+cancelled items.
+
 ---
 
 ## Retries
@@ -332,6 +341,8 @@ async for result in llm_map.run(inputs=items, ...):
 - **Transient errors** — `litellm` exceptions (network, rate limit, etc.).
   Retried with exponential backoff: `min(0.5 * 2^(attempt-1), 8.0)` seconds.
   This backoff is applied only to non-timeout exceptions.
+  The concurrency slot is released before the backoff sleep, so a failing item
+  never blocks other items from making progress.
 
 - **Timeout failures** — `TimeoutError` consumes one attempt and counts toward
   `max_retries`, but does **not** apply the exponential backoff. Timeout retries

@@ -80,3 +80,15 @@ Demonstrates the core `send()` loop:
 - Passing explicit `TokenUsage` for accurate compaction budgeting
 
 This example includes a canned-response stub so it runs without any API key. See [BYO-LLM](byo-llm.md) for a full explanation.
+
+---
+
+## 07 — Streaming
+
+**[`examples/07_streaming.py`](https://github.com/Lucenor/mnesis/blob/main/examples/07_streaming.py)**
+
+- Iterating a turn with `session.stream()`, an async generator of `TextDelta` events followed by a final `TurnComplete` carrying the `TurnResult`
+- `stream()` wraps `send()`, so deltas arrive as a batch after the LLM call completes rather than token by token
+- Breaking out of the loop is safe: the underlying `send()` still finishes, persists the turn, and triggers compaction if needed
+
+Runs without an API key under `MNESIS_MOCK_LLM=1`.

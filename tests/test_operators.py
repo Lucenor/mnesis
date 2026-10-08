@@ -237,8 +237,11 @@ class TestLLMMap:
         assert len(batch.failures) == 0
         assert batch.total_attempts == 3
 
-    async def test_concurrency_limit_respected(self, op_config):
+    async def test_concurrency_limit_respected(self, op_config, monkeypatch):
         """At most N concurrent calls are made at once."""
+        # Mock mode short-circuits before _call_llm; disable it so the
+        # instrumented call (and therefore the semaphore) is exercised.
+        monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
         active: list[int] = []
         max_concurrent: list[int] = [0]
 
@@ -252,8 +255,6 @@ class TestLLMMap:
         llm_map = LLMMap(op_config)
         llm_map._call_llm = lambda **kw: tracked_call(llm_map, **kw)  # type: ignore
 
-        # Don't actually test concurrency here since mock overrides vary
-        # Just verify all items complete
         inputs = [f"item_{i}" for i in range(8)]
         results = []
         async for result in llm_map.run(
@@ -265,6 +266,9 @@ class TestLLMMap:
             results.append(result)
 
         assert len(results) == 8
+        # The semaphore is honored (never exceeded) and, with delayed calls
+        # over 8 items, the configured limit is actually reached.
+        assert max_concurrent[0] == op_config.llm_map_concurrency
 
     def test_parse_response_json_decode_error_returns_validation(self, op_config):
         """_parse_response returns validation error kind for invalid JSON."""
@@ -354,28 +358,17 @@ class TestLLMMap:
         llm_map = LLMMap(op_config)
         valid_response = json.dumps({"summary": "ok", "keywords": ["a"]})
 
+        calls: list[dict] = []
+
         async def fake_call_llm(**kwargs):
+            calls.append(kwargs)
             return valid_response
 
         import asyncio as _asyncio
 
         semaphore = _asyncio.Semaphore(1)
         _tmpl = _JinjaEnv().from_string("Process: {{ item }}")
-        # First call exercises the non-mock path; result is not checked (real LLM absent).
-        await llm_map._process_item(
-            item="test",
-            compiled_template=_tmpl,
-            schema=OutputSchema.model_json_schema(),
-            pydantic_model=OutputSchema,
-            model="test-model",
-            semaphore=semaphore,
-            max_retries=0,
-            system_prompt=None,
-            temperature=0.0,
-            timeout=30.0,
-            retry_guidance="retry",
-        )
-        # We mock _call_llm to return valid data
+        # Replace _call_llm before the only invocation: no real LiteLLM request.
         llm_map._call_llm = fake_call_llm  # type: ignore
         result = await llm_map._process_item(
             item="test",
@@ -391,6 +384,7 @@ class TestLLMMap:
             retry_guidance="retry",
         )
         assert result.success is True
+        assert len(calls) == 1
 
     async def test_process_item_timeout_sets_error_kind(self, op_config, monkeypatch):
         """_process_item sets error_kind='timeout' on TimeoutError."""
@@ -1199,6 +1193,135 @@ class TestAgenticMap:
         assert MnesisEvent.MAP_STARTED in events
         assert MnesisEvent.MAP_ITEM_COMPLETED in events
         assert MnesisEvent.MAP_COMPLETED in events
+
+
+def _other_tasks() -> set[asyncio.Task]:
+    return {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
+
+
+class TestOperatorLifecycle:
+    """Early close cancels remaining work; backoff does not hold a concurrency slot."""
+
+    async def test_llm_map_early_close_cancels_remaining(self, op_config, monkeypatch):
+        monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
+        started: list[str] = []
+        cancelled: list[str] = []
+        never = asyncio.Event()
+        errors: list[dict] = []
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: errors.append(ctx))
+
+        async def call(**kwargs):
+            item = kwargs["prompt"].removeprefix("Process ")
+            started.append(item)
+            if item == "item_0":
+                return json.dumps({"ok": True})
+            try:
+                _ = await never.wait()
+            except asyncio.CancelledError:
+                cancelled.append(item)
+                raise
+            return "{}"
+
+        llm_map = LLMMap(op_config)
+        llm_map._call_llm = call  # type: ignore
+        gen = llm_map.run(
+            inputs=[f"item_{i}" for i in range(5)],
+            prompt_template="Process {{ item }}",
+            output_schema={"type": "object"},
+            model="test-model",
+            concurrency=5,
+        )
+        first = await anext(gen)
+        assert first.input == "item_0"
+        await gen.aclose()
+
+        assert sorted(cancelled) == [f"item_{i}" for i in range(1, 5)]
+        assert not _other_tasks()
+        calls_before = len(started)
+        await asyncio.sleep(0.05)
+        assert len(started) == calls_before  # no further LLM calls
+        assert errors == []  # no "Task exception was never retrieved"
+
+    async def test_llm_map_backoff_does_not_hold_semaphore(self, op_config, monkeypatch):
+        monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
+        sleeping = asyncio.Event()
+        release = asyncio.Event()
+        real_sleep = asyncio.sleep
+
+        async def gated_sleep(delay: float) -> None:
+            if delay >= 0.5:  # LLMMap backoff (min 0.5s); leave other sleeps alone
+                sleeping.set()
+                _ = await release.wait()
+            else:
+                await real_sleep(delay)
+
+        monkeypatch.setattr(asyncio, "sleep", gated_sleep)
+        attempts: dict[str, int] = {}
+
+        async def call(**kwargs):
+            item = kwargs["prompt"].removeprefix("Process ")
+            attempts[item] = attempts.get(item, 0) + 1
+            if item == "bad" and attempts[item] == 1:
+                raise RuntimeError("transient")
+            return json.dumps({"ok": True})
+
+        llm_map = LLMMap(op_config)
+        llm_map._call_llm = call  # type: ignore
+        gen = llm_map.run(
+            inputs=["bad", "good"],
+            prompt_template="Process {{ item }}",
+            output_schema={"type": "object"},
+            model="test-model",
+            concurrency=1,
+        )
+        # "bad" fails and enters backoff; with concurrency=1, "good" must still
+        # complete while "bad" sleeps because the slot was released.
+        first = await asyncio.wait_for(anext(gen), timeout=5)
+        assert sleeping.is_set()
+        assert first.input == "good"
+        assert first.success is True
+        release.set()
+        second = await asyncio.wait_for(anext(gen), timeout=5)
+        assert second.input == "bad"
+        assert second.success is True
+        assert second.attempts == 2
+        await gen.aclose()
+
+    async def test_agentic_map_early_close_cancels_remaining(
+        self, tmp_path, op_config, monkeypatch
+    ):
+        from mnesis.operators.agentic_map import AgenticMap
+        from mnesis.session import MnesisSession
+
+        original_send = MnesisSession.send
+        cancelled: list[str] = []
+        never = asyncio.Event()
+
+        async def send(self, message, **kwargs):
+            if message.endswith("fast"):
+                return await original_send(self, message, **kwargs)
+            try:
+                _ = await never.wait()
+            except asyncio.CancelledError:
+                cancelled.append(message)
+                raise
+
+        monkeypatch.setattr(MnesisSession, "send", send)
+        gen = AgenticMap(op_config).run(
+            inputs=["fast", "slow_a", "slow_b"],
+            agent_prompt_template="Task {{ item }}",
+            model="anthropic/claude-opus-4-6",
+            read_only=False,
+            db_path=str(tmp_path / "early_close.db"),
+            concurrency=3,
+            max_turns=1,
+        )
+        first = await anext(gen)
+        assert first.input == "fast"
+        await gen.aclose()
+
+        assert sorted(cancelled) == ["Task slow_a", "Task slow_b"]
+        assert not _other_tasks()
 
 
 class TestLiteLLMRetryInteraction:

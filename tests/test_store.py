@@ -1821,6 +1821,19 @@ class TestConnectionSerialization:
         assert [n.id for n in await reading] in (["node_a", "node_b"], ["node_b"])
         assert [n.id for n in await dag_store.get_active_nodes(session_id)] == ["node_b"]
 
+    async def test_single_node_lookups_use_the_same_lock(self, session_id, store, dag_store):
+        _ = await _insert_leaf_node(dag_store, session_id, "node_a")
+        # Hold the lock: the summary_nodes row lookups must wait for it so they
+        # cannot observe another store's in-flight transaction.
+        async with store._lock:
+            by_id = asyncio.create_task(dag_store.get_node_by_id("node_a"))
+            has_any = asyncio.create_task(dag_store._session_has_any_summary_nodes(session_id))
+            await asyncio.sleep(0.05)
+            assert not by_id.done() and not has_any.done()
+        node = await by_id
+        assert node is not None and node.id == "node_a"
+        assert await has_any is True
+
 
 class TestAtomicNodeCommit:
     """Node insert + context swap + supersession commit as one transaction."""

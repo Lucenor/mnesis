@@ -238,7 +238,7 @@ Fired by: `MnesisEvent.MAP_COMPLETED`
 | Field | Type | Present for | Description |
 |---|---|---|---|
 | `total` | `int` | All operators | Total number of items processed |
-| `completed` | `int` (optional) | `LLMMap` only | Number of items that completed successfully |
+| `completed` | `int` (optional) | `LLMMap` only | Number of items that have finished, including failures (not a success count; use `MapItemCompletedPayload.success` or the yielded `MapResult.success` per item) |
 
 !!! note "AgenticMap omits `completed`"
     `AgenticMap` publishes only `total` in its `MAP_COMPLETED` payload. `LLMMap` includes both `total` and `completed`.

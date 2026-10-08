@@ -77,4 +77,4 @@ session.subscribe(MnesisEvent.DOOM_LOOP_DETECTED, lambda e, p: print("Doom loop!
 
 ## Doom Loop Detection
 
-If the model makes the same tool call (same name and input) `doom_loop_threshold` (default: 3) times consecutively, mnesis raises a `DOOM_LOOP_DETECTED` event and sets `TurnResult.doom_loop_detected = True`. The session continues — the caller decides how to handle it.
+If the model makes the same tool call (same name and input) `doom_loop_threshold` (default: 3) times consecutively, mnesis publishes a `DOOM_LOOP_DETECTED` event and sets `RecordResult.doom_loop_detected = True`. Detection runs in BYO-LLM mode (`session.record()`) only: a managed `session.send()` turn carries no tracked tool calls, so it resets the detection window and `TurnResult.doom_loop_detected` is always `False`. The session continues — the caller decides how to handle it. See [BYO-LLM](byo-llm.md).

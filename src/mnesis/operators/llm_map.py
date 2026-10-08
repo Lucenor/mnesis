@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import OperatorConfig
+from mnesis.operators._tasks import cancel_and_drain
 from mnesis.operators.template_utils import require_item_variable
 from mnesis.tokens.estimator import TokenEstimator
 
@@ -199,20 +200,25 @@ class LLMMap:
         ]
 
         completed = 0
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            completed += 1
+        try:
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+                completed += 1
+                if self._event_bus:
+                    self._event_bus.publish(
+                        MnesisEvent.MAP_ITEM_COMPLETED,
+                        {"completed": completed, "total": len(inputs), "success": result.success},
+                    )
+                yield result
+
             if self._event_bus:
                 self._event_bus.publish(
-                    MnesisEvent.MAP_ITEM_COMPLETED,
-                    {"completed": completed, "total": len(inputs), "success": result.success},
+                    MnesisEvent.MAP_COMPLETED, {"total": len(inputs), "completed": completed}
                 )
-            yield result
-
-        if self._event_bus:
-            self._event_bus.publish(
-                MnesisEvent.MAP_COMPLETED, {"total": len(inputs), "completed": completed}
-            )
+        finally:
+            # Early close (consumer break / error / cancellation): stop the
+            # remaining in-flight work instead of leaving it running unobserved.
+            await cancel_and_drain(tasks)
 
     async def run_all(
         self,
@@ -293,6 +299,9 @@ class LLMMap:
         last_error_kind: Literal["timeout", "validation", "llm_error", "schema_error"] | None = None
 
         for attempt in range(1, max_retries + 2):
+            backoff: float | None = None
+            # The semaphore covers only the request/response processing; backoff
+            # sleeps happen after release so failing items don't hold a slot.
             async with semaphore:
                 try:
                     # Only append retry_guidance on parse/schema failures — not transient errors.
@@ -340,7 +349,9 @@ class LLMMap:
                     self._logger.warning("llm_map_error", attempt=attempt, error=last_error)
                     # Exponential backoff for transient errors
                     if attempt <= max_retries:
-                        await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 8.0))
+                        backoff = min(0.5 * (2 ** (attempt - 1)), 8.0)
+            if backoff is not None:
+                await asyncio.sleep(backoff)
 
         return MapResult(
             input=item,

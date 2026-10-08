@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, OperatorConfig
 from mnesis.models.message import TokenUsage
+from mnesis.operators._tasks import cancel_and_drain
 from mnesis.operators.template_utils import require_item_variable
 from mnesis.store.pool import StorePool
 
@@ -196,21 +197,25 @@ class AgenticMap:
         ]
 
         completed = 0
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            completed += 1
+        try:
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+                completed += 1
+                if self._event_bus:
+                    self._event_bus.publish(
+                        MnesisEvent.MAP_ITEM_COMPLETED,
+                        {"completed": completed, "total": len(inputs), "success": result.success},
+                    )
+                yield result
+
             if self._event_bus:
-                self._event_bus.publish(
-                    MnesisEvent.MAP_ITEM_COMPLETED,
-                    {"completed": completed, "total": len(inputs), "success": result.success},
-                )
-            yield result
-
-        if self._event_bus:
-            self._event_bus.publish(MnesisEvent.MAP_COMPLETED, {"total": len(inputs)})
-
-        if owned_pool:
-            await effective_pool.close_all()
+                self._event_bus.publish(MnesisEvent.MAP_COMPLETED, {"total": len(inputs)})
+        finally:
+            # Early close: cancel the remaining sub-agents (their sessions close
+            # in ``_run_sub_agent``) before the owned pool is torn down.
+            await cancel_and_drain(tasks)
+            if owned_pool:
+                await effective_pool.close_all()
 
     async def run_all(
         self,

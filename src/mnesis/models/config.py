@@ -78,7 +78,8 @@ class CompactionConfig(BaseModel):
             "to overrun their output limit on the condensation prompt (their Level 1 output "
             "is discarded, costing a request). Ignored when level2_enabled is False. "
             "Independent of this flag, the engine skips Level 1 for the rest of its lifetime "
-            "after one condensation Level 1 completion is cut off at the output limit."
+            "after two consecutive condensation Level 1 completions are cut off at the "
+            "output limit."
         ),
     )
 
