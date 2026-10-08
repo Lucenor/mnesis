@@ -2034,3 +2034,44 @@ class TestRetrySleepSemantics:
             assert session._retry_sleep_task is None
         finally:
             await session.close()
+
+
+class TestCancelledSendLeavesNoEmptyAssistantTurn:
+    async def _context_roles(self, session):
+        ctx = await session.context_for_next_turn()
+        return [(m["role"], (m["content"] or "").strip() != "") for m in ctx]
+
+    async def test_backoff_cancel(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        stream, _ = TestRetrySleepSemantics._flaky(5)
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=60.0)
+        try:
+            with patch.object(session, "_stream_response", new=AsyncMock(side_effect=stream)):
+                with pytest.raises(TimeoutError):
+                    async with asyncio.timeout(0.3):
+                        _ = await session.send("hi")
+            assert await self._context_roles(session) == [("user", True)]
+        finally:
+            await session.close()
+
+    async def test_streaming_cancel(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+
+        async def hang(*args, **kwargs):
+            await asyncio.sleep(60)
+
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        try:
+            with patch.object(session, "_stream_response", new=AsyncMock(side_effect=hang)):
+                task = asyncio.create_task(session.send("hi"))
+                await asyncio.sleep(0.2)
+                _ = task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert await self._context_roles(session) == [("user", True)]
+        finally:
+            await session.close()
