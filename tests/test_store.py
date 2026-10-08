@@ -1820,3 +1820,109 @@ class TestConnectionSerialization:
         marking.result()
         assert [n.id for n in await reading] in (["node_a", "node_b"], ["node_b"])
         assert [n.id for n in await dag_store.get_active_nodes(session_id)] == ["node_b"]
+
+
+class TestAtomicNodeCommit:
+    """Node insert + context swap + supersession commit as one transaction."""
+
+    @staticmethod
+    def _node(session_id, node_id, kind="condensed", parents=()):
+        from mnesis.models.summary import SummaryNode
+
+        return SummaryNode(
+            id=node_id,
+            session_id=session_id,
+            kind=kind,
+            span_start_message_id="a",
+            span_end_message_id="b",
+            content="merged",
+            token_count=10,
+            parent_node_ids=list(parents),
+        )
+
+    @staticmethod
+    async def _setup(session_id, store, dag_store):
+        from mnesis.session import make_id
+
+        conn = store._conn
+        for pos, nid in enumerate(("node_a", "node_b"), start=100):
+            await _insert_leaf_node(dag_store, session_id, nid)
+            await conn.execute(
+                "INSERT INTO context_items (session_id, item_type, item_id, position, created_at)"
+                " VALUES (?, 'summary', ?, ?, '0')",
+                (session_id, nid, pos),
+            )
+        await conn.commit()
+        return lambda: make_id("part")
+
+    async def test_commit_swaps_and_supersedes_together(self, session_id, store, dag_store):
+        gen = await self._setup(session_id, store, dag_store)
+        node = self._node(session_id, "node_c", parents=["node_a", "node_b"])
+        _ = await dag_store.commit_summary_node(
+            node,
+            id_generator=gen,
+            remove_item_ids=["node_a", "node_b"],
+            supersede_node_ids=["node_a", "node_b"],
+        )
+        assert await store.get_context_items(session_id) == [("summary", "node_c")]
+        assert [n.id for n in await dag_store.get_active_nodes(session_id)] == ["node_c"]
+
+    async def _interrupted(self, session_id, store, dag_store, *, cancel: bool):
+        gen = await self._setup(session_id, store, dag_store)
+        conn = store._conn
+        orig = conn.execute
+        at_update = asyncio.Event()
+
+        def gated(sql, *args, **kwargs):
+            if "SET superseded=1" in sql:
+
+                async def run():
+                    at_update.set()  # swap done, supersede pending
+                    if cancel:
+                        await asyncio.sleep(30)
+                    raise RuntimeError("supersede failed")
+
+                return run()
+            return orig(sql, *args, **kwargs)
+
+        conn.execute = gated
+        node = self._node(session_id, "node_c", parents=["node_a", "node_b"])
+        task = asyncio.create_task(
+            dag_store.commit_summary_node(
+                node,
+                id_generator=gen,
+                remove_item_ids=["node_a", "node_b"],
+                supersede_node_ids=["node_a", "node_b"],
+            )
+        )
+        try:
+            await asyncio.wait_for(at_update.wait(), 5)
+            if cancel:
+                _ = task.cancel()
+            _ = await asyncio.wait({task})
+        finally:
+            conn.execute = orig
+        return task
+
+    async def _assert_untouched(self, session_id, store, dag_store):
+        assert await store.get_context_items(session_id) == [
+            ("summary", "node_a"),
+            ("summary", "node_b"),
+        ]
+        assert {n.id for n in await dag_store.get_active_nodes(session_id)} == {"node_a", "node_b"}
+        assert dag_store._superseded_ids == set()
+        from mnesis.store.immutable import MessageNotFoundError
+
+        with pytest.raises(MessageNotFoundError):
+            _ = await store.get_message("node_c")
+
+    async def test_failure_after_swap_rolls_everything_back(self, session_id, store, dag_store):
+        task = await self._interrupted(session_id, store, dag_store, cancel=False)
+        with pytest.raises(RuntimeError, match="supersede failed"):
+            _ = task.result()
+        await self._assert_untouched(session_id, store, dag_store)
+
+    async def test_cancel_between_swap_and_supersede_rolls_back(self, session_id, store, dag_store):
+        task = await self._interrupted(session_id, store, dag_store, cancel=True)
+        assert task.cancelled()
+        await self._assert_untouched(session_id, store, dag_store)

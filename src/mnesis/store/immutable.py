@@ -491,6 +491,70 @@ class ImmutableStore:
 
     # ── Message Methods ────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _map_message_integrity_error(
+        exc: aiosqlite.IntegrityError, message: Message
+    ) -> MnesisStoreError:
+        """Translate a failed message INSERT into the store's public error."""
+        if "FOREIGN KEY" in str(exc):
+            return SessionNotFoundError(message.session_id)
+        return DuplicateIDError(message.id)
+
+    async def _append_message_on(self, conn: aiosqlite.Connection, message: Message) -> None:
+        """INSERT a message (and its context item) on *conn*; the caller owns the transaction."""
+        tokens = message.tokens or TokenUsage()
+        error = message.error
+        now_str = str(int(time.time() * 1000))
+        await conn.execute(
+            """
+            INSERT INTO messages (
+                id, session_id, parent_id, role, created_at, agent, model_id,
+                provider_id, is_summary, tokens_input, tokens_output,
+                tokens_cache_read, tokens_cache_write, tokens_total, cost,
+                finish_reason, error_code, error_message_text, error_retriable, mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message.id,
+                message.session_id,
+                message.parent_id,
+                message.role,
+                message.created_at,
+                message.agent,
+                message.model_id,
+                message.provider_id,
+                int(message.is_summary),
+                tokens.input,
+                tokens.output,
+                tokens.cache_read,
+                tokens.cache_write,
+                tokens.effective_total(),
+                message.cost,
+                message.finish_reason,
+                error.code if error else None,
+                error.message if error else None,
+                int(error.retriable) if error else 0,
+                message.mode,
+            ),
+        )
+        # Track non-summary messages in the context_items view.
+        # Summary items are inserted by the compaction engine atomically
+        # alongside the DELETE of the compacted messages.
+        # The position is computed atomically inside the INSERT via a
+        # correlated subquery so concurrent appends within the same
+        # transaction cannot race on the same MAX(position) value.
+        if not message.is_summary:
+            await conn.execute(
+                """
+                INSERT INTO context_items
+                    (session_id, item_type, item_id, position, created_at)
+                SELECT ?, 'message', ?, COALESCE(MAX(position), 0) + 1, ?
+                FROM context_items
+                WHERE session_id = ?
+                """,
+                (message.session_id, message.id, now_str, message.session_id),
+            )
+
     async def append_message(self, message: Message) -> Message:
         """
         Append a message to the log.
@@ -511,64 +575,11 @@ class ImmutableStore:
             SessionNotFoundError: If session_id does not exist.
             DuplicateIDError: If a message with this ID already exists.
         """
-        tokens = message.tokens or TokenUsage()
-        error = message.error
-        now_str = str(int(time.time() * 1000))
         try:
             async with self._transaction() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO messages (
-                        id, session_id, parent_id, role, created_at, agent, model_id,
-                        provider_id, is_summary, tokens_input, tokens_output,
-                        tokens_cache_read, tokens_cache_write, tokens_total, cost,
-                        finish_reason, error_code, error_message_text, error_retriable, mode
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        message.id,
-                        message.session_id,
-                        message.parent_id,
-                        message.role,
-                        message.created_at,
-                        message.agent,
-                        message.model_id,
-                        message.provider_id,
-                        int(message.is_summary),
-                        tokens.input,
-                        tokens.output,
-                        tokens.cache_read,
-                        tokens.cache_write,
-                        tokens.effective_total(),
-                        message.cost,
-                        message.finish_reason,
-                        error.code if error else None,
-                        error.message if error else None,
-                        int(error.retriable) if error else 0,
-                        message.mode,
-                    ),
-                )
-                # Track non-summary messages in the context_items view.
-                # Summary items are inserted by the compaction engine atomically
-                # alongside the DELETE of the compacted messages.
-                # The position is computed atomically inside the INSERT via a
-                # correlated subquery so concurrent appends within the same
-                # transaction cannot race on the same MAX(position) value.
-                if not message.is_summary:
-                    await conn.execute(
-                        """
-                        INSERT INTO context_items
-                            (session_id, item_type, item_id, position, created_at)
-                        SELECT ?, 'message', ?, COALESCE(MAX(position), 0) + 1, ?
-                        FROM context_items
-                        WHERE session_id = ?
-                        """,
-                        (message.session_id, message.id, now_str, message.session_id),
-                    )
+                await self._append_message_on(conn, message)
         except aiosqlite.IntegrityError as exc:
-            if "FOREIGN KEY" in str(exc):
-                raise SessionNotFoundError(message.session_id) from exc
-            raise DuplicateIDError(message.id) from exc
+            raise self._map_message_integrity_error(exc, message) from exc
 
         return message
 
@@ -592,36 +603,40 @@ class ImmutableStore:
         """
         try:
             async with self._transaction() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO message_parts
-                        (id, message_id, session_id, part_type, part_index, content,
-                         tool_name, tool_call_id, tool_state, compacted_at,
-                         started_at, completed_at, token_estimate)
-                    SELECT ?, ?, ?, ?, COALESCE(MAX(part_index), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?
-                    FROM message_parts WHERE message_id = ?
-                    """,
-                    (
-                        part.id,
-                        part.message_id,
-                        part.session_id,
-                        part.part_type,
-                        part.content,
-                        part.tool_name,
-                        part.tool_call_id,
-                        part.tool_state,
-                        part.compacted_at,
-                        part.started_at,
-                        part.completed_at,
-                        part.token_estimate,
-                        part.message_id,
-                    ),
-                )
+                await self._append_part_on(conn, part)
         except aiosqlite.IntegrityError as exc:
             if "FOREIGN KEY" in str(exc):
                 raise MessageNotFoundError(part.message_id) from exc
             raise
-        conn = self._conn_or_raise()
+        return part
+
+    async def _append_part_on(self, conn: aiosqlite.Connection, part: RawMessagePart) -> None:
+        """INSERT a part on *conn* and set its ``part_index``; the caller owns the transaction."""
+        await conn.execute(
+            """
+            INSERT INTO message_parts
+                (id, message_id, session_id, part_type, part_index, content,
+                 tool_name, tool_call_id, tool_state, compacted_at,
+                 started_at, completed_at, token_estimate)
+            SELECT ?, ?, ?, ?, COALESCE(MAX(part_index), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?
+            FROM message_parts WHERE message_id = ?
+            """,
+            (
+                part.id,
+                part.message_id,
+                part.session_id,
+                part.part_type,
+                part.content,
+                part.tool_name,
+                part.tool_call_id,
+                part.tool_state,
+                part.compacted_at,
+                part.started_at,
+                part.completed_at,
+                part.token_estimate,
+                part.message_id,
+            ),
+        )
         # Read back the allocated index; the part id is unique, so this cannot
         # race with other appends (indexes are never rewritten).
         async with conn.execute(
@@ -631,7 +646,6 @@ class ImmutableStore:
         if row is None:  # pragma: no cover - the INSERT above just succeeded
             raise RuntimeError(f"part {part.id} missing immediately after INSERT")
         part.part_index = row[0]
-        return part
 
     async def update_part_status(
         self,
@@ -933,6 +947,11 @@ class ImmutableStore:
         3. Group parts by message ID and join in Python.
         4. Deserialize part JSON into typed MessagePart objects.
 
+        The two queries are not one snapshot: on a connection shared with a
+        concurrent writer a part appended between them can be missed (picked up by
+        the next read). Rows are append-only, so a read never sees a half-written
+        row; callers that need a consistent view of a message's parts re-read.
+
         Args:
             session_id: The session to query.
             since_message_id: If provided, returns only messages after this boundary.
@@ -1159,39 +1178,47 @@ class ImmutableStore:
         """
         if not remove_item_ids:
             return
-
-        now_str = str(int(time.time() * 1000))
-
-        placeholders = ",".join("?" * len(remove_item_ids))
         # The summary occupies the position slot of the first item being removed.
         # Items after the compacted span retain their original positions —
         # no shifting required because positions are monotonically increasing
         # but need not be contiguous.
         async with self._transaction() as conn:
-            async with conn.execute(
-                f"SELECT MIN(position) FROM context_items"
-                f" WHERE session_id = ? AND item_id IN ({placeholders})",
-                (session_id, *remove_item_ids),
-            ) as cursor:
-                row = await cursor.fetchone()
-            # MIN(position) is NULL when none of the remove_item_ids exist in
-            # context_items (e.g. called with stale IDs after a crash-recovery).
-            # In that case the swap is a no-op — we have nothing to remove and
-            # nowhere deterministic to place the summary row.
-            summary_pos: int | None = row[0] if row else None
-            if summary_pos is None:
-                # No matching rows — nothing to remove, skip the insert too.
-                return
+            await self._swap_context_items_on(conn, session_id, remove_item_ids, summary_id)
 
-            await conn.execute(
-                f"DELETE FROM context_items WHERE session_id = ? AND item_id IN ({placeholders})",
-                (session_id, *remove_item_ids),
-            )
-            await conn.execute(
-                "INSERT INTO context_items (session_id, item_type, item_id, position, created_at)"
-                " VALUES (?, 'summary', ?, ?, ?)",
-                (session_id, summary_id, summary_pos, now_str),
-            )
+    async def _swap_context_items_on(
+        self,
+        conn: aiosqlite.Connection,
+        session_id: str,
+        remove_item_ids: list[str],
+        summary_id: str,
+    ) -> None:
+        """The swap of :meth:`swap_context_items` on *conn*; the caller owns the transaction."""
+        if not remove_item_ids:
+            return
+        now_str = str(int(time.time() * 1000))
+        placeholders = ",".join("?" * len(remove_item_ids))
+        async with conn.execute(
+            f"SELECT MIN(position) FROM context_items"
+            f" WHERE session_id = ? AND item_id IN ({placeholders})",
+            (session_id, *remove_item_ids),
+        ) as cursor:
+            row = await cursor.fetchone()
+        # MIN(position) is NULL when none of the remove_item_ids exist in
+        # context_items (e.g. called with stale IDs after a crash-recovery).
+        # In that case the swap is a no-op: nothing to remove and nowhere
+        # deterministic to place the summary row.
+        summary_pos: int | None = row[0] if row else None
+        if summary_pos is None:
+            return
+        await conn.execute(
+            f"DELETE FROM context_items WHERE session_id = ? AND item_id IN ({placeholders})",
+            (session_id, *remove_item_ids),
+        )
+        await conn.execute(
+            "INSERT INTO context_items (session_id, item_type, item_id, position, created_at)"
+            " VALUES (?, 'summary', ?, ?, ?)",
+            (session_id, summary_id, summary_pos, now_str),
+        )
 
     # ── Private Helpers ────────────────────────────────────────────────────────
 

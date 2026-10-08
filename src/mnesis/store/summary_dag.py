@@ -5,16 +5,13 @@ from __future__ import annotations
 import json
 import time as time_mod
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
+import aiosqlite
 import structlog
 
 from mnesis.models.message import Message
 from mnesis.models.summary import MessageSpan, SummaryNode
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
-
-if TYPE_CHECKING:
-    import aiosqlite
 
 
 class SummaryDAGStore:
@@ -206,6 +203,36 @@ class SummaryDAGStore:
         Returns:
             The persisted node (unmodified).
         """
+        return await self.commit_summary_node(node, id_generator=id_generator)
+
+    async def commit_summary_node(
+        self,
+        node: SummaryNode,
+        *,
+        id_generator: Callable[[], str],
+        remove_item_ids: list[str] | None = None,
+        supersede_node_ids: list[str] | None = None,
+    ) -> SummaryNode:
+        """
+        Persist a summary node and, optionally, swap it into the context, atomically.
+
+        Everything happens in one locked transaction: the summary message, its
+        two parts, the ``summary_nodes`` row, the replacement of
+        *remove_item_ids* in ``context_items`` by the node (see
+        :meth:`ImmutableStore.swap_context_items`) and the ``superseded`` flag on
+        *supersede_node_ids*. A cancellation or failure at any point rolls the
+        whole commit back, so a node can never be left half-committed (e.g.
+        parents still active but already out of the context).
+
+        Args:
+            node: The SummaryNode to persist (``node.id`` is a message ID).
+            id_generator: Callable that returns new unique part IDs.
+            remove_item_ids: Context items the node replaces (none: not swapped in).
+            supersede_node_ids: Summary nodes the node supersedes (condensation).
+
+        Returns:
+            The persisted node (unmodified).
+        """
         summary_message = Message(
             id=node.id,
             session_id=node.session_id,
@@ -216,9 +243,6 @@ class SummaryDAGStore:
             provider_id=node.provider_id,
             mode="compaction",
         )
-        await self._store.append_message(summary_message)
-
-        # Text part with summary content
         text_raw = RawMessagePart(
             id=id_generator(),
             message_id=node.id,
@@ -227,9 +251,6 @@ class SummaryDAGStore:
             content=json.dumps({"type": "text", "text": node.content}),
             token_estimate=node.token_count,
         )
-        await self._store.append_part(text_raw)
-
-        # Compaction marker part
         marker_raw = RawMessagePart(
             id=id_generator(),
             message_id=node.id,
@@ -245,10 +266,25 @@ class SummaryDAGStore:
                 }
             ),
         )
-        await self._store.append_part(marker_raw)
-
-        # Persist DAG metadata to summary_nodes table
-        await self._upsert_summary_node_row(node)
+        store = self._store
+        try:
+            async with store._transaction() as conn:
+                await store._append_message_on(conn, summary_message)
+                await store._append_part_on(conn, text_raw)
+                await store._append_part_on(conn, marker_raw)
+                await self._upsert_row_on(conn, node)
+                if remove_item_ids:
+                    await store._swap_context_items_on(
+                        conn, node.session_id, remove_item_ids, node.id
+                    )
+                for superseded_id in supersede_node_ids or ():
+                    await conn.execute(
+                        "UPDATE summary_nodes SET superseded=1 WHERE id=?", (superseded_id,)
+                    )
+        except aiosqlite.IntegrityError as exc:
+            raise store._map_message_integrity_error(exc, summary_message) from exc
+        # In-memory mirror, updated only once the transaction has committed.
+        self._superseded_ids.update(supersede_node_ids or ())
 
         self._logger.info(
             "summary_node_inserted",
@@ -292,35 +328,34 @@ class SummaryDAGStore:
 
     # ── Private Helpers ────────────────────────────────────────────────────────
 
-    async def _upsert_summary_node_row(self, node: SummaryNode) -> None:
-        """Insert or replace a row in ``summary_nodes`` for DAG persistence."""
-        async with self._store._transaction() as conn:
-            await conn.execute(
-                """
-                INSERT OR REPLACE INTO summary_nodes (
-                    id, session_id, level, span_start_message_id, span_end_message_id,
-                    content, token_count, created_at,
-                    parent_node_id, model_id, provider_id, compaction_level, is_active,
-                    kind, parent_node_ids, superseded
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0)
-                """,
-                (
-                    node.id,
-                    node.session_id,
-                    node.level,
-                    node.span_start_message_id,
-                    node.span_end_message_id,
-                    node.content,
-                    node.token_count,
-                    node.created_at,
-                    node.parent_node_id,
-                    node.model_id,
-                    node.provider_id,
-                    node.compaction_level,
-                    node.kind,
-                    json.dumps(node.parent_node_ids),
-                ),
-            )
+    async def _upsert_row_on(self, conn: aiosqlite.Connection, node: SummaryNode) -> None:
+        """Insert or replace a ``summary_nodes`` row on *conn* (caller owns the transaction)."""
+        await conn.execute(
+            """
+            INSERT OR REPLACE INTO summary_nodes (
+                id, session_id, level, span_start_message_id, span_end_message_id,
+                content, token_count, created_at,
+                parent_node_id, model_id, provider_id, compaction_level, is_active,
+                kind, parent_node_ids, superseded
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0)
+            """,
+            (
+                node.id,
+                node.session_id,
+                node.level,
+                node.span_start_message_id,
+                node.span_end_message_id,
+                node.content,
+                node.token_count,
+                node.created_at,
+                node.parent_node_id,
+                node.model_id,
+                node.provider_id,
+                node.compaction_level,
+                node.kind,
+                json.dumps(node.parent_node_ids),
+            ),
+        )
 
     async def _query_summary_nodes(
         self, session_id: str, *, superseded: bool

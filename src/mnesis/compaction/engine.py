@@ -838,14 +838,13 @@ class CompactionEngine:
                 model_id=compaction_model,
                 compaction_level=candidate.compaction_level,
             )
-            _ = await self._dag_store.insert_node(
-                leaf_node, id_generator=lambda: self._id_gen("part")
-            )
-
-            # Atomic context swap: remove compacted messages, insert summary item.
-            # The span is exactly what the summary covers (see ``SummaryCandidate``).
+            # One transaction: the summary node and the swap of the compacted
+            # messages for it in the context. The span is exactly what the summary
+            # covers (see ``SummaryCandidate``).
             pass_ids = remaining_ids[span_start_idx : span_end_idx + 1]
-            await self._store.swap_context_items(session_id, pass_ids, leaf_msg_id)
+            _ = await self._dag_store.commit_summary_node(
+                leaf_node, id_generator=lambda: self._id_gen("part"), remove_item_ids=pass_ids
+            )
 
             compacted_ids.extend(pass_ids)
             last_summary_msg_id = leaf_msg_id
@@ -959,18 +958,15 @@ class CompactionEngine:
                     compaction_level=cond.compaction_level,
                     parent_node_ids=cond.parent_node_ids,
                 )
-                await self._dag_store.insert_node(
-                    condensed_node, id_generator=lambda: self._id_gen("part")
+                # One transaction: the condensed node, the swap of its parents'
+                # context items for it, and the supersession of the parents (so a
+                # cancel can never leave parents active but out of the context).
+                _ = await self._dag_store.commit_summary_node(
+                    condensed_node,
+                    id_generator=lambda: self._id_gen("part"),
+                    remove_item_ids=cond.parent_node_ids,
+                    supersede_node_ids=cond.parent_node_ids,
                 )
-                # Atomically swap the superseded summary context_items for the
-                # new condensed node.  parent_node_ids are the summary message
-                # IDs that are being replaced.
-                await self._store.swap_context_items(
-                    session_id, cond.parent_node_ids, condensed_msg_id
-                )
-                # Mark consumed nodes as superseded so get_active_nodes()
-                # excludes them in subsequent rounds.
-                await self._dag_store.mark_superseded(cond.parent_node_ids)
 
                 last_summary_msg_id = condensed_msg_id
                 last_summary_level = cond.compaction_level
