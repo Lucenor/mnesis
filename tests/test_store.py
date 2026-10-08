@@ -1189,6 +1189,44 @@ class TestImmutableStoreCoverageGaps:
         assert content["error_message"] == "something failed"
         assert content["status"]["state"] == "running"
 
+    async def test_update_part_status_lone_surrogate_is_escaped(self, session_id, store):
+        """Lone surrogates in output/error_message are stored escaped, not rejected."""
+        from tests.conftest import make_message, make_raw_part
+
+        msg = make_message(session_id, role="assistant", msg_id="msg_sur_001")
+        await store.append_message(msg)
+        await store.append_part(
+            make_raw_part("msg_sur_001", session_id, part_type="tool", part_id="part_sur_001")
+        )
+
+        await store.update_part_status(
+            "part_sur_001", output="a\ud800b", error_message='q"\né\udc00'
+        )
+        content = json.loads((await store.get_parts("msg_sur_001"))[0].content)
+        assert content["output"] == "a\ud800b"
+        assert content["error_message"] == 'q"\né\udc00'
+
+    @pytest.mark.parametrize("raw", ["[1, 2]", '"text"', "null", "42"])
+    async def test_update_part_status_non_object_content_raises(self, session_id, store, raw):
+        """Merging into non-object content raises (as before) and changes nothing."""
+        from tests.conftest import make_message, make_raw_part
+
+        msg = make_message(session_id, role="assistant", msg_id="msg_nonobj_001")
+        await store.append_message(msg)
+        part = make_raw_part("msg_nonobj_001", session_id, part_id="part_nonobj_001")
+        part.content = raw
+        await store.append_part(part)
+
+        with pytest.raises(TypeError):
+            await store.update_part_status("part_nonobj_001", output="x", tool_state="done")
+        stored = (await store.get_parts("msg_nonobj_001"))[0]
+        assert stored.content == raw
+        assert stored.tool_state != "done"
+
+    async def test_update_part_status_missing_part_with_output_raises_not_found(self, store):
+        with pytest.raises(PartNotFoundError):
+            await store.update_part_status("part_missing", output="x")
+
     async def test_update_part_status_no_fields_is_noop(self, session_id, store):
         """update_part_status() with no kwargs is a no-op (line 646: early return)."""
         from tests.conftest import make_message, make_raw_part
@@ -1444,3 +1482,73 @@ class TestImmutableStoreCoverageGaps:
         results = await store.get_messages_with_parts_by_ids(["msg_noparts_001"])
         assert len(results) == 1
         assert results[0].parts == []
+
+
+class TestStoreRaceAndBoundary:
+    async def test_concurrent_part_updates_to_different_fields_both_survive(
+        self, session_id, store
+    ):
+        """output and error_message updated concurrently must not overwrite each other."""
+        msg = make_message(session_id, role="assistant", msg_id="msg_race_001")
+        await store.append_message(msg)
+        part = make_raw_part("msg_race_001", session_id, part_type="tool", part_id="part_race_001")
+        await store.append_part(part)
+
+        for _ in range(20):
+            _ = await asyncio.gather(
+                store.update_part_status("part_race_001", output="the output"),
+                store.update_part_status("part_race_001", error_message="the error"),
+            )
+
+        parts = await store.get_parts("msg_race_001")
+        content = json.loads(parts[0].content)
+        assert content["output"] == "the output"
+        assert content["error_message"] == "the error"
+        assert content["tool_name"] == "test_tool"  # untouched fields preserved
+
+    async def test_update_part_output_and_error_in_one_call(self, session_id, store):
+        msg = make_message(session_id, role="assistant", msg_id="msg_both_001")
+        await store.append_message(msg)
+        await store.append_part(
+            make_raw_part("msg_both_001", session_id, part_type="tool", part_id="part_both_001")
+        )
+        await store.update_part_status(
+            "part_both_001", tool_state="error", output='{"a": 1}', error_message="boom"
+        )
+        parts = await store.get_parts("msg_both_001")
+        content = json.loads(parts[0].content)
+        assert content["output"] == '{"a": 1}'  # stored as a string, not parsed JSON
+        assert content["error_message"] == "boom"
+        assert parts[0].tool_state == "error"
+
+    async def test_update_part_content_not_found_raises(self, store):
+        with pytest.raises(PartNotFoundError):
+            await store.update_part_status("part_missing", output="x")
+
+    async def test_since_message_id_from_other_session_rejected(self, session_id, store):
+        from mnesis.store.immutable import MessageNotFoundError
+
+        await store.create_session("sess_OTHER", model_id="m", agent="test")
+        other = make_message("sess_OTHER", msg_id="msg_other_001")
+        await store.append_message(other)
+        await store.append_message(make_message(session_id, msg_id="msg_mine_001"))
+
+        with pytest.raises(MessageNotFoundError):
+            await store.get_messages(session_id, since_message_id=other.id)
+        with pytest.raises(MessageNotFoundError):
+            await store.get_messages(session_id, since_message_id="msg_nonexistent")
+
+    async def test_since_message_id_includes_same_millisecond_messages(self, session_id, store):
+        """Messages sharing the boundary's created_at but inserted later are returned."""
+        ids = [f"msg_same_ms_{i}" for i in range(4)]
+        for mid in ids:
+            msg = make_message(session_id, msg_id=mid).model_copy(update={"created_at": 5_000})
+            await store.append_message(msg)
+
+        result = await store.get_messages(session_id, since_message_id=ids[1])
+        assert [m.id for m in result] == ids[2:]
+        assert [m.id for m in await store.get_messages(session_id)] == ids
+
+    async def test_since_message_id_last_message_returns_empty(self, session_id, store):
+        await store.append_message(make_message(session_id, msg_id="msg_last_001"))
+        assert await store.get_messages(session_id, since_message_id="msg_last_001") == []

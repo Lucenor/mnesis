@@ -462,6 +462,41 @@ stub `CompactionResult` (no summary committed) is returned. Level 3 is not
 forced by this handler — Level 3 is only the final fallback inside
 `_run_summarisation()` when Level 1/2 return `None`.
 
+Cancellation contract: the `abort` event is an engine-level parameter for
+callers that drive `run_compaction()` / `check_and_trigger()` directly; a
+`MnesisSession` does not set it, and `session.close()` waits for an in-flight
+compaction, including its retry backoffs. Setting `abort` ends
+the run with the same stub result and a `COMPACTION_FAILED` event carrying
+`aborted=True`; it is logged at info as `compaction_aborted`, not as an error.
+External task cancellation (`Task.cancel()`, `TaskGroup`, shutdown) is not
+swallowed: `asyncio.CancelledError` propagates to the caller. Abort also
+interrupts a retry backoff wait immediately. To bound how long `close()` or a
+hard-limit `send()` can wait on compaction retries, keep `max_retries` and
+`max_delay` small, or cancel the task.
+
+LLM retries: every compaction LLM call (Level 1/2 summarisation and
+condensation) goes through the same retry policy as `send()`, driven by
+`SessionConfig.retry` (`RetryConfig`: attempts, backoff, transient-error
+classification). `RetryConfig.max_retries > 0`: Mnesis retries compaction
+calls and disables LiteLLM retries (`num_retries=0`) so calls are never retried
+twice. `max_retries == 0` (default): compaction uses LiteLLM/provider default
+retries. Outage handling: when a call outlasts its retries on a retryable
+error, the rest of that run skips its remaining LLM levels (summarisation goes
+straight to Level 3; condensation is skipped to its deterministic level), so a
+run spends at most `max_retries` backoffs (each up to `max_delay`) on an
+outage. Non-retryable errors, and retryable ones once attempts
+are exhausted, escalate to the next level as before.
+
+Unusable completions: an empty or whitespace-only completion, or one that
+stopped at the output limit (`finish_reason == "length"`), fails that level and
+the run escalates (L1 → L2 → L3, for summarisation and condensation alike), so
+an empty or cut-off summary never replaces history. Neither case is retried
+under `RetryConfig`: they are not transient transport errors, and re-asking
+with the same limits is expected to give the same result, whereas the next
+level asks for a shorter summary. Truncation is surfaced by the real LLM call
+as `CompactionTruncatedError`; injected `llm_call` callables keep returning a
+plain string.
+
 The inner sequence for each round:
 
 1. **Tool output pruning** — `ToolOutputPrunerAsync.prune()` tombstones stale

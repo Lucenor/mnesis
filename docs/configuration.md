@@ -174,7 +174,9 @@ All other exceptions (including `AuthenticationError`, `ContextWindowExceededErr
 
 ### litellm num_retries interaction
 
-Mnesis explicitly passes `num_retries=0` to `litellm.acompletion()` to disable litellm's own built-in retry mechanism. All retry logic is owned by Mnesis via `RetryConfig`, so there is no double-retrying. Do not set `num_retries` in `call_kwargs` passed to litellm alongside Mnesis.
+`send()` always passes `num_retries=0` to `litellm.acompletion()`. For compaction calls: with `RetryConfig.max_retries > 0`, Mnesis retries compaction calls and disables LiteLLM retries (`num_retries=0`) to avoid double-retrying; with `max_retries == 0` (default), compaction uses LiteLLM/provider default retries. Do not set `num_retries` in `call_kwargs` passed to litellm alongside Mnesis.
+
+With `max_retries > 0`, compaction calls (summarisation and condensation, Levels 1 and 2) use the same attempts, backoff and error classification as `send()`: a transient 429/5xx is retried at the same level before escalating, instead of dropping straight to a lossier level. If a call outlasts its retries on a retryable error (an outage), the rest of that compaction run skips its remaining LLM levels and falls to the deterministic level (or skips condensation), so a run sleeps through at most `max_retries` backoffs of up to `max_delay` each, not one sequence per level. Non-retryable failures (auth errors, empty or truncated completions) still escalate level by level. Because a hard-limit `send()` waits for compaction, it can wait through that time, and so can `session.close()`, which waits for an in-flight compaction including its retry backoffs. To bound the wait, keep `max_retries` and `max_delay` small, or cancel the awaiting task (external cancellation propagates). The `abort` event is an engine-level parameter for callers driving `run_compaction()` or `check_and_trigger()` directly; a session does not set it.
 
 ### Difference from OperatorConfig.max_retries
 

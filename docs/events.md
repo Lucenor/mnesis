@@ -9,7 +9,8 @@ Each `MnesisSession` owns its own `EventBus` instance. Operators (`LLMMap`, `Age
 **Key properties of the bus:**
 
 - Sync handlers are called inline within `publish()`. For a given event, handlers registered with `subscribe()` run first (in their registration order), followed by handlers registered with `subscribe_all()` (also in their registration order).
-- Async handlers are scheduled as background tasks (`asyncio.create_task`), non-blocking; they follow the same per-event-then-global ordering as sync handlers.
+- Async handlers are scheduled as background tasks (`asyncio.create_task`), non-blocking. A handler may return any awaitable (a coroutine, an `asyncio.Future`, or an object implementing `__await__`); non-coroutine awaitables are wrapped and awaited. With no running event loop, async handlers are skipped.
+- Async handlers follow the same per-event-then-global ordering as sync handlers.
 - Handler exceptions are logged (`event_handler_error`) and swallowed — they never propagate to the publisher. For async handlers the error is logged when the handler task finishes; the bus keeps a strong reference to each in-flight handler task so it cannot be garbage-collected mid-flight.
 - `unsubscribe()` is a silent no-op if the handler is not registered.
 
@@ -70,7 +71,7 @@ session.event_bus.subscribe_all(log_all)
 | `MESSAGE_CREATED` | `message.created` | A user or assistant message is persisted | `MessageCreatedPayload` |
 | `COMPACTION_TRIGGERED` | `compaction.triggered` | Token usage crosses the soft or hard threshold | `CompactionTriggeredPayload` |
 | `COMPACTION_COMPLETED` | `compaction.completed` | A compaction pass finishes (success or partial) | `CompactionCompletedPayload` |
-| `COMPACTION_FAILED` | `compaction.failed` | Compaction raises an unhandled exception | `CompactionFailedPayload` |
+| `COMPACTION_FAILED` | `compaction.failed` | Compaction raises an unhandled exception, or is aborted (`aborted=True`) | `CompactionFailedPayload` |
 | `PRUNE_COMPLETED` | `prune.completed` | A compaction run's pruning step tombstoned at least one tool output (not published when nothing was pruned) | `PruneCompletedPayload` |
 | `DOOM_LOOP_DETECTED` | `doom_loop.detected` | The same tool call repeats past the threshold | `DoomLoopDetectedPayload` |
 | `LLM_RETRY` | `llm.retry` | `send()` is about to retry after a transient LLM error | `LlmRetryPayload` |
@@ -154,6 +155,7 @@ Fired by: `MnesisEvent.COMPACTION_FAILED`
 |---|---|---|
 | `session_id` | `str` | The session whose compaction failed |
 | `error` | `str` | Human-readable error description |
+| `aborted` | `bool` | `True` only for an engine-level abort (the `abort` event passed to `run_compaction()` / `check_and_trigger()`); a session never sets it, so `session.close()` does not produce it |
 
 ### `PruneCompletedPayload`
 

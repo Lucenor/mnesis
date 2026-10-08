@@ -999,8 +999,10 @@ class TestEscalationEdges:
             return result
 
         monkeypatch.setattr(store, "get_context_items", fetch_then_abort)
-        with pytest.raises(asyncio.CancelledError):
-            _ = await engine.run_compaction(sid, abort=abort)
+        # An abort event is reported as a failed run, not raised.
+        result = await engine.run_compaction(sid, abort=abort)
+        assert result.level_used == 0
+        assert result.summary_message_id == ""
 
     async def test_condensation_falls_through_to_level3(
         self, store, dag_store, event_bus, estimator, monkeypatch

@@ -14,6 +14,7 @@ from mnesis.compaction.levels import (
     level2_summarise,
     level3_deterministic,
 )
+from mnesis.events.bus import MnesisEvent
 from mnesis.models.config import ModelInfo
 from mnesis.models.message import ContextBudget, MessageWithParts, TextPart, TokenUsage, ToolPart
 from tests.conftest import make_message, make_raw_part
@@ -719,6 +720,97 @@ class TestCompactionEngine:
             await engine._run_compaction_inner(
                 session_id, abort=abort, model_override="anthropic/claude-haiku-4-5"
             )
+
+    async def test_run_compaction_abort_returns_failure_result(
+        self, session_id, store, dag_store, estimator, event_bus, config
+    ):
+        """An abort event yields the documented stub result and COMPACTION_FAILED."""
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
+            session_model="anthropic/claude-haiku-4-5",
+        )
+        for i in range(4):
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_rabort_{i}"
+            )
+            await store.append_message(msg)
+            await store.append_part(make_raw_part(msg.id, session_id, part_id=f"part_rabort_{i}"))
+        failed: list[dict] = []
+        event_bus.subscribe(MnesisEvent.COMPACTION_FAILED, lambda e, p: failed.append(p))
+        engine._more_to_compact = True
+
+        abort = asyncio.Event()
+        abort.set()
+        result = await engine.run_compaction(session_id, abort=abort)
+
+        assert result.level_used == 0
+        assert result.summary_message_id == ""
+        assert len(failed) == 1
+        assert engine._more_to_compact is False
+
+    async def test_run_compaction_task_cancel_propagates(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        """External Task.cancel() is not swallowed; state is left consistent."""
+        engine = CompactionEngine(
+            store,
+            dag_store,
+            estimator,
+            event_bus,
+            config,
+            session_model="anthropic/claude-haiku-4-5",
+        )
+        started = asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            started.set()
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(engine, "_run_compaction_inner", blocked)
+        failed: list[dict] = []
+        event_bus.subscribe(MnesisEvent.COMPACTION_FAILED, lambda e, p: failed.append(p))
+        engine._more_to_compact = True
+
+        task = asyncio.create_task(engine.run_compaction(session_id))
+        await started.wait()
+        _ = task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            _ = await task
+        assert task.cancelled()
+        assert failed == []
+        assert engine._more_to_compact is False
+
+    @pytest.mark.parametrize("disable", [True, False])
+    async def test_make_llm_call_num_retries(self, monkeypatch, disable):
+        """num_retries=0 only when Mnesis owns retries; otherwise LiteLLM defaults apply."""
+        import sys
+        import types
+
+        from mnesis.compaction.engine import _make_llm_call
+
+        monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
+        captured: dict = {}
+
+        async def fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            msg = types.SimpleNamespace(content="summary")
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+        fake = types.ModuleType("litellm")
+        fake.acompletion = fake_acompletion  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "litellm", fake)
+
+        call = _make_llm_call("m", disable_litellm_retries=disable)
+        out = await call(messages=[{"role": "user", "content": "x"}], max_tokens=10)
+        assert out == "summary"
+        if disable:
+            assert captured["num_retries"] == 0
+        else:
+            assert "num_retries" not in captured
 
     async def test_run_compaction_inner_aborts_before_level1(
         self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch

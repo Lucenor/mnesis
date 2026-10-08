@@ -35,6 +35,7 @@ from mnesis.compaction.file_ids import (
 )
 from mnesis.models.message import ContextBudget, MessageWithParts, TextPart, ToolPart
 from mnesis.models.summary import SummaryNode
+from mnesis.retry import RetriesExhaustedError
 from mnesis.tokens.estimator import TokenEstimator
 
 logger = structlog.get_logger("mnesis.compaction.levels")
@@ -379,8 +380,15 @@ async def level1_summarise(
             messages=prompt_messages,
             max_tokens=max_tokens,
         )
+    except RetriesExhaustedError:
+        raise  # outage: the engine skips the remaining LLM levels
     except Exception as exc:
         logger.warning("level1_llm_failed", error=str(exc))
+        return None
+
+    if not (summary_text or "").strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("level1_empty_completion")
         return None
 
     # Propagate file IDs into the summary.
@@ -491,8 +499,15 @@ async def level2_summarise(
             messages=prompt_messages,
             max_tokens=max_tokens,
         )
+    except RetriesExhaustedError:
+        raise  # outage: the engine skips the remaining LLM levels
     except Exception as exc:
         logger.warning("level2_llm_failed", error=str(exc))
+        return None
+
+    if not (summary_text or "").strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("level2_empty_completion")
         return None
 
     # Propagate file IDs.
@@ -815,8 +830,15 @@ async def condense_level1(
             messages=prompt_messages,
             max_tokens=_level1_max_tokens(budget, model_max_output_tokens),
         )
+    except RetriesExhaustedError:
+        raise  # outage: the engine skips the remaining LLM levels
     except Exception as exc:
         logger.warning("condense_level1_llm_failed", error=str(exc))
+        return None
+
+    if not (condensed_text or "").strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("condense_level1_empty_completion")
         return None
 
     condensed_text = _append_bounded_footer(
@@ -885,8 +907,15 @@ async def condense_level2(
             messages=prompt_messages,
             max_tokens=_level2_max_tokens(budget, model_max_output_tokens),
         )
+    except RetriesExhaustedError:
+        raise  # outage: the engine skips the remaining LLM levels
     except Exception as exc:
         logger.warning("condense_level2_llm_failed", error=str(exc))
+        return None
+
+    if not (condensed_text or "").strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("condense_level2_empty_completion")
         return None
 
     condensed_text = _append_bounded_footer(

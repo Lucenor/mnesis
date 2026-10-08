@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import random
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,6 +30,7 @@ from mnesis.models.message import (
     TurnResult,
 )
 from mnesis.models.snapshot import ContextBreakdown, TurnSnapshot
+from mnesis.retry import backoff_delay, is_retryable
 from mnesis.store.immutable import ImmutableStore, RawMessagePart
 from mnesis.store.pool import StorePool
 from mnesis.store.summary_dag import SummaryDAGStore
@@ -589,11 +589,7 @@ class MnesisSession:
                     text_accumulator = f"[Error: {exc}]"
                     break
                 # Compute backoff with optional jitter
-                delay = min(
-                    retry_cfg.base_delay * (2**_attempt)
-                    + (random.uniform(0, retry_cfg.base_delay) if retry_cfg.jitter else 0.0),
-                    retry_cfg.max_delay,
-                )
+                delay = backoff_delay(retry_cfg, _attempt)
                 self._logger.warning(
                     "llm_call_retrying",
                     attempt=_attempt + 1,
@@ -686,25 +682,7 @@ class MnesisSession:
         Returns:
             ``True`` if the call should be retried; ``False`` otherwise.
         """
-        try:
-            from litellm.exceptions import (
-                APIConnectionError,
-                InternalServerError,
-                RateLimitError,
-                ServiceUnavailableError,
-                Timeout,
-            )
-        except ImportError:
-            return False
-
-        _retryable = (
-            RateLimitError,
-            InternalServerError,
-            ServiceUnavailableError,
-            Timeout,
-            APIConnectionError,
-        )
-        return isinstance(exc, _retryable)
+        return is_retryable(exc)
 
     async def stream(
         self,
