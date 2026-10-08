@@ -2012,7 +2012,7 @@ class TestRetrySleepSemantics:
                 sleeper = await asyncio.wait_for(self._sleep_task(session), timeout=5)
                 _ = task.cancel()
                 with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(task, timeout=5)
+                    _ = await asyncio.wait_for(task, timeout=5)
             # Cancelling send() propagates (it is not swallowed into an error turn)
             # and stops the sleep too.
             assert task.cancelled()
@@ -2071,7 +2071,7 @@ class TestCancelledSendLeavesNoEmptyAssistantTurn:
                 await asyncio.sleep(0.2)
                 _ = task.cancel()
                 with pytest.raises(asyncio.CancelledError):
-                    await task
+                    _ = await task
             assert await self._context_roles(session) == [("user", True)]
         finally:
             await session.close()
