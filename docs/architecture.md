@@ -472,8 +472,10 @@ interrupts a retry backoff wait immediately.
 LLM retries: every compaction LLM call (Level 1/2 summarisation and
 condensation) goes through the same retry policy as `send()`, driven by
 `SessionConfig.retry` (`RetryConfig`: attempts, backoff, transient-error
-classification). LiteLLM's own retries are disabled (`num_retries=0`) so calls
-are never retried twice. Non-retryable errors, and retryable ones once attempts
+classification). `RetryConfig.max_retries > 0`: Mnesis retries compaction
+calls and disables LiteLLM retries (`num_retries=0`) so calls are never retried
+twice. `max_retries == 0` (default): compaction uses LiteLLM/provider default
+retries. Non-retryable errors, and retryable ones once attempts
 are exhausted, escalate to the next level as before.
 
 Unusable completions: an empty or whitespace-only completion, or one that

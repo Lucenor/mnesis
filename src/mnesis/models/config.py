@@ -212,12 +212,18 @@ class RetryConfig(BaseModel):
 
     **litellm num_retries interaction**
 
-    Mnesis explicitly passes ``num_retries=0`` to ``litellm.acompletion()`` to
-    disable litellm's built-in retry mechanism and prevent double-retrying;
-    ``RetryConfig`` governs both ``send()`` and compaction calls. A hard-limit
-    ``send()`` waits for compaction, so it can wait through compaction retries.
-    If you set ``max_retries > 0`` here, all retry logic is owned by Mnesis:
-    backoff, jitter, event publication, and cancellation via ``close()``.
+    ``send()`` always passes ``num_retries=0`` to ``litellm.acompletion()``.
+    For compaction calls:
+
+    - ``max_retries > 0``: Mnesis retries compaction calls and disables
+      LiteLLM retries (``num_retries=0``) to avoid double-retrying. All retry
+      logic is owned by Mnesis: backoff, jitter, and cancellation via
+      ``close()`` (``send()`` also publishes ``LLM_RETRY`` events).
+    - ``max_retries == 0`` (default): compaction uses LiteLLM/provider default
+      retries.
+
+    A hard-limit ``send()`` waits for compaction, so with retries enabled it can
+    wait through compaction retries.
     """
 
     max_retries: int = Field(

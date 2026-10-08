@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import types
 
 import pytest
 from litellm.exceptions import AuthenticationError, RateLimitError
@@ -61,7 +62,7 @@ class TestCompactionRetry:
                 raise _rate_limit()
             return _SUMMARY
 
-        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model: flaky)
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: flaky)
         engine = await _engine(session_id, store, dag_store, estimator, event_bus, retry_config)
         result = await engine.run_compaction(session_id)
 
@@ -78,7 +79,7 @@ class TestCompactionRetry:
             calls.append(1)
             raise AuthenticationError("nope", llm_provider="test", model="m")
 
-        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model: bad_auth)
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: bad_auth)
         engine = await _engine(session_id, store, dag_store, estimator, event_bus, retry_config)
         result = await engine.run_compaction(session_id)
 
@@ -95,29 +96,54 @@ class TestCompactionRetry:
             calls.append(1)
             raise _rate_limit()
 
-        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model: always_429)
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: always_429)
         engine = await _engine(session_id, store, dag_store, estimator, event_bus, retry_config)
         result = await engine.run_compaction(session_id)
 
         assert result.level_used == 3
         assert len(calls) == 6  # (1 + max_retries) attempts for each of L1 and L2
 
-    async def test_default_config_does_not_retry(
+    @staticmethod
+    def _patch_litellm(monkeypatch) -> list[dict]:
+        """Fail the first litellm call with a 429, then return a valid summary."""
+        import litellm
+
+        seen: list[dict] = []
+
+        async def fake_acompletion(**kwargs):
+            seen.append(kwargs)
+            if len(seen) == 1:
+                raise _rate_limit()
+            msg = types.SimpleNamespace(content=_SUMMARY)
+            choice = types.SimpleNamespace(message=msg, finish_reason="stop")
+            return types.SimpleNamespace(choices=[choice])
+
+        monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
+        monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+        return seen
+
+    async def test_default_config_leaves_litellm_retries_enabled(
         self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
     ):
-        """RetryConfig defaults (max_retries=0) keep the pre-existing behavior."""
-        calls: list[int] = []
-
-        async def always_429(**kwargs: object) -> str:
-            calls.append(1)
-            raise _rate_limit()
-
-        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model: always_429)
+        """max_retries == 0: Mnesis adds no retry and does not pass num_retries=0."""
+        seen = self._patch_litellm(monkeypatch)
         engine = await _engine(session_id, store, dag_store, estimator, event_bus, config)
         result = await engine.run_compaction(session_id)
 
-        assert result.level_used == 3
-        assert len(calls) == 2
+        assert result.level_used == 2  # no Mnesis retry: L1's 429 escalated
+        assert all("num_retries" not in kw for kw in seen)
+
+    async def test_retries_enabled_disables_litellm_retries(
+        self, session_id, store, dag_store, estimator, event_bus, retry_config, monkeypatch
+    ):
+        """max_retries > 0: Mnesis retries and passes num_retries=0 (no double retry)."""
+        seen = self._patch_litellm(monkeypatch)
+        engine = await _engine(session_id, store, dag_store, estimator, event_bus, retry_config)
+        result = await engine.run_compaction(session_id)
+
+        assert result.level_used == 1
+        assert len(seen) == 2
+        assert all(kw["num_retries"] == 0 for kw in seen)
 
     async def test_abort_during_backoff_returns_stub(
         self, session_id, store, dag_store, estimator, event_bus, tmp_path, monkeypatch
@@ -133,7 +159,7 @@ class TestCompactionRetry:
             first_call.set()
             raise _rate_limit()
 
-        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model: always_429)
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: always_429)
         failed: list[dict] = []
         event_bus.subscribe(MnesisEvent.COMPACTION_FAILED, lambda e, p: failed.append(p))
         engine = await _engine(session_id, store, dag_store, estimator, event_bus, cfg)

@@ -784,9 +784,9 @@ class TestCompactionEngine:
         assert failed == []
         assert engine._more_to_compact is False
 
-    async def test_make_llm_call_disables_litellm_retries(self, monkeypatch):
-        """Compaction calls pass num_retries=0: RetryConfig (see test_compaction_retry.py)
-        owns retries, so LiteLLM must not retry as well."""
+    @pytest.mark.parametrize("disable", [True, False])
+    async def test_make_llm_call_num_retries(self, monkeypatch, disable):
+        """num_retries=0 only when Mnesis owns retries; otherwise LiteLLM defaults apply."""
         import sys
         import types
 
@@ -804,9 +804,13 @@ class TestCompactionEngine:
         fake.acompletion = fake_acompletion  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "litellm", fake)
 
-        out = await _make_llm_call("m")(messages=[{"role": "user", "content": "x"}], max_tokens=10)
+        call = _make_llm_call("m", disable_litellm_retries=disable)
+        out = await call(messages=[{"role": "user", "content": "x"}], max_tokens=10)
         assert out == "summary"
-        assert captured["num_retries"] == 0
+        if disable:
+            assert captured["num_retries"] == 0
+        else:
+            assert "num_retries" not in captured
 
     async def test_run_compaction_inner_aborts_before_level1(
         self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch

@@ -68,8 +68,13 @@ class CompactionTruncatedError(Exception):
     """The compaction model stopped at its output limit (``finish_reason="length"``)."""
 
 
-def _make_llm_call(model: str) -> Any:
-    """Return an async function that calls an LLM for compaction."""
+def _make_llm_call(model: str, *, disable_litellm_retries: bool = False) -> Any:
+    """Return an async function that calls an LLM for compaction.
+
+    ``disable_litellm_retries`` passes ``num_retries=0`` to LiteLLM. It is set
+    only when Mnesis retries the call itself (``RetryConfig.max_retries > 0``);
+    otherwise LiteLLM/provider default retries apply.
+    """
 
     async def _call(*, model: str = model, messages: list[dict[str, str]], max_tokens: int) -> str:
         import os
@@ -92,15 +97,13 @@ def _make_llm_call(model: str) -> Any:
 
         import litellm
 
+        extra: dict[str, Any] = {"num_retries": 0} if disable_litellm_retries else {}
         response = await litellm.acompletion(
             model=model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=0.2,
-            # RetryConfig governs both send() and compaction calls (see
-            # ``call_with_retry``); litellm's own retries are disabled to avoid
-            # double-retrying.
-            num_retries=0,
+            **extra,
         )
         choice = response.choices[0]
         if getattr(choice, "finish_reason", None) == "length":
@@ -656,11 +659,15 @@ class CompactionEngine:
         # falls back to a generic 200K window.
         budget = self._summary_budget()
 
-        # Mnesis owns retries (litellm's are disabled): RetryConfig governs
-        # compaction calls exactly as it does ``send()``, with backoff that
-        # ``abort`` can interrupt.
-        raw_llm_call = _make_llm_call(compaction_model)
+        # RetryConfig.max_retries > 0: Mnesis retries compaction calls (backoff
+        # that ``abort`` can interrupt) and disables LiteLLM retries to avoid
+        # double-retrying. max_retries == 0 (default): Mnesis does not retry and
+        # LiteLLM/provider default retries apply, as before.
         retry_cfg = self._config.session.retry
+        if retry_cfg.max_retries > 0:
+            raw_llm_call = _make_llm_call(compaction_model, disable_litellm_retries=True)
+        else:
+            raw_llm_call = _make_llm_call(compaction_model)
 
         async def llm_call(**kwargs: Any) -> str:
             return await call_with_retry(
