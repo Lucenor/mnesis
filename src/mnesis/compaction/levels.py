@@ -88,9 +88,9 @@ Preserve all goals, instructions, constraints, file context, and tool results.
 Be thorough — this summary will replace the original messages.
 
 Rules:
-- Faithfulness: record in-progress work, remaining work and next steps only if the
-  conversation explicitly states them. Never invent or infer them; if none are
-  stated, write "None stated".
+- Faithfulness: under In Progress, Remaining Work and next steps, list only items
+  the user or assistant explicitly stated. Never invent or infer them. If none were
+  explicitly stated, write exactly "None stated".
 - Files: write every file that has an id together with it, as `path (file_<hex>)`,
   exactly as the conversation gives it. Each distinct path keeps its own entry;
   never merge two files under one id or offer guessed alternative paths.
@@ -134,7 +134,7 @@ GOAL: <one sentence>
 CONSTRAINTS: <comma-separated list>
 FILES: <key files, each as `path (file_<hex>)` when it has an id; never merge two files>
 PEOPLE: <named people and roles (owners, on-call, stakeholders), one compact line, or "none">
-NEXT: <next action ONLY if explicitly stated in the conversation, else "none stated"; never invent>
+NEXT: <next action ONLY if explicitly stated; never invent; else exactly "None stated">
 CONTEXT: <any other critical facts, max 3 sentences>
 """
 
@@ -144,9 +144,13 @@ Each summary below represents a portion of the conversation history.
 Merge them into a single coherent summary that preserves all critical information.
 
 Rules:
-- Faithfulness: record in-progress work, remaining work and next steps only if the
-  conversation explicitly states them. Never invent or infer them; if none are
-  stated, write "None stated".
+- Merge and deduplicate across the input summaries; do not copy them. State each
+  fact once, in your own condensed wording.
+- Omit any section that would be empty, except In Progress and Remaining Work,
+  which say exactly "None stated" when nothing was explicitly stated.
+- Faithfulness: under In Progress, Remaining Work and next steps, list only items
+  the user or assistant explicitly stated. Never invent or infer them. If none were
+  explicitly stated, write exactly "None stated".
 - Files: write every file that has an id together with it, as `path (file_<hex>)`,
   exactly as the conversation gives it. Each distinct path keeps its own entry;
   never merge two files under one id or offer guessed alternative paths.
@@ -189,7 +193,7 @@ GOAL: <one sentence>
 CONSTRAINTS: <comma-separated list>
 FILES: <key files, each as `path (file_<hex>)` when it has an id; never merge two files>
 PEOPLE: <named people and roles (owners, on-call, stakeholders), one compact line, or "none">
-NEXT: <next action ONLY if a summary explicitly states it, else "none stated"; never invent>
+NEXT: <only an explicitly stated next action; never invent; else exactly "None stated">
 CONTEXT: <any other critical facts, max 2 sentences>
 """
 
@@ -266,6 +270,30 @@ def _with_length_target(prompt: str, target_tokens: int, max_tokens: int) -> str
     )
 
 
+# Condensation sizing: a bullet is capped at about this many words (~35 tokens),
+# and the summary has this many sections, so the per-section bullet cap follows
+# from the token target.
+_CONDENSE_BULLET_WORDS: int = 25
+_CONDENSE_BULLET_TOKENS: int = 35
+_CONDENSE_SECTIONS: int = 8
+
+
+def _with_condense_limits(prompt: str, target_tokens: int, max_tokens: int) -> str:
+    """Append structural size limits to a condensation prompt.
+
+    Models follow "at most N bullets per section" far more reliably than a token
+    target, so the target is turned into a per-section bullet cap.
+    """
+    bullets = max(1, target_tokens // (_CONDENSE_SECTIONS * _CONDENSE_BULLET_TOKENS))
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"Limits: at most {bullets} bullets per section, each at most about "
+        f"{_CONDENSE_BULLET_WORDS} words (hard limit {max_tokens} tokens; a longer "
+        f"answer is discarded). Prefer merging bullets over dropping facts: keep "
+        f"every constraint, number, identifier and path."
+    )
+
+
 def _extract_text(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHARS) -> str:
     """Extract readable text from a message; the result is at most ``max_chars`` long."""
     parts: list[str] = []
@@ -285,15 +313,18 @@ def _extract_text(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHAR
     return "\n".join(parts)
 
 
+def _render_message(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHARS) -> str:
+    """One message as it appears in the transcript ("" when it has no text)."""
+    text = _extract_text(msg, max_chars)
+    if not text:
+        return ""
+    role_label = "USER" if msg.role == "user" else "ASSISTANT"
+    return f"[{role_label}]:\n{text}"
+
+
 def _build_messages_text(messages: list[MessageWithParts]) -> str:
     """Format a list of messages as a readable transcript."""
-    lines: list[str] = []
-    for msg in messages:
-        role_label = "USER" if msg.role == "user" else "ASSISTANT"
-        text = _extract_text(msg)
-        if text:
-            lines.append(f"[{role_label}]:\n{text}")
-    return "\n\n".join(lines)
+    return "\n\n".join(r for r in (_render_message(m) for m in messages) if r)
 
 
 def _messages_to_summarise(messages: list[MessageWithParts]) -> list[MessageWithParts]:
@@ -311,9 +342,10 @@ def _apply_input_cap(
     estimator: TokenEstimator,
     model_context_limit: int,
     reserved_tokens: int = 0,
+    max_chars: int = _MESSAGE_TEXT_MAX_CHARS,
 ) -> list[MessageWithParts]:
     """
-    Trim *messages* so their total token count stays within the summarisation
+    Trim *messages* so their rendered transcript stays within the summarisation
     input cap: ``MAX_SUMMARISATION_INPUT_FRACTION`` of *model_context_limit*,
     and never more than the window left after *reserved_tokens* (the request's
     ``max_tokens`` plus its prompt).
@@ -330,6 +362,8 @@ def _apply_input_cap(
         estimator: Token estimator.
         model_context_limit: Full context limit of the compaction model.
         reserved_tokens: Tokens of the window the input must leave free.
+        max_chars: Per-message text cap of the transcript that will be sent;
+            each message is measured as rendered (after this truncation), not whole.
 
     Returns:
         A (possibly shorter) list of messages to pass to the LLM.
@@ -345,7 +379,9 @@ def _apply_input_cap(
     result: list[MessageWithParts] = []
 
     for msg in messages:
-        msg_tokens = estimator.estimate_message(msg)
+        # Rendered text plus its "\n\n" separator; +1 covers per-message rounding so the
+        # sum never undercounts the joined transcript.
+        msg_tokens = estimator.estimate(_render_message(msg, max_chars) + "\n\n") + 1
         if (
             tokens_so_far + msg_tokens > max_input_tokens
             and len(result) >= MIN_MESSAGES_TO_SUMMARISE
@@ -545,6 +581,7 @@ async def level2_summarise(
         cap_estimator,
         model_context_limit,
         reserved_tokens=max_tokens + cap_estimator.estimate(prompt),
+        max_chars=_LEVEL2_MESSAGE_MAX_CHARS,
     )
 
     # Collect file IDs from input messages.
@@ -998,7 +1035,7 @@ async def condense_level1(
     max_tokens = _level1_max_tokens(budget, model_max_output_tokens)
     cap_estimator = compaction_estimator or estimator
     # The length-target line counts against the window too (sized for its largest form).
-    sized_prompt = _with_length_target(CONDENSE_LEVEL1_PROMPT, max_tokens, max_tokens)
+    sized_prompt = _with_condense_limits(CONDENSE_LEVEL1_PROMPT, max_tokens, max_tokens)
     nodes = _fit_condensation_nodes(
         nodes,
         [f"[Summary {i + 1}]:\n{node.content}" for i, node in enumerate(nodes)],
@@ -1018,10 +1055,10 @@ async def condense_level1(
     summaries_text = "\n\n---\n\n".join(
         f"[Summary {i + 1}]:\n{node.content}" for i, node in enumerate(nodes)
     )
-    # Condensation must shrink its input: ask for about half of it (within the
-    # output cap) so the first level can succeed instead of escalating.
+    # Condensation must shrink its input: derive per-section bullet caps from about
+    # half of it (within the output cap) so the first level can succeed.
     input_tokens = sum(n.token_count for n in nodes)
-    prompt = _with_length_target(
+    prompt = _with_condense_limits(
         CONDENSE_LEVEL1_PROMPT, _length_target(input_tokens, max_tokens), max_tokens
     )
     prompt_messages = [

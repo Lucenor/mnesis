@@ -13,6 +13,7 @@ from mnesis.compaction.levels import (
     LEVEL1_PROMPT,
     LEVEL2_PROMPT,
     _length_target,
+    _with_condense_limits,
     _with_length_target,
     condense_level1,
     condense_level2,
@@ -85,6 +86,17 @@ class TestPromptWording:
         """A4: every prompt forbids inventing next steps."""
         assert "never invent" in prompt.lower()
         assert "explicitly" in prompt
+        assert 'exactly "None stated"' in prompt
+
+    @pytest.mark.parametrize("prompt", [LEVEL1_PROMPT, CONDENSE_LEVEL1_PROMPT])
+    def test_level1_lists_only_explicit_items(self, prompt):
+        assert "list only items" in prompt
+        assert "the user or assistant explicitly stated" in prompt
+
+    def test_condense_level1_merges_and_omits_empty_sections(self):
+        assert "Merge and deduplicate" in CONDENSE_LEVEL1_PROMPT
+        assert "do not copy" in CONDENSE_LEVEL1_PROMPT
+        assert "Omit any section that would be empty" in CONDENSE_LEVEL1_PROMPT
 
     @pytest.mark.parametrize("prompt", ALL_PROMPTS)
     def test_files_written_as_path_with_id(self, prompt):
@@ -126,6 +138,14 @@ class TestLengthTarget:
         assert text.startswith("BASE")
         assert "about 500 tokens" in text and "2048" in text
 
+    def test_condense_limits_derive_bullet_cap_from_target(self):
+        text = _with_condense_limits("BASE", 1_162, 2_048)
+        assert text.startswith("BASE")
+        assert "at most 4 bullets per section" in text
+        assert "about 25 words" in text and "hard limit 2048" in text
+        assert "tokens in total" not in text  # no token target to ignore
+        assert "at most 1 bullets" in _with_condense_limits("BASE", 10, 2_048)
+
     async def test_condense_level1_asks_for_half_within_output_cap(self, estimator, budget):
         """A1: the 3 real-run leaves (1005/624/695 tokens) under a 2,048-token cap."""
         nodes = _nodes()
@@ -136,8 +156,9 @@ class TestLengthTarget:
         )
         assert cand is not None
         assert spy.max_tokens == 2048
-        # Half of 2,324 is 1,162, under 75% of the cap (1,536): the target is the former.
-        assert "about 1162 tokens" in spy.prompt
+        # Half of 2,324 is 1,162, under 75% of the cap (1,536): 1162 // (8 * 35) = 4.
+        assert "at most 4 bullets per section" in spy.prompt
+        assert "about 1162 tokens" not in spy.prompt
         assert "hard limit 2048" in spy.prompt
         assert CONDENSE_LEVEL1_PROMPT.splitlines()[0] in spy.prompt
 
@@ -145,7 +166,7 @@ class TestLengthTarget:
         nodes = _nodes(tokens_each=50_000)
         spy = Spy()
         _ = await condense_level1(nodes, "m", budget, estimator, spy, model_max_output_tokens=2048)
-        assert "about 1536 tokens" in spy.prompt
+        assert "at most 5 bullets per section" in spy.prompt  # 1536 // 280
 
     async def test_summarise_level1_default_prompt_gets_target(self, estimator, budget):
         spy = Spy()

@@ -613,7 +613,8 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
   are candidates for summarisation.
 
 - **Input cap**: `_apply_input_cap()` trims messages to at most 75% of the
-  compaction model's context window before passing them to the LLM, keeping the
+  compaction model's context window, measured on the transcript text actually
+  sent (after per-message truncation), before passing them to the LLM, keeping the
   oldest prefix. At least 3 messages are always included
   (`MIN_MESSAGES_TO_SUMMARISE = 3`). The recorded span is that prefix, never the
   uncapped input.
@@ -649,13 +650,15 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
   only looks for `file_<hex>` tokens).
 
 - **Faithfulness and people**: every default prompt forbids inventing next
-  steps (they are recorded only if the conversation states them, otherwise "None
-  stated") and keeps named people with their roles; the level 2 formats have a
+  steps (In Progress, Remaining Work and next steps list only what the user or
+  assistant explicitly stated, otherwise exactly "None stated") and keeps named people with their roles; the level 2 formats have a
   compact `PEOPLE:` line.
 
-- **Length target**: the default level 1 summarisation prompt and the condensation
-  level 1 prompt end with an explicit output target of about half the input,
-  capped at 75% of the call's `max_tokens`, plus the hard limit. A verbose model
+- **Length target**: the default level 1 summarisation prompt ends with an
+  explicit output target of about half the input, capped at 75% of the call's
+  `max_tokens`, plus the hard limit. The condensation level 1 prompt instead gets
+  structural limits (at most N bullets per section of about 25 words, N derived
+  from that same target) and is told to merge and deduplicate rather than copy. A verbose model
   therefore finishes under its output cap instead of hitting
   `finish_reason="length"` (which discards the completion and escalates). A custom
   `compaction_prompt` is sent unchanged.

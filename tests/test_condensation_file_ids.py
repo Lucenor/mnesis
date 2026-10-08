@@ -19,6 +19,7 @@ from mnesis.compaction.levels import (
     MIN_MESSAGES_TO_SUMMARISE,
     CondensationCandidate,
     _apply_input_cap,
+    _build_messages_text,
     _messages_to_summarise,
     condense_level1,
     condense_level2,
@@ -323,6 +324,27 @@ class TestSummarisationInputCap:
         result = _apply_input_cap(to_summarise, estimator, model_context_limit=10_000)
         assert len(result) < len(to_summarise)
         assert len(result) >= MIN_MESSAGES_TO_SUMMARISE
+
+    def test_apply_input_cap_measures_rendered_text_not_whole_messages(self, estimator):
+        """Messages are sized after the per-message transcript truncation, so more fit."""
+        msgs = [
+            MessageWithParts(
+                message=make_message(
+                    "sess_trunc",
+                    role="user" if i % 2 == 0 else "assistant",
+                    msg_id=f"msg_t_{i:03d}",
+                ),
+                parts=[TextPart(text="x" * 10_000)],
+            )
+            for i in range(12)
+        ]
+        limit = 10_000  # cap = 7_500 tokens
+        # Whole messages (~2_500 tokens each) would admit only 3 of the 12...
+        assert sum(estimator.estimate_message(m) for m in msgs[:4]) > 7_500
+        # ...but the transcript sends 2_000 chars of each (~500 tokens), so all fit.
+        result = _apply_input_cap(msgs, estimator, model_context_limit=limit)
+        assert result == msgs
+        assert estimator.estimate(_build_messages_text(result)) <= 7_500
 
     def test_apply_input_cap_respects_minimum(self, estimator):
         """_apply_input_cap always returns at least MIN_MESSAGES_TO_SUMMARISE."""
