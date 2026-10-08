@@ -283,6 +283,9 @@ async def run_condition(
     db_path: str,
     max_questions: int,
     metrics_only: bool,
+    auto_compact: bool = False,
+    context_limit: int | None = None,
+    max_output_tokens: int | None = None,
 ) -> dict[str, Any]:
     """
     Inject a LOCOMO conversation into a mnesis session, optionally compact,
@@ -298,20 +301,41 @@ async def run_condition(
         db_path:           SQLite path (unique per run to avoid state bleed).
         max_questions:     Cap on QA pairs evaluated.
         metrics_only:      Skip QA inference; record token and compaction stats only.
+        auto_compact:      Enable ``CompactionConfig.auto`` and let the soft/hard
+                           triggers compact during injection (and QA) instead of one
+                           manual ``compact()`` at the end. Compaction events are
+                           reported under ``auto_compaction``.
+        context_limit:     Override the session model's context window (tokens).
+        max_output_tokens: Override the session model's output limit (tokens).
 
     Returns:
         Dict with per-question results, token counts, and compaction details.
     """
     from mnesis import MnesisConfig, MnesisSession
+    from mnesis.events.bus import MnesisEvent
     from mnesis.models.config import CompactionConfig
 
+    overrides: dict[str, int] = {}
+    if context_limit is not None:
+        overrides["context_limit"] = context_limit
+    if max_output_tokens is not None:
+        overrides["max_output_tokens"] = max_output_tokens
     config = MnesisConfig(
         compaction=CompactionConfig(
-            auto=False,
+            auto=auto_compact,
             compaction_model=compaction_model,
             compaction_prompt=LOCOMO_COMPACTION_PROMPT,
-        )
+        ),
+        # ``MnesisSession.create`` validates the compaction budget against these.
+        model_overrides=overrides or None,
     )
+    auto_stats: dict[str, Any] = {
+        "triggered": 0,
+        "completed": 0,
+        "failed": 0,
+        "levels": {},
+        "blocking_sends": 0,
+    }
     # Build turns with session date headers injected.
     # Session dates are required for multi-hop temporal questions (cat=2) whose
     # answers ("7 May 2023") are derived from the session timestamp combined with
@@ -340,6 +364,20 @@ async def run_condition(
         config=config,
         db_path=db_path,
     ) as session:
+        if auto_compact:
+
+            def _on_event(event: Any, payload: dict[str, Any]) -> None:
+                if event == MnesisEvent.COMPACTION_TRIGGERED:
+                    auto_stats["triggered"] += 1
+                elif event == MnesisEvent.COMPACTION_FAILED:
+                    auto_stats["failed"] += 1
+                elif event == MnesisEvent.COMPACTION_COMPLETED:
+                    auto_stats["completed"] += 1
+                    lvl = str(payload.get("level_used", 0))
+                    auto_stats["levels"][lvl] = auto_stats["levels"].get(lvl, 0) + 1
+
+            session.event_bus.subscribe_all(_on_event)
+
         # ── inject conversation turns ──────────────────────────────────────
         for i in tqdm(
             range(0, len(turns), 2),
@@ -359,7 +397,12 @@ async def run_condition(
 
         compact_result = None
 
-        if compact:
+        if auto_compact:
+            # Let the last background run land before measuring; no extra
+            # compaction is forced.
+            while session.compaction_in_progress:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        elif compact:
             compact_result = await session.compact()
 
         # Use compaction result for window-level token counts when available;
@@ -367,6 +410,10 @@ async def run_condition(
         if compact_result is not None:
             tokens_before = compact_result.tokens_before
             tokens_after = compact_result.tokens_after
+        elif auto_compact and session.history():
+            # Automatic runs: cumulative usage vs. the live window after the last turn.
+            tokens_before = session.token_usage.effective_total()
+            tokens_after = session.history()[-1].context_tokens.total
         else:
             tokens_before = session.token_usage.effective_total()
             tokens_after = tokens_before
@@ -387,6 +434,9 @@ async def run_condition(
                         f"as concisely as possible:\n{qa['question']}"
                     )
                     prediction = turn.text.strip()
+                    if auto_compact and turn.compaction_result is not None:
+                        # send() waited on a compaction before calling the model.
+                        auto_stats["blocking_sends"] += 1
                 except Exception as exc:
                     print(f"    [warn] QA inference failed: {exc}", file=sys.stderr)
                     prediction = ""
@@ -410,6 +460,7 @@ async def run_condition(
         "tokens_after_compaction": tokens_after,
         "token_reduction_pct": reduction_pct,
         "compact_result": compact_result.model_dump() if compact_result else None,
+        "auto_compaction": auto_stats if auto_compact else None,
         "turns_injected": (len(turns) + 1) // 2,
         "total_qa": len(qa_results),
         "snapshot_metrics": [
@@ -1164,6 +1215,31 @@ examples:
         ),
     )
     p.add_argument(
+        "--auto-compact",
+        action="store_true",
+        dest="auto_compact",
+        help=(
+            "Mnesis condition only: enable automatic compaction and let the soft/hard "
+            "triggers fire during injection instead of one manual compact() at the end. "
+            "Reports compaction count, levels and blocking sends. Pair with "
+            "--context-limit so the window is small enough to trigger. Off by default."
+        ),
+    )
+    p.add_argument(
+        "--context-limit",
+        type=int,
+        default=None,
+        dest="context_limit",
+        help="Override the session model's context window in tokens (model_overrides).",
+    )
+    p.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=None,
+        dest="max_output_tokens",
+        help="Override the session model's max output tokens (model_overrides).",
+    )
+    p.add_argument(
         "--no-snapshot-metrics",
         action="store_true",
         dest="no_snapshot_metrics",
@@ -1441,6 +1517,9 @@ async def main() -> None:
             db_path=db_mnes,
             max_questions=args.questions_per,
             metrics_only=args.metrics_only,
+            auto_compact=args.auto_compact,
+            context_limit=args.context_limit,
+            max_output_tokens=args.max_output_tokens,
         )
         elapsed = time.monotonic() - t0
 
@@ -1450,11 +1529,16 @@ async def main() -> None:
         token_data.append({"baseline": baseline, "mnesis": mnesis})
 
         cr = mnesis.get("compact_result") or {}
-        compact_levels.append(cr.get("level_used", 0))
+        auto = mnesis.get("auto_compaction")
+        if auto:
+            # Automatic mode has no single compact_result: report the highest level used.
+            level = max((int(k) for k in auto["levels"]), default=0)
+        else:
+            level = cr.get("level_used", 0)
+        compact_levels.append(level)
         compact_msgs.append(cr.get("compacted_message_count", 0))
 
         pct = mnesis["token_reduction_pct"]
-        level = cr.get("level_used", 0)
         n_pairs = mnesis.get("turns_injected", 0)
 
         # Build a concise one-liner printed after each conversation completes.
@@ -1470,6 +1554,12 @@ async def main() -> None:
             m_f1 = overall_f1(mnesis["results"])
             delta = m_f1 - b_f1
             summary_parts.append(f"  F1D={delta:+.3f}")
+        if auto:
+            summary_parts.append(
+                f"  auto: {auto['triggered']} triggered/{auto['completed']} done/"
+                f"{auto['failed']} failed, levels {auto['levels']}, "
+                f"{auto['blocking_sends']} blocking sends"
+            )
         summary_parts.append(f"  ({elapsed:.1f}s)")
         tqdm.write("".join(summary_parts))
 
@@ -1495,13 +1585,27 @@ async def main() -> None:
         if token_data
         else 0
     )
-    compact_stats = {
+    auto_runs = [d["mnesis"].get("auto_compaction") for d in token_data]
+    auto_runs = [a for a in auto_runs if a]
+    compact_stats: dict[str, Any] = {
         "conversations": len(conversations),
         "avg_turns": avg_turns,
         "avg_reduction_pct": avg_red,
         "avg_level": sum(compact_levels) / len(compact_levels) if compact_levels else 0,
         "avg_msgs_compacted": sum(compact_msgs) / len(compact_msgs) if compact_msgs else 0,
     }
+    if auto_runs:
+        levels_total: dict[str, int] = {}
+        for a in auto_runs:
+            for lvl, n_lvl in a["levels"].items():
+                levels_total[lvl] = levels_total.get(lvl, 0) + n_lvl
+        compact_stats["auto_compaction"] = {
+            "triggered": sum(a["triggered"] for a in auto_runs),
+            "completed": sum(a["completed"] for a in auto_runs),
+            "failed": sum(a["failed"] for a in auto_runs),
+            "levels": levels_total,
+            "blocking_sends": sum(a["blocking_sends"] for a in auto_runs),
+        }
 
     # ── console summary ────────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -1516,6 +1620,12 @@ async def main() -> None:
     print(f"  Avg token reduction : {reduction:.1f}%  (higher = more budget recovered)")
     print(f"  Avg compaction level: {level:.1f}  (1=LLM structured, 3=deterministic)")
     print(f"  Avg messages compacted: {msgs:.0f}")
+    if "auto_compaction" in compact_stats:
+        a = compact_stats["auto_compaction"]
+        print(
+            f"  Automatic compaction: {a['triggered']} triggered, {a['completed']} completed, "
+            f"{a['failed']} failed; levels {a['levels']}; {a['blocking_sends']} blocking sends"
+        )
 
     if not args.metrics_only and all_baseline:
         delta_overall = m_overall - b_overall
@@ -1584,6 +1694,7 @@ async def main() -> None:
                         "token_reduction_pct": d["mnesis"]["token_reduction_pct"],
                         "turns_injected": d["mnesis"]["turns_injected"],
                         "compact_result": d["mnesis"]["compact_result"],
+                        "auto_compaction": d["mnesis"].get("auto_compaction"),
                     }
                     for d in token_data
                 ],
