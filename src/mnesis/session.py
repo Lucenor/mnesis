@@ -32,7 +32,7 @@ from mnesis.models.message import (
 )
 from mnesis.models.snapshot import ContextBreakdown, TurnSnapshot
 from mnesis.retry import backoff_delay, is_retryable
-from mnesis.store.immutable import ImmutableStore, RawMessagePart
+from mnesis.store.immutable import ImmutableStore, MnesisStoreError, RawMessagePart
 from mnesis.store.pool import StorePool
 from mnesis.store.summary_dag import SummaryDAGStore
 from mnesis.tokens.estimator import TokenEstimator
@@ -79,8 +79,13 @@ async def _forward_part(
         _ = await result
 
 
-class SessionClosedError(RuntimeError):
-    """Raised by ``send()``/``record()`` when the session is closed or closing."""
+class SessionClosedError(MnesisStoreError):
+    """Raised by session operations after ``close()`` (``send``/``record``/``stream`` also
+    while it is closing).
+
+    A :class:`~mnesis.store.immutable.MnesisStoreError`, so existing
+    ``except MnesisStoreError`` handlers around a closed session keep working.
+    """
 
 
 # How long ``close()`` waits for in-flight ``send()``/``record()`` calls to finish
@@ -98,6 +103,20 @@ def _tracked[**P, R](
     async def wrapper(self: MnesisSession, /, *args: P.args, **kwargs: P.kwargs) -> R:
         with self._operation():
             return await fn(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _requires_open[**P, R](
+    fn: Callable[Concatenate[MnesisSession, P], Coroutine[Any, Any, R]],
+) -> Callable[Concatenate[MnesisSession, P], Coroutine[Any, Any, R]]:
+    """Raise :class:`SessionClosedError` if the session is already closed."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: MnesisSession, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        if self._closed:
+            raise SessionClosedError("session is closed")
+        return await fn(self, *args, **kwargs)
 
     return wrapper
 
@@ -201,10 +220,12 @@ class MnesisSession:
         # In-flight send()/record() calls (their tasks) and the event set while none
         # are, so close() can wait for them to finish persisting before closing the DB.
         self._inflight: list[asyncio.Task[Any] | None] = []
-        self._idle = asyncio.Event()
-        self._idle.set()
+        self._inflight_waiters: list[asyncio.Future[None]] = []
         self._closing = False
         self._closed = False
+        # close() calls currently running: only when the last one ends without having
+        # closed the store is the session reopened (see ``close``).
+        self._active_closes = 0
 
     @classmethod
     async def create(
@@ -496,6 +517,7 @@ class MnesisSession:
             TurnResult with the assistant's text, token usage, and status.
 
         Raises:
+            SessionClosedError: If the session is closed or closing.
             MnesisStoreError: If message persistence fails.
         """
         sys_prompt = system_prompt or self._system_prompt
@@ -759,6 +781,9 @@ class MnesisSession:
             :class:`TextDelta` for each streamed text chunk, followed by a
             single :class:`TurnComplete` carrying the full :class:`TurnResult`.
 
+        Raises:
+            SessionClosedError: If the session is closed or closing.
+
         Note:
             **Abandonment safety** — If you ``break`` out of the ``async for``
             loop or an exception interrupts iteration, the underlying
@@ -778,6 +803,8 @@ class MnesisSession:
                         print()  # newline after streaming ends
                         print(f"Tokens: {event.result.tokens.effective_total()}")
         """
+        if self._closing or self._closed:
+            raise SessionClosedError("session is closed or closing")
         queue: asyncio.Queue[TextDelta | TurnComplete | None] = asyncio.Queue()
         abandoned = False
         send_exc: BaseException | None = None
@@ -962,6 +989,9 @@ class MnesisSession:
         Returns:
             RecordResult with the persisted message IDs and token usage.
 
+        Raises:
+            SessionClosedError: If the session is closed or closing.
+
         Example::
 
             import anthropic
@@ -1133,6 +1163,7 @@ class MnesisSession:
             doom_loop_detected=doom_loop,
         )
 
+    @_requires_open
     async def messages(self) -> list[MessageWithParts]:
         """
         Return the full message history for this session.
@@ -1149,9 +1180,12 @@ class MnesisSession:
 
         Returns:
             List of MessageWithParts in chronological order.
+        Raises:
+            SessionClosedError: If the session is closed.
         """
         return await self._store.get_messages_with_parts(self._session_id)
 
+    @_requires_open
     async def conversation_messages(self) -> list[MessageWithParts]:
         """
         Return only the conversational turns, excluding compaction summaries.
@@ -1167,6 +1201,7 @@ class MnesisSession:
         all_msgs = await self._store.get_messages_with_parts(self._session_id)
         return [m for m in all_msgs if not m.is_summary]
 
+    @_requires_open
     async def context_for_next_turn(
         self,
         system_prompt: str | None = None,
@@ -1195,6 +1230,9 @@ class MnesisSession:
             Ordered list of ``{"role": str, "content": str | list}`` dicts
             ready to pass to any chat completion API.
 
+        Raises:
+            SessionClosedError: If the session is closed.
+
         Example::
 
             messages = await session.context_for_next_turn()
@@ -1213,6 +1251,7 @@ class MnesisSession:
         )
         return [{"role": m.role, "content": m.content} for m in context.messages]
 
+    @_requires_open
     async def compact(self) -> CompactionResult:
         """
         Manually trigger synchronous compaction.
@@ -1227,6 +1266,8 @@ class MnesisSession:
 
         Returns:
             CompactionResult describing the compaction outcome.
+        Raises:
+            SessionClosedError: If the session is closed.
         """
         self._logger.info("manual_compaction_triggered", session_id=self._session_id)
         # Runs as the engine's tracked task, after any background compaction.
@@ -1243,13 +1284,34 @@ class MnesisSession:
             raise SessionClosedError("session is closed or closing")
         owner = asyncio.current_task()
         self._inflight.append(owner)
-        self._idle.clear()
         try:
             yield
         finally:
             self._inflight.remove(owner)
-            if not self._inflight:
-                self._idle.set()
+            for waiter in self._inflight_waiters:
+                if not waiter.done():
+                    waiter.set_result(None)
+            self._inflight_waiters.clear()
+
+    async def _wait_for_other_operations(self, max_wait: float) -> None:
+        """Wait until no send()/record() other than the current task's own is in flight.
+
+        A task cannot wait for itself, so a ``close()`` called from inside a
+        ``send()``/``record()`` waits for every *other* in-flight call. Gives up
+        after *max_wait* seconds (logged).
+        """
+        me = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_wait
+        while any(task is not me for task in self._inflight):
+            waiter: asyncio.Future[None] = loop.create_future()
+            self._inflight_waiters.append(waiter)
+            remaining = deadline - loop.time()
+            try:
+                await asyncio.wait_for(waiter, timeout=max(remaining, 0.0))
+            except TimeoutError:
+                self._logger.warning("close_inflight_wait_timed_out")
+                return
 
     async def close(self, *, abort_compaction: bool = False) -> None:
         """
@@ -1285,9 +1347,11 @@ class MnesisSession:
         already on the wire is allowed to complete, for up to 30 seconds; no new
         work starts. Only then are compactions drained and the store closed. Calling
         ``close()`` from inside a ``send()``/``record()`` (e.g. in an event handler
-        running in that call's task) does not wait for that call, to avoid a
-        deadlock; the store is then closed under it, so avoid doing that. ``close()``
-        is idempotent.
+        running in that call's task) waits for every *other* in-flight call but not
+        for that call itself, to avoid a deadlock; the store is then closed under it,
+        so avoid doing that. ``close()`` is idempotent; if several ``close()`` calls
+        overlap and some are interrupted, the session stays closing until the last
+        one ends.
 
         Publishes :attr:`~mnesis.events.bus.MnesisEvent.SESSION_CLOSED` after
         cleanup.
@@ -1295,6 +1359,7 @@ class MnesisSession:
         if self._closed:
             return
         self._closing = True
+        self._active_closes += 1
         try:
             # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
             if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
@@ -1302,12 +1367,8 @@ class MnesisSession:
             if abort_compaction:
                 self._compaction_abort.set()
             # Let in-flight send()/record() calls finish persisting before the DB goes
-            # away (a task cannot wait for itself: a close() from inside one skips this).
-            if asyncio.current_task() not in self._inflight:
-                try:
-                    await asyncio.wait_for(self._idle.wait(), timeout=_CLOSE_INFLIGHT_TIMEOUT)
-                except TimeoutError:
-                    self._logger.warning("close_inflight_wait_timed_out")
+            # away (excluding the calling task itself, which cannot wait for itself).
+            await self._wait_for_other_operations(_CLOSE_INFLIGHT_TIMEOUT)
             # Await any background send() tasks spawned by stream() so the DB is
             # not closed while a turn is still being persisted.
             if self._background_send_tasks:
@@ -1322,8 +1383,11 @@ class MnesisSession:
             await self._store.close()
             self._closed = True
         finally:
-            if not self._closed:
-                self._closing = False  # interrupted: the session stays usable
+            self._active_closes -= 1
+            if not self._closed and self._active_closes == 0:
+                # Every close() was interrupted: the session stays usable. While another
+                # close() is still running, the session stays closing.
+                self._closing = False
             # An interrupted close() (e.g. timed out while draining) leaves the session
             # usable, so the abort flag must not stay set and abort every later run. But
             # a run still in flight must still see it: clear once that run has ended.

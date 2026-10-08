@@ -190,6 +190,7 @@ class TestPathExtraction:
             "LICENSE",
             "README",
             "config/.env",
+            "app/.foorc",
             ".env",
             ".gitignore",
             "~/.zshrc",

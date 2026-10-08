@@ -2188,3 +2188,105 @@ class TestCloseWaitsForInflightOperations:
             assert session._closed
             _ = task.cancel()
             _ = await asyncio.wait({task})
+
+
+class TestClosedSessionErrors:
+    async def test_every_public_operation_raises_session_closed_error(self, tmp_path):
+        from mnesis import MnesisStoreError, SessionClosedError
+
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        await session.close()
+        assert issubclass(SessionClosedError, MnesisStoreError)
+
+        async def drain_stream():
+            async for _ in session.stream("hi"):
+                pass
+
+        for call in (
+            lambda: session.send("hi"),
+            lambda: session.record("q", "a"),
+            drain_stream,
+            session.context_for_next_turn,
+            session.messages,
+            session.conversation_messages,
+            session.compact,
+        ):
+            with pytest.raises(SessionClosedError):
+                _ = await call()
+            # Existing ``except MnesisStoreError`` handlers keep catching it.
+            with pytest.raises(MnesisStoreError):
+                _ = await call()
+
+
+class TestCloseOwnership:
+    @staticmethod
+    def _slow_stream(release: asyncio.Event, entered: asyncio.Event | None = None):
+        from mnesis.models.message import TokenUsage
+
+        async def slow(*args, **kwargs):
+            if entered is not None:
+                entered.set()
+            await release.wait()
+            return "done", TokenUsage(input=1, output=1, total=2), "stop"
+
+        return slow
+
+    async def test_close_inside_one_send_waits_for_the_other_sends(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        from mnesis.models.message import TokenUsage
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        release = asyncio.Event()
+        slow_entered = asyncio.Event()
+        calls = {"n": 0}
+
+        async def stream(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:  # the "other" send: slow
+                slow_entered.set()
+                await release.wait()
+            else:  # the closing send: closes the session from its own task
+                await session.close()
+            return "ok", TokenUsage(input=1, output=1, total=2), "stop"
+
+        with patch.object(session, "_stream_response", new=AsyncMock(side_effect=stream)):
+            other = asyncio.create_task(session.send("slow"))
+            await asyncio.wait_for(slow_entered.wait(), timeout=5)
+            closer = asyncio.create_task(session.send("closer"))
+            await asyncio.sleep(0.1)
+            # The closer's close() is waiting for the other send, not failing it.
+            assert not session._closed
+            release.set()
+            assert (await asyncio.wait_for(other, timeout=5)).text == "ok"
+            _ = await asyncio.wait({closer}, timeout=5)
+        assert session._closed
+
+    async def test_interrupted_second_close_does_not_reopen_the_session(
+        self, tmp_path, monkeypatch
+    ):
+        from unittest.mock import AsyncMock, patch
+
+        from mnesis import SessionClosedError
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        release = asyncio.Event()
+        entered = asyncio.Event()
+        slow = self._slow_stream(release, entered)
+        with patch.object(session, "_stream_response", new=AsyncMock(side_effect=slow)):
+            first_send = asyncio.create_task(session.send("long"))
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            close1 = asyncio.create_task(session.close())
+            await asyncio.sleep(0.02)
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.05):
+                    await session.close()  # second close, interrupted
+            assert session._closing  # close #1 still owns the closing state
+            with pytest.raises(SessionClosedError):
+                _ = await session.send("sneaks in")
+            release.set()
+            _ = await asyncio.wait_for(first_send, timeout=5)
+            await asyncio.wait_for(close1, timeout=5)
+        assert session._closed
