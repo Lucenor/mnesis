@@ -1388,6 +1388,13 @@ class MnesisSession:
             self._close_waiters += 1
             try:
                 await asyncio.shield(done)
+            except BaseException:
+                if self._close_done is None and not self._closed and self._close_waiters == 1:
+                    # The owner was interrupted (it left the session closing for a
+                    # waiter to take over) and this, the only waiter, is interrupted too
+                    # before it could: nobody is left, so the session stays usable.
+                    self._closing = False
+                raise
             finally:
                 self._close_waiters -= 1
 
@@ -1413,9 +1420,12 @@ class MnesisSession:
                 _ = await self._compaction_engine.wait_for_pending()
                 if not self._compaction_engine.has_pending:
                     break
+            # Closed from here on: the store detaches its connection as soon as it is
+            # asked to close, so an interruption inside ``store.close()`` must not
+            # reopen the session on a dead store, nor publish SESSION_CLOSED twice.
+            self._closed = True
             self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
             await self._store.close()
-            self._closed = True
         finally:
             # An interrupted close() (e.g. timed out while draining) leaves the session
             # usable, so the abort flag must not stay set and abort every later run. But
