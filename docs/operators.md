@@ -359,8 +359,9 @@ async with aclosing(llm_map.run(inputs=items, ...)) as results:
   The concurrency slot is released before the backoff sleep, so a failing item
   never blocks other items from making progress. Trade-off: backoff no longer
   throttles the map, so under heavy rate limiting (HTTP 429) new items keep
-  firing while failed ones wait. Lower `llm_map_concurrency` or raise the retry
-  delays if the provider is rate limiting.
+  firing while failed ones wait. The backoff schedule is fixed (not configurable);
+  if the provider is rate limiting, lower `llm_map_concurrency` and/or
+  `max_retries` (`OperatorConfig`).
 
 - **Timeout failures** — `TimeoutError` consumes one attempt and counts toward
   `max_retries`, but does **not** apply the exponential backoff. Timeout retries
