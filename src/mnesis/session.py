@@ -623,6 +623,13 @@ class MnesisSession:
                         raise asyncio.CancelledError
                 except asyncio.CancelledError:
                     sleep_task.cancel()  # send() itself cancelled: stop the sleep too
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
+                        # send() itself is being cancelled (task.cancel(), or an
+                        # ``asyncio.timeout`` around it): propagate, so the caller's
+                        # cancellation/timeout is honoured instead of swallowed.
+                        raise
+                    # Otherwise close() cancelled the sleep: end the turn as an error.
                     self._logger.info("llm_retry_cancelled")
                     finish_reason = "error"
                     text_accumulator = "[Error: retry cancelled]"

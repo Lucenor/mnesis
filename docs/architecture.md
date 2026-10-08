@@ -640,11 +640,11 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
 - **ID-to-path pairing**: where the path of a file is known, the footer records the
   pair as `path (file_<hex>)` (`[LCM File IDs: services/a.yaml (file_3fa9…),
   file_9b1e…]`; an ID with no known path stays bare). Paths are recovered from
-  the source text, only when a path and an ID are directly adjacent (at most three
+  the source text (only when a path and an ID are directly adjacent (at most three
   separator characters between them: `path (file_x)`, `file_x: path`; a path has a
   `/` or a known file extension; e-mails, URLs, calls and bare identifiers such as
   `json.loads` never count; one path names one ID). When unsure, no pair is made:
-  a missing path is harmless, a wrong one is not
+  a missing path is harmless, a wrong one is not),
   and, for condensation, from the parent nodes' footers first (authoritative: they
   were derived from the original messages) and their prose second. The LLM
   prompts at every level also require `path (file_<hex>)` to be written together,

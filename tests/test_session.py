@@ -2011,9 +2011,26 @@ class TestRetrySleepSemantics:
                 task = asyncio.create_task(session.send("hi"))
                 sleeper = await asyncio.wait_for(self._sleep_task(session), timeout=5)
                 _ = task.cancel()
-                result = await asyncio.wait_for(task, timeout=5)
-            # The pre-existing contract: a cancelled backoff ends the turn as an error.
-            assert result.text == "[Error: retry cancelled]"
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+            # Cancelling send() propagates (it is not swallowed into an error turn)
+            # and stops the sleep too.
+            assert task.cancelled()
             assert sleeper.cancelled()
+        finally:
+            await session.close()
+
+    async def test_timeout_around_send_during_backoff_raises(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        stream, _ = self._flaky(5)
+        session = await self._session(tmp_path, base_delay=60.0)
+        try:
+            with patch.object(session, "_stream_response", new=AsyncMock(side_effect=stream)):
+                with pytest.raises(TimeoutError):
+                    async with asyncio.timeout(0.3):
+                        _ = await session.send("hi")
+            assert session._retry_sleep_task is None
         finally:
             await session.close()
