@@ -2075,3 +2075,116 @@ class TestCancelledSendLeavesNoEmptyAssistantTurn:
             assert await self._context_roles(session) == [("user", True)]
         finally:
             await session.close()
+
+
+class TestCloseWaitsForInflightOperations:
+    """close() lets in-flight send()/record() finish persisting before the store closes."""
+
+    async def test_close_during_backoff_persists_the_error_turn(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        from mnesis.store.immutable import ImmutableStore
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        stream, _ = TestRetrySleepSemantics._flaky(5)
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=60.0)
+        with patch.object(session, "_stream_response", new=AsyncMock(side_effect=stream)):
+            task = asyncio.create_task(session.send("hi"))
+            _ = await asyncio.wait_for(TestRetrySleepSemantics._sleep_task(session), timeout=5)
+            await session.close()
+            result = await asyncio.wait_for(task, timeout=5)
+        assert result.text == "[Error: retry cancelled]"
+        # The error turn was persisted before the store closed.
+        store = ImmutableStore(
+            session._config.store.model_copy(update={"db_path": str(tmp_path / "rs.db")})
+        )
+        await store.initialize()
+        try:
+            texts = [
+                m.parts[0].text
+                for m in await store.get_messages_with_parts(session.id)
+                if m.parts and hasattr(m.parts[0], "text")
+            ]
+        finally:
+            await store.close()
+        assert "[Error: retry cancelled]" in texts
+
+    async def test_send_and_record_after_close_are_rejected(self, tmp_path):
+        from mnesis import SessionClosedError
+
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        await session.close()
+        with pytest.raises(SessionClosedError):
+            _ = await session.send("hi")
+        with pytest.raises(SessionClosedError):
+            _ = await session.record("q", "a")
+
+    async def test_new_send_while_closing_is_rejected(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        from mnesis import SessionClosedError
+        from mnesis.models.message import TokenUsage
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def slow(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return "done", TokenUsage(input=1, output=1, total=2), "stop"
+
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        with patch.object(session, "_stream_response", new=AsyncMock(side_effect=slow)):
+            first = asyncio.create_task(session.send("hi"))
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            closing = asyncio.create_task(session.close())
+            await asyncio.sleep(0.05)
+            assert not closing.done()  # waiting for the stream already on the wire
+            with pytest.raises(SessionClosedError):
+                _ = await session.send("late")
+            release.set()
+            assert (await asyncio.wait_for(first, timeout=5)).text == "done"
+            await asyncio.wait_for(closing, timeout=5)
+
+    async def test_double_close_is_fine(self, tmp_path):
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        await session.close()
+        await session.close()
+
+    async def test_close_from_inside_a_send_does_not_deadlock(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        from mnesis.models.message import TokenUsage
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+
+        async def closes_itself(*args, **kwargs):
+            await session.close()  # runs in send()'s own task: must not wait for itself
+            return "x", TokenUsage(input=1, output=1, total=2), "stop"
+
+        with patch.object(session, "_stream_response", new=AsyncMock(side_effect=closes_itself)):
+            with pytest.raises(Exception):  # noqa: B017 - the store is closed under it
+                _ = await asyncio.wait_for(session.send("hi"), timeout=5)
+        assert session._closed
+
+    async def test_close_gives_up_waiting_on_a_hung_stream(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        monkeypatch.setattr("mnesis.session._CLOSE_INFLIGHT_TIMEOUT", 0.1)
+        entered = asyncio.Event()
+
+        async def hang(*args, **kwargs):
+            entered.set()
+            await asyncio.sleep(60)
+
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        with patch.object(session, "_stream_response", new=AsyncMock(side_effect=hang)):
+            task = asyncio.create_task(session.send("hi"))
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await asyncio.wait_for(session.close(), timeout=5)  # bounded, not forever
+            assert session._closed
+            _ = task.cancel()
+            _ = await asyncio.wait({task})

@@ -37,7 +37,7 @@ from mnesis.models import (
 )
 from mnesis.operators.agentic_map import AgenticMap, AgentMapBatch, AgentMapResult
 from mnesis.operators.llm_map import LLMMap, MapBatch, MapResult
-from mnesis.session import MnesisSession
+from mnesis.session import MnesisSession, SessionClosedError
 from mnesis.store.immutable import MnesisStoreError, SessionNotFoundError
 from mnesis.tokens.estimator import TokenEstimator
 
@@ -65,6 +65,7 @@ __all__ = [
     "MnesisStoreError",
     "OperatorConfig",
     "RecordResult",
+    "SessionClosedError",
     "SessionConfig",
     "SessionNotFoundError",
     "StoreConfig",
