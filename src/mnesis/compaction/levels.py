@@ -722,6 +722,29 @@ def _paths_that_fit(
     return chosen if reserved_tokens + estimator.estimate(footer) <= cap else {}
 
 
+def _with_paths_if_fit(
+    text: str,
+    file_ids: list[str],
+    paths: Mapping[str, str],
+    budget: ContextBudget,
+    estimator: TokenEstimator,
+) -> tuple[str, int]:
+    """Upgrade *text*'s bare-ID footer to ``path (file_<hex>)`` pairs if they still fit.
+
+    Priority is ids > prose > paths: the prose is already fixed, so paths only
+    take what remains of ``budget.usable``. Returns the text and its token count.
+    """
+    chosen = _paths_that_fit(
+        file_ids, paths, estimator.estimate(strip_file_ids_footer(text)), budget.usable, estimator
+    )
+    if chosen:
+        paired = append_file_ids_footer(strip_file_ids_footer(text), file_ids, chosen)
+        tokens = estimator.estimate(paired)
+        if tokens <= budget.usable:
+            return paired, tokens
+    return text, estimator.estimate(text)
+
+
 def _append_bounded_footer(
     text: str,
     file_ids: list[str],
@@ -869,10 +892,8 @@ def level3_deterministic(
         estimator=estimator,
         log_event="level3_file_ids_truncated",
     )
-    footer_paths = _paths_that_fit(file_ids, all_paths, header_tokens, cap, estimator)
-    footer_tokens = (
-        estimator.estimate(append_file_ids_footer("", file_ids, footer_paths)) if file_ids else 0
-    )
+    # Sized with bare ids: ids > prose > paths, so paths never displace prose.
+    footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
     target = cap - footer_tokens
 
     kept_rev: list[tuple[MessageWithParts, str]] = []
@@ -892,7 +913,7 @@ def level3_deterministic(
 
     def render(first: int) -> str:
         # Footer preserves file references even for truncated content.
-        return append_file_ids_footer("\n".join([header, *lines[first:]]), file_ids, footer_paths)
+        return append_file_ids_footer("\n".join([header, *lines[first:]]), file_ids)
 
     # The per-line sizing above ignores the "\n" joiners and footer separators;
     # validate the assembled text against the hard budget by shedding the
@@ -911,6 +932,10 @@ def level3_deterministic(
         kept = kept[hi:]
         summary_text = render(hi)
         token_count = estimator.estimate(summary_text)
+    if all_paths and file_ids:
+        summary_text, token_count = _with_paths_if_fit(
+            summary_text, file_ids, all_paths, budget, estimator
+        )
 
     # All messages if nothing was kept
     if not messages:
@@ -1301,10 +1326,8 @@ def condense_level3_deterministic(
         estimator=estimator,
         log_event="condense_level3_file_ids_truncated",
     )
-    footer_paths = _paths_that_fit(file_ids, all_paths, header_tokens, cap, estimator)
-    footer_tokens = (
-        estimator.estimate(append_file_ids_footer("", file_ids, footer_paths)) if file_ids else 0
-    )
+    # Sized with bare ids: ids > prose > paths, so paths never displace prose.
+    footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
     available = prose_cap - header_tokens - footer_tokens
 
     # Each node's own footer is dropped from the prose: the authoritative one is
@@ -1327,7 +1350,7 @@ def condense_level3_deterministic(
 
     def render(count: int) -> str:
         body = header + "\n\n---\n\n".join(chunks[:count])
-        return append_file_ids_footer(body, file_ids, footer_paths)
+        return append_file_ids_footer(body, file_ids)
 
     # The sizing above ignores the "---" joiners; validate the assembled text
     # against the hard budget by shedding trailing chunks (monotone, so
@@ -1344,6 +1367,8 @@ def condense_level3_deterministic(
                 hi = mid
         combined = render(lo)
         token_count = estimator.estimate(combined)
+    if all_paths and file_ids:
+        combined, token_count = _with_paths_if_fit(combined, file_ids, all_paths, budget, estimator)
 
     logger.info(
         "condense_level3_deterministic_produced",

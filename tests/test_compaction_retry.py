@@ -465,7 +465,7 @@ class TestCompactionRetryEvents:
         payload = retries[0]
         assert payload["source"] == "compaction"
         assert payload["stage"] == "summarisation"
-        assert payload["level"] == 1
+        assert payload["compaction_level"] == 1
         assert payload["session_id"] == session_id
         assert payload["attempt"] == 1
         assert payload["max_retries"] == 2

@@ -158,7 +158,7 @@ class LlmRetryPayload(TypedDict):
     """
     stage: NotRequired[str]
     """Compaction only: ``"summarisation"`` or ``"condensation"``."""
-    level: NotRequired[int]
+    compaction_level: NotRequired[int]
     """Compaction only: the escalation level (1 or 2) of the call being retried."""
 
 

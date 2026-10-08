@@ -264,3 +264,35 @@ class TestPairsAreSecondaryToIds:
         assert set(extract_file_ids(cand.text)) == set(ids)
         assert footer_file_id_paths(cand.text) == {}
         assert cand.token_count <= tiny.usable
+
+
+class TestPathsRankBelowProse:
+    """ids > prose > paths: paths never shrink the prose the deterministic levels keep."""
+
+    @staticmethod
+    def _msgs() -> list[MessageWithParts]:
+        out = []
+        for i in range(12):
+            text = f"turn {i} " + "word " * 30 + f" see src/mod_{i}.py (file_{i:016x})"
+            msg = Message(id=f"m{i}", session_id="s", role="user" if i % 2 == 0 else "assistant")
+            out.append(MessageWithParts(message=msg, parts=[TextPart(text=text)]))
+        return out
+
+    def test_level3_prose_is_the_same_with_and_without_paths(self, estimator, monkeypatch):
+        msgs = self._msgs()
+        ids = extract_file_id_paths_from_messages(msgs)
+        assert len(ids) == 12
+        bare_footer = estimator.estimate(append_file_ids_footer("", list(ids)))
+        # Room for prose plus bare ids, but not for the paired footer on top of that.
+        budget = ContextBudget(
+            model_context_limit=int((bare_footer + 330) / 0.85),
+            reserved_output_tokens=0,
+            compaction_buffer=0,
+        )
+        with_paths = level3_deterministic(msgs, budget, estimator)
+        monkeypatch.setattr(
+            "mnesis.compaction.levels.extract_file_id_paths_from_messages", lambda m: {}
+        )
+        without = level3_deterministic(msgs, budget, estimator)
+        assert strip_file_ids_footer(with_paths.text) == strip_file_ids_footer(without.text)
+        assert with_paths.token_count <= budget.usable

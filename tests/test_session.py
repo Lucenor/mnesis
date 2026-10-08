@@ -1260,7 +1260,7 @@ class TestRetryResilience:
         assert isinstance(payload["delay_seconds"], float)
         # Additive key: send() retries are labelled, and carry no compaction-only keys.
         assert payload["source"] == "send"
-        assert "stage" not in payload and "level" not in payload
+        assert "stage" not in payload and "compaction_level" not in payload
 
     # ------------------------------------------------------------------
     # Test 6: close() during retry backoff cancels the sleep promptly

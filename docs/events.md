@@ -182,7 +182,7 @@ Fired by: `MnesisEvent.DOOM_LOOP_DETECTED`
 
 Fired by: `MnesisEvent.LLM_RETRY`
 
-Published on each retry attempt, immediately before the backoff sleep begins, for `send()` turns and for compaction LLM calls. Only fires when `RetryConfig.max_retries > 0` and the error is retryable. `source` tells the two apart; `stage` and `level` are present only for compaction.
+Published on each retry attempt, immediately before the backoff sleep begins, for `send()` turns and for compaction LLM calls. Only fires when `RetryConfig.max_retries > 0` and the error is retryable. `source` tells the two apart; `stage` and `compaction_level` are present only for compaction.
 
 | Field | Type | Description |
 |---|---|---|
@@ -194,7 +194,7 @@ Published on each retry attempt, immediately before the backoff sleep begins, fo
 | `delay_seconds` | `float` | Seconds the session will sleep before the next attempt |
 | `source` | `str` (optional) | `"send"` for a turn's LLM call, `"compaction"` for a compaction call. Absent on payloads from versions before this key existed: treat a missing value as `"send"` |
 | `stage` | `str` (optional) | Compaction only: `"summarisation"` or `"condensation"` |
-| `level` | `int` (optional) | Compaction only: escalation level (`1` or `2`) of the call being retried |
+| `compaction_level` | `int` (optional) | Compaction only: escalation level (`1` or `2`) of the call being retried |
 
 ---
 

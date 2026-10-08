@@ -724,7 +724,7 @@ class CompactionEngine:
                     "source": "compaction",
                 }
                 if stage is not None:
-                    payload["stage"], payload["level"] = stage
+                    payload["stage"], payload["compaction_level"] = stage
                 self._event_bus.publish(MnesisEvent.LLM_RETRY, payload)
 
             try:

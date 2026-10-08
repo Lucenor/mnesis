@@ -648,7 +648,8 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
   and, for condensation, from the parent nodes' footers first (authoritative: they
   were derived from the original messages) and their prose second. The LLM
   prompts at every level also require `path (file_<hex>)` to be written together,
-  so prose keeps the association too. Pairs are secondary to IDs: when the paired
+  so prose keeps the association too. Pairs rank last at every level (IDs > prose > paths): they are added after the
+  prose is fixed, and only if they still fit, so they never displace prose or IDs. When the paired
   footer would not fit the budget, the bare IDs are written instead
   (all-or-nothing). The old bare-ID footer still parses everywhere (ID extraction
   only looks for `file_<hex>` tokens).
