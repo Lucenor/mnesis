@@ -753,10 +753,12 @@ condensation merges them. Three levels mirror summarisation:
 - **Condense L1** — `CONDENSE_LEVEL1_PROMPT` merges the summaries via the
   structured format, with per-section bullet caps derived from half the input
   (see "Length target" above). **Adaptive skip:** a completion cut off at the
-  output limit (`CompactionTruncatedError`) is never accepted, and the engine
-  remembers it: for the rest of that engine's lifetime later condensations start
-  at L2, so a verbose model does not waste a request per condensation. Empty
-  completions and provider errors do not trigger this. The state is in memory
+  output limit (`CompactionTruncatedError`) is never accepted. After two
+  *consecutive* truncations (an accepted L1 condensation resets the count; one
+  truncation can be a one-off) the engine skips L1 for the rest of its lifetime
+  and later condensations start at L2, so a verbose model does not waste a
+  request per condensation. Empty completions and provider errors neither count
+  nor reset. The state is in memory
   only (not persisted; a reloaded session probes L1 again once). Set
   `CompactionConfig.condense_skip_level1=True` to skip L1 from the start. Both
   need `level2_enabled` (otherwise L1 is kept: skipping would drop to L3).

@@ -83,6 +83,10 @@ def _in_stage(stage: str, level: int) -> Iterator[None]:
         _call_stage.reset(token)
 
 
+# Consecutive truncated condensation level 1 completions after which it is skipped.
+_CONDENSE_L1_TRUNCATION_LIMIT = 2
+
+
 class CompactionTruncatedError(Exception):
     """The compaction model stopped at its output limit (``finish_reason="length"``)."""
 
@@ -231,9 +235,10 @@ class CompactionEngine:
         self._stall_logged = False
         # Live summary-node ids whose condensation made no progress; skipped while unchanged.
         self._failed_condense_ids: frozenset[str] | None = None
-        # Set when a condensation level 1 completion was cut off at the output limit;
-        # later condensations then start at level 2. In memory only (not persisted).
-        self._condense_l1_truncated = False
+        # Consecutive condensation level 1 completions cut off at the output limit.
+        # At ``_CONDENSE_L1_TRUNCATION_LIMIT`` later condensations start at level 2.
+        # In memory only (not persisted).
+        self._condense_l1_truncations = 0
 
     @property
     def stalled(self) -> bool:
@@ -1215,18 +1220,20 @@ class CompactionEngine:
 
         A completion cut off at the output limit is never accepted (the level
         fails and the run escalates, as for any error). A model that does this
-        once will do it again on the same prompt, so later condensations skip
-        level 1 rather than pay for a request that is discarded. Other failures
-        (empty completion, provider errors) say nothing about the prompt and do
-        not disable it.
+        on two consecutive condensations is judged to overrun on this prompt, so
+        later condensations skip level 1 rather than pay for a request that is
+        discarded (a single truncation can be a one-off, e.g. an unusually large
+        input). An accepted level 1 condensation resets the count. Other failures
+        (empty completion, provider errors) say nothing about the prompt and
+        neither count nor reset.
         """
 
         async def call(**kwargs: Any) -> Any:
             try:
                 return await llm_call(**kwargs)
             except CompactionTruncatedError:
-                if not self._condense_l1_truncated:
-                    self._condense_l1_truncated = True
+                self._condense_l1_truncations += 1
+                if self._condense_l1_truncations == _CONDENSE_L1_TRUNCATION_LIMIT:
                     self._logger.info("condense_level1_disabled_after_truncation", model=model)
                 raise
 
@@ -1256,7 +1263,8 @@ class CompactionEngine:
         # Level 1 (skipped when configured, or after a truncation: see below). It
         # can only be skipped when level 2 is there to take over.
         skip_l1 = self._config.compaction.level2_enabled and (
-            self._config.compaction.condense_skip_level1 or self._condense_l1_truncated
+            self._config.compaction.condense_skip_level1
+            or self._condense_l1_truncations >= _CONDENSE_L1_TRUNCATION_LIMIT
         )
         if abort and abort.is_set():
             raise asyncio.CancelledError("Compaction aborted")
@@ -1273,6 +1281,8 @@ class CompactionEngine:
                         model_context_limit=window,
                         compaction_estimator=compaction_estimator,
                     )
+                    if cond is not None:
+                        self._condense_l1_truncations = 0  # accepted: not a verbose model
 
             # Level 2
             if cond is None and self._config.compaction.level2_enabled:

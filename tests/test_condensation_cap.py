@@ -420,7 +420,22 @@ class TestCondenseLevel1Skip:
             nodes, "anthropic/claude-haiku-4-5", budget, probe, None, info
         )
 
-    async def test_truncation_escalates_then_later_runs_skip_level1(
+    async def test_one_truncation_still_tries_level1_next_time(
+        self, session_id, store, dag_store, est, event_bus, tmp_path
+    ):
+        engine, nodes, budget, info = await self._setup(
+            session_id, store, dag_store, est, event_bus, tmp_path
+        )
+        probe = _L1Probe("truncate")
+        first = await self._run(engine, nodes, budget, info, probe)
+        assert first.compaction_level == 2  # this run escalated
+        assert engine._condense_l1_truncations == 1
+        probe.l1 = "ok"
+        second = await self._run(engine, nodes, budget, info, probe)
+        assert second.compaction_level == 1  # level 1 was tried again, and accepted
+        assert probe.l1_calls == 2
+
+    async def test_two_consecutive_truncations_skip_level1(
         self, session_id, store, dag_store, est, event_bus, tmp_path
     ):
         engine, nodes, budget, info = await self._setup(
@@ -428,13 +443,30 @@ class TestCondenseLevel1Skip:
         )
         probe = _L1Probe("truncate")
         with structlog.testing.capture_logs() as logs:
-            first = await self._run(engine, nodes, budget, info, probe)
             _ = await self._run(engine, nodes, budget, info, probe)
+            _ = await self._run(engine, nodes, budget, info, probe)
+            third = await self._run(engine, nodes, budget, info, probe)
         events = [e for e in logs if e["event"] == "condense_level1_disabled_after_truncation"]
         assert len(events) == 1 and events[0]["model"] == "anthropic/claude-haiku-4-5"
-        assert first.compaction_level == 2  # this run escalated
-        assert engine._condense_l1_truncated
-        assert (probe.l1_calls, probe.l2_calls) == (1, 2)  # the second run made no level 1 request
+        assert third.compaction_level == 2
+        assert (probe.l1_calls, probe.l2_calls) == (2, 3)  # the third run made no level 1 request
+
+    async def test_accepted_level1_resets_the_count(
+        self, session_id, store, dag_store, est, event_bus, tmp_path
+    ):
+        engine, nodes, budget, info = await self._setup(
+            session_id, store, dag_store, est, event_bus, tmp_path
+        )
+        probe = _L1Probe("truncate")
+        _ = await self._run(engine, nodes, budget, info, probe)
+        probe.l1 = "ok"
+        _ = await self._run(engine, nodes, budget, info, probe)
+        assert engine._condense_l1_truncations == 0
+        probe.l1 = "truncate"
+        _ = await self._run(engine, nodes, budget, info, probe)  # not consecutive with the first
+        probe.l1 = "ok"
+        _ = await self._run(engine, nodes, budget, info, probe)
+        assert probe.l1_calls == 4  # level 1 was never skipped
 
     async def test_config_flag_skips_level1_from_the_start(
         self, session_id, store, dag_store, est, event_bus, tmp_path
@@ -458,7 +490,7 @@ class TestCondenseLevel1Skip:
         _ = await self._run(engine, nodes, budget, info, probe)
         _ = await self._run(engine, nodes, budget, info, probe)
         assert probe.l1_calls == 2
-        assert not engine._condense_l1_truncated
+        assert engine._condense_l1_truncations == 0
 
     async def test_level1_kept_when_level2_is_disabled(
         self, session_id, store, dag_store, est, event_bus, tmp_path
