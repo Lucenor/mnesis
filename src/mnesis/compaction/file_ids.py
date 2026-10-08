@@ -212,11 +212,31 @@ def _clean_path(raw: str) -> str:
     return raw.strip().strip("`'\"").rstrip(".")
 
 
+# Names that look like files (``Node.js``) but are products/frameworks.
+_NOT_FILES = frozenset(
+    "node.js next.js vue.js react.js nuxt.js express.js angular.js d3.js three.js ember.js "
+    "backbone.js nest.js chart.js socket.js deno.js bun.js".split()
+)
+# A path that starts like this is a path even without a file extension.
+_PATH_PREFIXES = ("/", "./", "../", "~/")
+
+
+def _has_known_extension(name: str) -> bool:
+    stem, dot, ext = name.rpartition(".")
+    return bool(dot and stem and ext.lower() in _PATH_EXTENSIONS)
+
+
 def _is_path(token: str, line: str, end: int) -> bool:
     """Whether the token ending at ``line[end]`` is a file path rather than code/prose.
 
-    A path has a ``/`` or a known file extension. Tokens touching ``@`` (e-mail),
-    URLs, calls (``name.ext(``) and bare file IDs are rejected. When unsure, no.
+    A path is a token whose last segment has a known file extension
+    (``src/a.py``, ``README.md``), or one with an explicit path prefix
+    (``/``, ``./``, ``../``, ``~/``) and a non-empty remainder. A bare ``/`` is
+    not enough: ``N/A``, ``TCP/IP``, ``and/or``, ``input/output`` and ``3/4`` are
+    prose, and a directory-looking ``a/b/c`` is too ambiguous to trust. Tokens
+    touching ``@`` (e-mail), URLs, calls (``name.ext(``), framework names
+    (``Node.js``), pure-numeric segments and bare file IDs are rejected. When
+    unsure, no.
     """
     token = token.rstrip(".")
     if not token or "@" in token or "://" in token or token.startswith("//"):
@@ -225,19 +245,25 @@ def _is_path(token: str, line: str, end: int) -> bool:
         return False
     if line[end : end + 1] == "(":
         return False
-    if "/" in token:
+    segments = [seg for seg in token.split("/") if seg]
+    if not segments or any(seg.isdigit() for seg in segments):
+        return False
+    if token.lower() in _NOT_FILES:
+        return False
+    if _has_known_extension(segments[-1]):
         return True
-    name, dot, ext = token.rpartition(".")
-    return bool(dot and name and ext.lower() in _PATH_EXTENSIONS)
+    return token.startswith(_PATH_PREFIXES) and any(c.isalpha() for c in token)
 
 
 def _heuristic_pairs(text: str) -> dict[str, str]:
     """Pair file IDs with the path written directly next to them.
 
-    Only adjacent pairs count: the path, a gap of at most three separator
-    characters (see ``_PAIR_GAP_RE``) and the ID, in either order. Each path
-    names at most one ID. A wrong path is worse than none, so an ID with no
-    adjacent path, or on a line where adjacency is ambiguous, stays unpaired.
+    Only unambiguous adjacent pairs count: the path, a gap of at most three
+    separator characters (see ``_PAIR_GAP_RE``) and the ID, in either order. A
+    pair is made only when the ID is adjacent to exactly one path *and* that
+    path to exactly one ID; ``file_A: src/a.py (file_B)`` pairs neither. A wrong
+    path is worse than none, so an ID with no adjacent path, or any ambiguity,
+    stays unpaired.
     """
     pairs: dict[str, str] = {}
     for line in text.splitlines():
@@ -249,26 +275,19 @@ def _heuristic_pairs(text: str) -> dict[str, str]:
             for m in _PATH_RE.finditer(line)
             if _is_path(m.group(), line, m.end()) and not _FILE_ID_RE.fullmatch(m.group())
         ]
-        used_paths: set[int] = set()
-        for im in id_matches:
-            chosen: int | None = None
-            # Prefer the path before the ID (``path (file_x)``), then after it.
+        adjacent: list[tuple[int, int]] = []  # (id index, path index)
+        for i, im in enumerate(id_matches):
             for j, pm in enumerate(paths):
-                if j in used_paths:
-                    continue
-                if pm.end() <= im.start() and _adjacent(line[pm.end() : im.start()]):
-                    chosen = j
-                    break
-            if chosen is None:
-                for j, pm in enumerate(paths):
-                    if j in used_paths:
-                        continue
-                    if pm.start() >= im.end() and _adjacent(line[im.end() : pm.start()]):
-                        chosen = j
-                        break
-            if chosen is not None:
-                used_paths.add(chosen)
-                pairs.setdefault(im.group(), _clean_path(paths[chosen].group()))
+                before = pm.end() <= im.start() and _adjacent(line[pm.end() : im.start()])
+                after = pm.start() >= im.end() and _adjacent(line[im.end() : pm.start()])
+                if before or after:
+                    adjacent.append((i, j))
+        for i, j in adjacent:
+            if (
+                sum(1 for a, _ in adjacent if a == i) == 1
+                and sum(1 for _, b in adjacent if b == j) == 1
+            ):
+                pairs.setdefault(id_matches[i].group(), _clean_path(paths[j].group()))
     return pairs
 
 
@@ -298,9 +317,10 @@ def extract_file_id_paths(text: str) -> dict[str, str]:
     Map each file ID in *text* to its path, where one can be determined.
 
     A pair recorded in a ``[LCM File IDs: ...]`` footer wins; otherwise an ID is
-    paired with the nearest path-like token on the same line (best effort: IDs
-    with no path on their line stay unpaired). The first pairing found for an
-    ID wins.
+    paired with a path written directly next to it (at most three separator
+    characters between them, e.g. ``path (file_x)`` or ``file_x: path``), and
+    only when that is unambiguous: an ID with no adjacent path, or sharing its
+    path with another ID, stays unpaired. The first pairing found for an ID wins.
 
     Args:
         text: Text that may contain file IDs, paths and a footer.

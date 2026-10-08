@@ -442,9 +442,9 @@ class TestRunAfterOutage:
 
 
 class TestCompactionRetryEvents:
-    """B3: compaction retries publish LLM_RETRY with source/stage/level."""
+    """B3: compaction retries publish LLM_RETRY with source/stage/compaction_level."""
 
-    async def test_retry_publishes_event_with_source_and_level(
+    async def test_retry_publishes_event_with_source_and_compaction_level(
         self, session_id, store, dag_store, estimator, event_bus, retry_config, monkeypatch
     ):
         calls: list[int] = []
@@ -634,9 +634,11 @@ class TestCloseAbortCompaction:
         from mnesis import MnesisSession
 
         calls: list[float] = []
+        started = asyncio.Event()
 
         async def slow_empty(**kwargs: object) -> str:
             calls.append(time.monotonic())
+            started.set()
             await asyncio.sleep(0.4)  # request on the wire
             return ""  # empty -> the level fails and the engine would escalate
 
@@ -648,8 +650,7 @@ class TestCloseAbortCompaction:
         failed: list[dict] = []
         session.subscribe(MnesisEvent.COMPACTION_FAILED, lambda e, p: failed.append(p))
         compaction = asyncio.create_task(session.compact())
-        while not calls:
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(started.wait(), timeout=5)
         with pytest.raises(TimeoutError):
             async with asyncio.timeout(0.05):
                 await session.close(abort_compaction=True)

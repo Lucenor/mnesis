@@ -153,10 +153,31 @@ class TestPathExtraction:
             f"{RATES} is NOT config.yaml (that one is {MIGRATE})",
             f"{RATES_PATH} (or other.yaml) -- file id: {RATES}",
             f"{RATES_PATH} content id {RATES}",
+            f"{RATES}: N/A",
+            f"{RATES} (and/or the backup)",
+            f"{RATES} (TCP/IP dump)",
+            f"{RATES} (3/4 done)",
+            f"{RATES} (input/output)",
+            f"{RATES} (Node.js build)",
+            f"{RATES}: Next.js",
+            f"{RATES}: Vue.js app",
+            f"{RATES}: src/a",  # directory-looking, no extension, no path prefix
+            f"{RATES}: {MIGRATE}: n/a",
         ],
     )
     def test_no_confident_wrong_pairs(self, line):
         assert extract_file_id_paths(line) == {}
+
+    def test_one_path_between_two_ids_pairs_neither(self):
+        line = f"{RATES}: src/a.py ({MIGRATE})"
+        assert extract_file_id_paths(line) == {}
+        assert extract_file_id_paths(f"{RATES} ({MIGRATE_PATH}) {MIGRATE}") == {RATES: MIGRATE_PATH}
+
+    @pytest.mark.parametrize(
+        "path", ["/etc/hosts", "./run.sh", "../lib/x", "~/notes/todo", "App.tsx"]
+    )
+    def test_prefixed_and_extension_paths_pair(self, path):
+        assert extract_file_id_paths(f"{path} ({RATES})") == {RATES: path}
 
     def test_each_path_names_one_id(self):
         pairs = extract_file_id_paths(f"{RATES} {MIGRATE}: scripts/m.py")
@@ -242,11 +263,11 @@ class TestPairsAreSecondaryToIds:
     def test_paths_dropped_when_paired_footer_does_not_fit(self, estimator):
         """Ids outrank paths: a tight budget keeps every id, bare."""
         ids = [f"file_{i:016x}" for i in range(40)]
-        long_path = "d/" * 40 + "x.py"
+        long_path = "d/" * 40
         msgs = []
         for i in range(8):
             text = " ".join(
-                f"{long_path}{j} ({fid})" for j, fid in enumerate(ids[i * 5 : i * 5 + 5])
+                f"{long_path}x{j}.py ({fid})" for j, fid in enumerate(ids[i * 5 : i * 5 + 5])
             )
             msg = Message(id=f"m{i}", session_id="s", role="user" if i % 2 == 0 else "assistant")
             msgs.append(MessageWithParts(message=msg, parts=[TextPart(text=text)]))
