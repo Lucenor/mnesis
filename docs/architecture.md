@@ -371,6 +371,59 @@ CompactFailed -> Idle: "COMPACTION_FAILED published\nstub result returned"
   This prevents sending an over-limit context to the provider (the retry is
   bounded so a context that cannot shrink cannot loop).
 
+- **Tool schemas.** The measure for both thresholds is the stored context plus
+  the serialized `tools` definitions of the latest `send(tools=...)` call
+  (estimated with the session model). They ride along with every request but
+  live outside the history, so leaving them out would let a tool-heavy session
+  cross the provider's limit while the thresholds see headroom.
+
+- **When compaction cannot help.** A run that ends at or above the soft
+  threshold with nothing left to summarise or condense (typically the protected
+  last two user turns plus live summaries alone exceed it) is *stalled*. Whether
+  work remains is judged from the history, not from token deltas: `record()` can
+  append during a long run, so the context growing says nothing about progress.
+  Re-running on every turn would spend LLM calls for nothing, so the *background*
+  (soft) trigger is paused (`CompactionEngine.stalled`) and logs a
+  `compaction_cannot_reduce_context` warning once. A new user turn re-arms it
+  (it can make older messages summarisable); a turn that arrives while a run is
+  in flight prevents that run from pausing on its stale view. The warning is
+  logged once per pause episode (reset when a run gets under the soft threshold
+  or finds work left). The pause never applies to the hard limit: the next
+  `send()` that finds the context over the hard limit still blocks on a
+  compaction run. Such a run makes no summarisation calls when nothing is
+  summarisable; the only LLM call it can make is a condensation, and only for a
+  set of live summary nodes that is new since the last condensation that failed
+  to shrink them even at the deterministic level (an LLM condensation that does
+  not shrink the nodes falls back to the deterministic level in the same run;
+  only if that also fails is the set remembered and skipped while unchanged). Level 3 is unaffected (a run always produces its
+  summary first), and the engine never truncates the protected tail to force a
+  fit: Level 3 runs only over the summarisable messages, so the last two user
+  turns, including the message being answered, stay raw. A manual `compact()`
+  always runs and re-evaluates the state.
+- **Blocking runs stop early.** The run that `send()` waits for at the hard limit
+  stops draining once the context is under the *soft* threshold (not the hard
+  limit); the rest of the drain is left to the background run that the post-turn
+  soft check schedules. The soft threshold is the target because the engine's
+  measure uses the session system prompt while `send()` checks the hard limit
+  with a per-turn `system_prompt` override: stopping just under hard would let
+  the override push the sent context back over it. As a bounded backstop, if
+  the rebuilt context is still over the hard limit and the run left work, `send()`
+  runs one more compaction to the full drain target (at most one extra run, no
+  loop). A background run can use up to `max_compaction_rounds` summarisation passes (each
+  Level 1 then Level 2 on failure), so the worst case is
+  `2 * max_compaction_rounds` sequential summariser calls (20 with the default);
+  typically 1 to 2.
+- **A session stuck above the soft threshold** (the protected turns plus live
+  summaries alone exceed it) re-arms on every new user turn, so it compacts once
+  per user turn: one summarisation of whatever left the protected tail plus a
+  condensation attempt. That is accepted: each run does real work (the turn that
+  just left the tail), and the alternative, staying paused, risks sending an
+  over-hard context.
+- **Not fixable by compaction.** A single user message larger than the usable
+  window, or a protected last-two-turns tail that is itself over the hard limit,
+  cannot be shrunk: those turns are never summarised, so the request is sent as
+  is (the builder may truncate older messages) and the provider may reject it.
+
 **What the thresholds measure.** Both compare against
 `BuiltContext.context_tokens`: the estimated size of the *current context
 window* — system prompt + live summary nodes + every raw message in
@@ -414,8 +467,25 @@ The inner sequence for each round:
 1. **Tool output pruning** — `ToolOutputPrunerAsync.prune()` tombstones stale
    tool outputs (see [ToolOutputPruner](#tooloutputpruner) below).
 
-2. **Summarisation** — `_run_summarisation()` attempts Level 1, then Level 2
-   (if enabled), then Level 3. Returns a `SummaryCandidate`.
+2. **Summarisation** — only the raw messages *still in the context*
+   (`context_items`; every message on a legacy database with no rows) are
+   summarised, so content already covered by a live summary is never summarised
+   twice. `_run_summarisation()` attempts Level 1, then Level 2 (if enabled),
+   then Level 3 and returns a `SummaryCandidate` whose span is exactly the
+   messages it covered. The summariser's input is capped (see below), taking the
+   *oldest* messages first; if that leaves summarisable messages and the context
+   is still above the condensation target, further passes (up to
+   `max_compaction_rounds`) summarise the rest, each as its own leaf. Newer turns
+   therefore stay verbatim until summarised, and nothing is swapped out of the
+   context without being summarised. Only the first pass may use Level 3, and it
+   runs over the summarisable messages only. If nothing is summarisable (only the
+   protected last two user turns), the leaf step is skipped rather than
+   truncating that tail. The summariser's request is sized to the compaction
+   model: `max_tokens` is bounded by its output limit, and the input cap leaves
+   room for `max_tokens` plus the prompt. File IDs outrank the model's
+   prose: a summary whose text plus footer exceeds the budget is rejected so the
+   run escalates (Level 2, then Level 3), and IDs are dropped (least recently
+   referenced first, as in Level 3) only when the footer alone cannot fit.
 
 3. **Commit** — `SummaryDAGStore.insert_node()` writes the summary as a
    `Message(is_summary=True)` row plus a `TextPart` and a `CompactionMarkerPart`.
@@ -443,11 +513,11 @@ sole coordination point between the compaction background task and the foregroun
 `send()` loop. The session's `compaction_in_progress` property reads this:
 
 ```python
-task = self._compaction_engine._pending_task
-return task is not None and not task.done()
+return self._compaction_engine.in_flight
 ```
 
-`close()` awaits this task before releasing the database connection, ensuring
+`close()` awaits this task, repeating until no handle remains (a run scheduled
+meanwhile is awaited too), before releasing the database connection, ensuring
 no in-flight write is interrupted.
 
 ---
@@ -463,11 +533,25 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
   are candidates for summarisation.
 
 - **Input cap**: `_apply_input_cap()` trims messages to at most 75% of the
-  compaction model's context window before passing them to the LLM. At least 3
-  messages are always included (`MIN_MESSAGES_TO_SUMMARISE = 3`).
+  compaction model's context window before passing them to the LLM, keeping the
+  oldest prefix. At least 3 messages are always included
+  (`MIN_MESSAGES_TO_SUMMARISE = 3`). The recorded span is that prefix, never the
+  uncapped input.
+
+- **Budget and estimator**: summaries must fit the *session* window, so the
+  budget is `ContextBudget(context_limit, max_output_tokens, compaction_output_budget)`
+  from the session's `ModelInfo` (including `model_overrides`); a bare engine
+  without model info assumes a 200K window. The engine counts tokens with the
+  session model's tokenizer (the same one `ContextBuilder` uses), so "fits
+  `budget.usable`" means fits the session context and a summary's `token_count`
+  matches what the builder charges for it. The summariser's own input cap uses the
+  compaction model's window (the session's resolved info when it is the same model).
 
 - **File ID preservation**: `extract_file_ids_from_messages()` collects all
-  `file_xxx` identifiers from the input. `append_file_ids_footer()` appends a
+  `file_xxx` identifiers from the full raw content of the input (text, tool
+  inputs, full tool outputs and errors, with no length cap), including tool
+  outputs the pruner has tombstoned: pruning only hides the output from the
+  context, the original stays in the append-only store. `append_file_ids_footer()` appends a
   `[LCM File IDs: ...]` footer to every summary. Level 3 collects IDs from
   *all* messages (including those truncated), ensuring file references are never
   lost even when prose is discarded.
@@ -483,8 +567,7 @@ Goal, Key Instructions & Constraints, Discoveries & Findings, Completed Work,
 In Progress, Remaining Work, Relevant Files & Directories, Other Important
 Context.
 
-`max_tokens` passed to the LLM equals `budget.reserved_output_tokens`
-(default 8,192).
+`max_tokens` passed to the LLM is `min(8192, budget.usable)`.
 
 Returns `None` if the LLM call fails, the result exceeds `budget.usable`, or
 the result is not smaller than the input.
@@ -509,7 +592,7 @@ the system from ever deadlocking on compaction.
 The `[LCM File IDs: ...]` footer is reserved *before* prose is sized, so messages
 are dropped before any file ID is. The assembled text is validated against
 `budget.usable` (shedding the oldest kept messages in O(n log n)). Only if the
-footer alone cannot fit in 85% of `budget.usable` (tens of thousands of distinct
+header plus the footer cannot fit in 85% of `budget.usable` (tens of thousands of distinct
 file IDs at default settings, or a `compaction_output_budget` close to its
 maximum) is it truncated, keeping the most recently referenced IDs, and a
 `level3_file_ids_truncated` warning is logged; the files themselves remain in the
@@ -538,8 +621,14 @@ condensation merges them. Three levels mirror summarisation:
   structured format.
 - **Condense L2** — `CONDENSE_LEVEL2_PROMPT` aggressive single-turn merge
   (each summary truncated to 800 chars).
-- **Condense L3** — deterministic: concatenates node content up to
-  `_CONDENSE_LEVEL3_MAX_TOKENS = 512` tokens. Always succeeds.
+- **Condense L3** — deterministic: concatenates node prose (own footers
+  stripped) up to `_CONDENSE_LEVEL3_MAX_TOKENS = 512` tokens, then appends one
+  file-ID footer. Bounded like Level 3: the footer and header are sized against
+  85% of `budget.usable` (IDs take precedence over prose and over the
+  `[Condensed from: ...]` parent list, which falls back to a minimal header), the
+  least recently referenced IDs are dropped with a warning only when they cannot
+  fit, and the assembled text is validated against `budget.usable`. Always
+  succeeds.
 
 ---
 
@@ -777,7 +866,8 @@ compaction loop cannot deadlock even if the LLM is unavailable or returns
 garbage.
 
 **Enforced by:** `_run_summarisation()` in `engine.py` — Level 3 is the final
-`if candidate is None:` branch with no failure path.
+fallback with no failure path (always taken on the first summarisation pass; later
+drain passes stop instead of truncating the protected tail).
 
 ### 4. File references are never lost through compaction
 

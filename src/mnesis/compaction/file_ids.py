@@ -14,9 +14,11 @@ This module provides:
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Iterable
 
-from mnesis.models.message import MessageWithParts
+from mnesis.models.message import MessageWithParts, TextPart, ToolPart
 from mnesis.models.summary import SummaryNode
 
 # Matches Mnesis file IDs: ``file_`` followed by 8-32 hex characters.
@@ -25,6 +27,9 @@ _FILE_ID_RE = re.compile(r"\bfile_[0-9a-fA-F]{8,32}\b")
 
 # Footer template for the ``[LCM File IDs: ...]`` footer.
 _FILE_IDS_FOOTER_TEMPLATE = "\n\n[LCM File IDs: {ids}]"
+
+# A trailing ``[LCM File IDs: ...]`` footer (with any blank lines before it).
+_EXISTING_FOOTER_RE = re.compile(r"\n*\[LCM File IDs:[^\]]*\]\s*$", re.MULTILINE)
 
 
 def extract_file_ids(text: str) -> list[str]:
@@ -50,11 +55,43 @@ def extract_file_ids(text: str) -> list[str]:
     return result
 
 
+def message_id_text(msg: MessageWithParts) -> str:
+    """
+    Return the full raw text of *msg* that may carry ``file_<hex>`` references.
+
+    Unlike the display rendering used for summarisation prompts, nothing is
+    truncated: text parts, tool inputs, tool outputs and tool errors are all
+    included in full. Pruned tool outputs (``compacted_at`` set) are included
+    too -- pruning only tombstones what the *context* shows; the original
+    output stays in the append-only store, and an ID that appears only there
+    must still reach the summary footer.
+
+    Args:
+        msg: Message to scan.
+
+    Returns:
+        The concatenated raw text, parts separated by newlines.
+    """
+    chunks: list[str] = []
+    for part in msg.parts:
+        if isinstance(part, TextPart):
+            chunks.append(part.text)
+        elif isinstance(part, ToolPart):
+            if part.input:
+                chunks.append(json.dumps(part.input, default=str))
+            if part.output:
+                chunks.append(part.output)
+            if part.error_message:
+                chunks.append(part.error_message)
+    return "\n".join(chunks)
+
+
 def extract_file_ids_from_messages(messages: list[MessageWithParts]) -> list[str]:
     """
     Extract all file IDs referenced across a list of messages.
 
-    Concatenates all text content from *messages* and deduplicates.
+    Scans the full raw content of every message (see :func:`message_id_text`),
+    including pruned tool outputs, and deduplicates.
 
     Args:
         messages: Messages to scan for file ID references.
@@ -62,17 +99,49 @@ def extract_file_ids_from_messages(messages: list[MessageWithParts]) -> list[str
     Returns:
         Ordered, deduplicated list of file ID strings.
     """
-    from mnesis.compaction.levels import _extract_text
-
     seen: set[str] = set()
     result: list[str] = []
     for msg in messages:
-        text = _extract_text(msg, max_chars=100_000)
-        for fid in extract_file_ids(text):
+        for fid in extract_file_ids(message_id_text(msg)):
             if fid not in seen:
                 seen.add(fid)
                 result.append(fid)
     return result
+
+
+def _recent_first(texts_newest_first: Iterable[str]) -> list[str]:
+    """Deduplicated file IDs ordered by *last* occurrence, scanning newest text first."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for text in texts_newest_first:
+        for fid in reversed(_FILE_ID_RE.findall(text)):
+            if fid not in seen:
+                seen.add(fid)
+                result.append(fid)
+    return result
+
+
+def most_recent_file_ids(messages: list[MessageWithParts]) -> list[str]:
+    """
+    File IDs ordered most-recently-referenced first, deduplicated.
+
+    "Recent" means the position of an ID's *last* occurrence in the full raw
+    content, scanning messages newest to oldest and each message back to front.
+
+    Args:
+        messages: Messages in chronological order.
+    """
+    return _recent_first(message_id_text(msg) for msg in reversed(messages))
+
+
+def most_recent_file_ids_from_nodes(nodes: list[SummaryNode]) -> list[str]:
+    """Like :func:`most_recent_file_ids`, over summary nodes in chronological order."""
+    return _recent_first(node.content for node in reversed(nodes))
+
+
+def strip_file_ids_footer(text: str) -> str:
+    """Remove a trailing ``[LCM File IDs: ...]`` footer from *text*, if present."""
+    return _EXISTING_FOOTER_RE.sub("", text)
 
 
 def collect_file_ids_from_nodes(nodes: list[SummaryNode]) -> list[str]:
@@ -119,7 +188,4 @@ def append_file_ids_footer(text: str, file_ids: list[str]) -> str:
     footer = _FILE_IDS_FOOTER_TEMPLATE.format(ids=ids_str)
 
     # Strip any existing footer before appending the authoritative one.
-    existing_footer_re = re.compile(r"\n*\[LCM File IDs:[^\]]*\]\s*$", re.MULTILINE)
-    text = existing_footer_re.sub("", text)
-
-    return text + footer
+    return strip_file_ids_footer(text) + footer

@@ -1536,10 +1536,14 @@ class TestSessionCoverageGaps:
     async def test_create_applies_model_overrides(self, tmp_path, monkeypatch):
         """create() applies model_overrides from MnesisConfig to ModelInfo."""
         from mnesis import MnesisConfig, MnesisSession
+        from mnesis.models.config import CompactionConfig
 
         monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
 
-        cfg = MnesisConfig(model_overrides={"context_limit": 8192})
+        cfg = MnesisConfig(
+            model_overrides={"context_limit": 8192, "max_output_tokens": 1024},
+            compaction=CompactionConfig(compaction_output_budget=1_000),
+        )
         session = await MnesisSession.create(
             model="anthropic/claude-opus-4-6",
             db_path=str(tmp_path / "test.db"),
@@ -1766,7 +1770,9 @@ class TestSessionCoverageGaps:
             engine.is_hard_overflow = lambda tokens, model: True  # type: ignore[method-assign]
             engine.is_overflow = lambda tokens, model: True  # type: ignore[method-assign]
 
-            async def _fresh(session_id: str, abort: object = None) -> CompactionResult:
+            async def _fresh(
+                session_id: str, abort: object = None, **kw: object
+            ) -> CompactionResult:
                 return _result("msg_fresh")
 
             engine.run_compaction = _fresh  # type: ignore[method-assign]

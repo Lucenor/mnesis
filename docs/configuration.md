@@ -24,7 +24,7 @@ Controls when and how context compaction fires.
 | Field | Default | Description |
 |---|---|---|
 | `auto` | `True` | Auto-trigger compaction on overflow |
-| `compaction_output_budget` | `20_000` | Tokens reserved as headroom for compaction summary output |
+| `compaction_output_budget` | `20_000` | Tokens reserved as headroom for compaction summary output. Range 1,000-100,000. Usable context is `context_limit - max_output_tokens - compaction_output_budget`, and summaries (including the Level 3 fallback) are sized against it, so it must be well below your model's window. Session creation/loading raises `ValueError` when the budget leaves no usable context (`context_limit - max_output_tokens <= compaction_output_budget`, e.g. a small `model_overrides` window) and logs a `compaction_output_budget_exceeds_usable_window` warning when the budget is at least as large as the usable window. |
 | `prune` | `True` | Run tool output pruning before compaction |
 | `prune_protect_tokens` | `40_000` | Token window from the end of history that is never pruned |
 | `prune_minimum_tokens` | `20_000` | Minimum prunable volume required before pruning fires |
@@ -32,7 +32,7 @@ Controls when and how context compaction fires.
 | `level2_enabled` | `True` | Attempt Level 2 compression before falling back to Level 3 |
 | `compaction_prompt` | `None` | Custom prompt string for Level 1/2 LLM summarisation. `None` = use the built-in agentic prompt |
 | `soft_threshold_fraction` | `0.6` | Fraction of usable context at which background compaction triggers (before hard threshold). Measured against the size of the current context window, not lifetime token usage. Also sets condensation's stop target: after summarising, summaries are condensed until the context is below half this threshold (`soft_threshold_fraction * 0.5` of usable; the 0.5 is not configurable). Advanced. |
-| `max_compaction_rounds` | `10` | Upper bound on condensation rounds per run. Each round merges all live summary nodes into one, so a run condenses at most once and this limit is effectively never reached. Advanced. |
+| `max_compaction_rounds` | `10` | Upper bound on condensation rounds per run, and on summarisation passes when the summariser's input cap (75% of the compaction model's window) forces several passes. Each condensation round merges all live summary nodes into one, so a run condenses at most once in practice. Advanced. |
 | `condensation_enabled` | `True` | Whether to attempt condensation of accumulated summary nodes. Advanced. |
 
 ### Tuning for large models
@@ -46,6 +46,45 @@ CompactionConfig(
     prune_minimum_tokens=50_000,
 )
 ```
+
+### Small windows: when session creation raises
+
+`MnesisSession.create()` and `load()` raise `ValueError` whenever
+`context_limit - max_output_tokens <= compaction_output_budget`, whether the
+budget was set explicitly or left at the default (20,000). **This is a breaking
+change for `model_overrides` users with small windows.** Those configs were
+already unusable before the check: no history fit next to the reserved headroom,
+so `context_for_next_turn()` returned a single message after four turns and
+compaction ran and blocked every turn. Mnesis now fails fast instead.
+
+Overrides that raise with the default budget (`max_output_tokens` is inherited
+from the model string unless you set it):
+
+| Model | `model_overrides` | `max_output_tokens` | Usable (`limit - out - 20,000`) |
+|---|---|---|---|
+| `ollama/llama3` | `context_limit=8_192` | inherited | negative |
+| `ollama/llama3` | `context_limit=8_192, max_output_tokens=2_048` | 2,048 | -13,856 |
+| `ollama/llama3` | `context_limit=16_384` | inherited | negative |
+| `gpt-4o` | `context_limit=32_768` | 16,384 (inherited) | -3,616 |
+| `anthropic/claude-opus-4-6` | `context_limit=50_000` | 32,000 (inherited) | -2,000 |
+| `o3-mini` | `context_limit=120_000` | 100,000 (inherited) | 0 |
+
+Fix either side of the inequality: lower `compaction_output_budget` (it only
+needs to cover the summary the compaction model writes, so a few thousand
+tokens suit a small window), or set `max_output_tokens` in `model_overrides`
+to the reply length you actually need instead of inheriting the model's maximum:
+
+```python
+MnesisConfig(
+    model_overrides={"context_limit": 32_768, "max_output_tokens": 4_096},
+    compaction=CompactionConfig(compaction_output_budget=4_000),
+)
+```
+
+A run that blocks `send()` at the hard limit stops once the context is under
+the soft threshold (leaving the rest for the background run; a bounded extra run
+covers a per-turn `system_prompt` that is larger than the session prompt); a background run can make up to `2 * max_compaction_rounds` sequential
+summariser calls in the worst case (20 with the default), typically 1 to 2.
 
 ### Custom compaction prompt
 

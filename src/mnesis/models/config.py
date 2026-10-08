@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -26,7 +27,8 @@ class CompactionConfig(BaseModel):
     be changed with a thorough understanding of the compaction loop:
 
     - ``soft_threshold_fraction`` — when to start early background compaction
-    - ``max_compaction_rounds`` — cap on summarise+condense cycles
+    - ``max_compaction_rounds`` — cap on condensation rounds and on summarisation
+      passes per compaction run
     - ``condensation_enabled`` — whether to merge accumulated summary nodes
     """
 
@@ -36,8 +38,14 @@ class CompactionConfig(BaseModel):
     compaction_output_budget: int = Field(
         default=20_000,
         ge=1_000,
-        le=200_000,
-        description="Tokens reserved as compaction headroom (output budget for summary).",
+        le=100_000,
+        description=(
+            "Tokens reserved as compaction headroom (output budget for summary). Subtracted "
+            "from the model window when computing usable tokens, so it must be well below the "
+            "window of the models you use; a session whose model window cannot accommodate it "
+            "(``context_limit - max_output_tokens <= compaction_output_budget``) is rejected at "
+            "construction."
+        ),
     )
 
     prune: bool = True
@@ -86,9 +94,10 @@ class CompactionConfig(BaseModel):
         ge=1,
         le=50,
         description=(
-            "[Advanced] Upper bound on condensation rounds per compaction run. Each round merges "
-            "all live summary nodes into one, so a run condenses at most once in practice "
-            "and this limit is effectively never reached."
+            "[Advanced] Upper bound on condensation rounds per compaction run, and on "
+            "summarisation passes when the summariser's input cap forces several. Each "
+            "condensation round merges all live summary nodes into one, so a run condenses "
+            "at most once in practice."
         ),
     )
 
@@ -383,4 +392,42 @@ class ModelInfo(BaseModel):
             context_limit=128_000,
             max_output_tokens=4_096,
             encoding="cl100k_base",
+        )
+
+
+def check_compaction_budget(compaction: CompactionConfig, model: ModelInfo) -> None:
+    """
+    Validate ``compaction_output_budget`` against *model*'s window.
+
+    Usable tokens are ``context_limit - max_output_tokens - compaction_output_budget``.
+
+    Args:
+        compaction: Compaction settings holding the budget.
+        model: Resolved model info (including ``model_overrides``).
+
+    Raises:
+        ValueError: If usable tokens would be zero or negative: no context
+            fits and level-3 compaction cannot produce a valid summary.
+
+    A warning is logged when the budget is at least as large as the usable
+    window itself (the reserved headroom exceeds what can be filled).
+    """
+    if model.context_limit <= 0:
+        return  # Compaction is disabled for unknown windows; nothing to check.
+    budget = compaction.compaction_output_budget
+    usable = model.context_limit - model.max_output_tokens - budget
+    if usable <= 0:
+        raise ValueError(
+            f"compaction_output_budget={budget:,} leaves no usable context for "
+            f"{model.model_id!r} (context_limit={model.context_limit:,}, "
+            f"max_output_tokens={model.max_output_tokens:,}). Lower "
+            "compaction.compaction_output_budget or raise the model's context_limit via "
+            "model_overrides."
+        )
+    if budget >= usable:
+        structlog.get_logger("mnesis.config").warning(
+            "compaction_output_budget_exceeds_usable_window",
+            model=model.model_id,
+            compaction_output_budget=budget,
+            usable_tokens=usable,
         )

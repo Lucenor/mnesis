@@ -218,7 +218,7 @@ class EventBus:
         if exc is not None:
             self._logger.error(
                 "event_handler_error",
-                event=str(event),
+                mnesis_event=str(event),
                 handler=getattr(handler, "__qualname__", repr(handler)),
                 error=str(exc),
                 exc_info=exc,
@@ -253,7 +253,7 @@ class EventBus:
             except Exception as exc:
                 self._logger.error(
                     "event_handler_error",
-                    event=str(event),
+                    mnesis_event=str(event),
                     handler=getattr(handler, "__qualname__", repr(handler)),
                     error=str(exc),
                 )
