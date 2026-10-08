@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from functools import partial
@@ -11,6 +12,11 @@ from typing import Any
 import structlog
 
 Handler = Callable[["MnesisEvent", dict[str, Any]], Awaitable[None] | None]
+
+
+async def _drive_awaitable(awaitable: Awaitable[Any]) -> None:
+    """Await a non-coroutine awaitable so it can run as a task."""
+    await awaitable
 
 
 class MnesisEvent(StrEnum):
@@ -229,7 +235,8 @@ class EventBus:
         Publish an event to all registered handlers.
 
         Sync handlers are called immediately in registration order.
-        Async handlers are scheduled as background tasks (non-blocking).
+        Async handlers (any awaitable return: coroutine, Future, or custom
+        ``__await__`` object) are scheduled as background tasks (non-blocking).
         Exceptions from any handler are logged and swallowed.
 
         Args:
@@ -240,14 +247,18 @@ class EventBus:
         for handler in all_handlers:
             try:
                 result = handler(event, payload)
-                if asyncio.iscoroutine(result):
+                if inspect.isawaitable(result):
                     try:
                         loop = asyncio.get_running_loop()
                     except RuntimeError:
                         # No running event loop — skip async handler
-                        result.close()
+                        if asyncio.iscoroutine(result):
+                            result.close()
                     else:
-                        task = loop.create_task(result)
+                        # create_task requires a coroutine; wrap Futures and
+                        # custom awaitables so they are awaited and errors logged.
+                        coro = result if asyncio.iscoroutine(result) else _drive_awaitable(result)
+                        task = loop.create_task(coro)
                         self._handler_tasks.add(task)
                         task.add_done_callback(partial(self._on_handler_done, event, handler))
             except Exception as exc:

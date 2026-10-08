@@ -92,6 +92,8 @@ def _make_llm_call(model: str) -> Any:
             messages=messages,
             max_tokens=max_tokens,
             temperature=0.2,
+            # Mnesis owns retry policy (RetryConfig); avoid double-retrying.
+            num_retries=0,
         )
         return response.choices[0].message.content or ""
 
@@ -112,7 +114,8 @@ class CompactionEngine:
     Orchestrates the full compaction protocol (summarise → condense → loop).
 
     Guarantees:
-    - ``run_compaction()`` never raises — errors are caught and Level 3 runs.
+    - ``run_compaction()`` never raises on failure — errors are caught and Level 3
+      runs. Only external task cancellation (``CancelledError``) propagates.
     - The resulting summary always fits within the token budget.
     - Level 3 (deterministic) is the final fallback and always succeeds.
     - Atomic SQLite commit per round: partial failures leave no inconsistent state.
@@ -444,7 +447,12 @@ class CompactionEngine:
         until_under_hard: bool = False,
     ) -> CompactionResult:
         """
-        Run the full compaction protocol. Never raises.
+        Run the full compaction protocol. Never raises on failure.
+
+        Setting ``abort`` ends the run with the stub failure result
+        (``level_used == 0``) and a ``COMPACTION_FAILED`` event. External task
+        cancellation (``Task.cancel()``) is different: it is not swallowed and
+        ``asyncio.CancelledError`` propagates to the caller.
 
         Steps (per round, up to ``max_compaction_rounds``):
         1. Run tool output pruner (reduce input size first).
@@ -472,30 +480,46 @@ class CompactionEngine:
                 model_override=model_override,
                 until_under_hard=until_under_hard,
             )
+        except asyncio.CancelledError as exc:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling() > 0:
+                # Genuine task cancellation (Task.cancel(), TaskGroup, shutdown):
+                # leave state consistent and propagate so cancellation is honored.
+                self._more_to_compact = False
+                raise
+            # Raised by this engine's own ``abort`` event, not by the task being
+            # cancelled: report it as a failed run like any other.
+            return self._failure_result(session_id, exc, start_ms)
         except Exception as exc:
-            elapsed = time.time() * 1000 - start_ms
-            self._more_to_compact = False  # no longer reflects a completed run
-            self._logger.error(
-                "compaction_unexpected_error",
-                session_id=session_id,
-                error=str(exc),
-                elapsed_ms=elapsed,
-            )
-            self._event_bus.publish(
-                MnesisEvent.COMPACTION_FAILED,
-                {"session_id": session_id, "error": str(exc)},
-            )
-            # Return a stub result indicating failure without crashing
-            return CompactionResult(
-                session_id=session_id,
-                summary_message_id="",
-                level_used=0,
-                compacted_message_count=0,
-                summary_token_count=0,
-                tokens_before=0,
-                tokens_after=0,
-                elapsed_ms=elapsed,
-            )
+            return self._failure_result(session_id, exc, start_ms)
+
+    def _failure_result(
+        self, session_id: str, exc: BaseException, start_ms: float
+    ) -> CompactionResult:
+        """Log and publish a failed run; return the documented stub result."""
+        elapsed = time.time() * 1000 - start_ms
+        self._more_to_compact = False  # no longer reflects a completed run
+        self._logger.error(
+            "compaction_unexpected_error",
+            session_id=session_id,
+            error=str(exc),
+            elapsed_ms=elapsed,
+        )
+        self._event_bus.publish(
+            MnesisEvent.COMPACTION_FAILED,
+            {"session_id": session_id, "error": str(exc)},
+        )
+        # Return a stub result indicating failure without crashing
+        return CompactionResult(
+            session_id=session_id,
+            summary_message_id="",
+            level_used=0,
+            compacted_message_count=0,
+            summary_token_count=0,
+            tokens_before=0,
+            tokens_after=0,
+            elapsed_ms=elapsed,
+        )
 
     # ── Internal implementation ─────────────────────────────────────────────────
 

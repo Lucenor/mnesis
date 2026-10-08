@@ -83,3 +83,62 @@ class TestAsyncHandlerTasks:
 
         assert ran == []
         assert bus._handler_tasks == set()
+
+
+class TestNonCoroutineAwaitables:
+    async def test_future_returning_handler_is_awaited(self) -> None:
+        bus = EventBus()
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def handler(event: MnesisEvent, payload: dict) -> asyncio.Future[None]:
+            return fut
+
+        bus.subscribe(MnesisEvent.SESSION_CREATED, handler)
+        bus.publish(MnesisEvent.SESSION_CREATED, {})
+        assert len(bus._handler_tasks) == 1
+        fut.set_result(None)
+        await asyncio.sleep(0.01)
+        assert bus._handler_tasks == set()
+
+    async def test_custom_awaitable_handler_runs(self) -> None:
+        bus = EventBus()
+        seen: list[str] = []
+
+        class Custom:
+            def __await__(self):  # type: ignore[no-untyped-def]
+                seen.append("ran")
+                yield from asyncio.sleep(0).__await__()
+
+        def handler(event: MnesisEvent, payload: dict) -> Custom:
+            return Custom()
+
+        bus.subscribe(MnesisEvent.SESSION_CREATED, handler)
+        bus.publish(MnesisEvent.SESSION_CREATED, {})
+        await asyncio.sleep(0.01)
+        assert seen == ["ran"]
+        assert bus._handler_tasks == set()
+
+    async def test_failing_future_is_logged(self) -> None:
+        logger = _CapturingLogger()
+        bus = EventBus(logger=logger)  # type: ignore[arg-type]
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        fut.set_exception(RuntimeError("fut boom"))
+
+        bus.subscribe(MnesisEvent.SESSION_CREATED, lambda e, p: fut)
+        bus.publish(MnesisEvent.SESSION_CREATED, {})
+        await asyncio.sleep(0.01)
+        assert len(logger.errors) == 1
+        assert logger.errors[0]["error"] == "fut boom"
+        assert logger.errors[0]["mnesis_event"] == str(MnesisEvent.SESSION_CREATED)
+
+    def test_non_coroutine_awaitable_without_loop_is_skipped(self) -> None:
+        bus = EventBus()
+
+        class Custom:
+            def __await__(self):  # type: ignore[no-untyped-def]
+                raise AssertionError("must not be awaited without a loop")
+                yield
+
+        bus.subscribe(MnesisEvent.SESSION_CREATED, lambda e, p: Custom())
+        bus.publish(MnesisEvent.SESSION_CREATED, {})
+        assert bus._handler_tasks == set()

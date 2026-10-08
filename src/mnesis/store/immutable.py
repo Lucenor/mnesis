@@ -632,21 +632,18 @@ class ImmutableStore:
             set_clauses.append("completed_at = ?")
             params.append(completed_at)
 
-        if output is not None or error_message is not None:
-            # Read-modify-write on content JSON
-            async with conn.execute(
-                "SELECT content FROM message_parts WHERE id = ?", (part_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row is None:
-                raise PartNotFoundError(part_id)
-            content_dict = json.loads(row[0])
-            if output is not None:
-                content_dict["output"] = output
-            if error_message is not None:
-                content_dict["error_message"] = error_message
-            set_clauses.append("content = ?")
-            params.append(json.dumps(content_dict))
+        # Merge into the content JSON inside the UPDATE itself (json_set), so
+        # concurrent updates to different fields cannot lose each other's write
+        # via a read-modify-write race. A text bind is stored as a JSON string.
+        json_updates: list[str] = []
+        if output is not None:
+            json_updates.append("'$.output', ?")
+            params.append(output)
+        if error_message is not None:
+            json_updates.append("'$.error_message', ?")
+            params.append(error_message)
+        if json_updates:
+            set_clauses.append(f"content = json_set(content, {', '.join(json_updates)})")
 
         if not set_clauses:
             return
@@ -781,29 +778,43 @@ class ImmutableStore:
 
         Args:
             session_id: The session to query.
-            since_message_id: If provided, returns only messages created after
-                the message with this ID.
+            since_message_id: If provided, returns only messages after the
+                message with this ID, in insertion order (``created_at`` with
+                insertion order as tie-breaker, so same-millisecond messages
+                inserted after the boundary are included).
 
         Returns:
-            List of Message objects ordered by created_at ASC.
+            List of Message objects ordered by ``created_at`` then insertion order.
+
+        Raises:
+            MessageNotFoundError: If ``since_message_id`` is not a message of
+                ``session_id`` (including IDs belonging to another session).
         """
         conn = self._conn_or_raise()
 
         if since_message_id is not None:
+            # Compare (created_at, rowid) as a pair: created_at has millisecond
+            # resolution, so rowid (insertion order) breaks ties and keeps
+            # same-millisecond messages inserted after the boundary.
             async with conn.execute(
-                "SELECT created_at FROM messages WHERE id=?", (since_message_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
-            since_ts = row[0] if row else 0
-            async with conn.execute(
-                "SELECT * FROM messages"
-                " WHERE session_id=? AND created_at>? ORDER BY created_at ASC",
-                (session_id, since_ts),
+                "SELECT m.* FROM messages m, messages b"
+                " WHERE b.id=? AND b.session_id=? AND m.session_id=?"
+                " AND (m.created_at, m.rowid) > (b.created_at, b.rowid)"
+                " ORDER BY m.created_at ASC, m.rowid ASC",
+                (since_message_id, session_id, session_id),
             ) as cursor:
                 rows = await cursor.fetchall()
+            if not rows:
+                # Distinguish "nothing after the boundary" from "no such boundary".
+                async with conn.execute(
+                    "SELECT 1 FROM messages WHERE id=? AND session_id=?",
+                    (since_message_id, session_id),
+                ) as cursor:
+                    if await cursor.fetchone() is None:
+                        raise MessageNotFoundError(since_message_id)
         else:
             async with conn.execute(
-                "SELECT * FROM messages WHERE session_id=? ORDER BY created_at ASC",
+                "SELECT * FROM messages WHERE session_id=? ORDER BY created_at ASC, rowid ASC",
                 (session_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -862,6 +873,9 @@ class ImmutableStore:
 
         Returns:
             List of MessageWithParts in chronological order.
+
+        Raises:
+            MessageNotFoundError: If ``since_message_id`` is not in ``session_id``.
         """
         messages = await self.get_messages(session_id, since_message_id=since_message_id)
         if not messages:
