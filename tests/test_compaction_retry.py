@@ -611,6 +611,24 @@ class TestCloseAbortCompaction:
         assert result.level_used == 0 and result.summary_message_id == ""
         assert failed and failed[0]["aborted"] is True
 
+    async def test_interrupted_close_clears_the_abort_flag(self, tmp_path, monkeypatch):
+        """A close() that times out while draining must not leave every later run aborting."""
+        session, _entered = await self._session(tmp_path, monkeypatch, base_delay=0.05)
+        engine = session._compaction_engine
+        real_wait = engine.wait_for_pending
+
+        async def stuck() -> None:
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(engine, "wait_for_pending", stuck)
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.1):
+                await session.close(abort_compaction=True)
+        assert not session._compaction_abort.is_set()
+
+        monkeypatch.setattr(engine, "wait_for_pending", real_wait)
+        await session.close()
+
     async def test_default_close_waits_for_the_run(self, tmp_path, monkeypatch):
         """Without the option the run finishes (L3 after the outage) before close returns."""
         session, entered = await self._session(tmp_path, monkeypatch, base_delay=0.05)

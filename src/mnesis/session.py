@@ -1234,23 +1234,28 @@ class MnesisSession:
         Publishes :attr:`~mnesis.events.bus.MnesisEvent.SESSION_CLOSED` after
         cleanup.
         """
-        # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
-        if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
-            self._retry_sleep_task.cancel()
-        if abort_compaction:
-            self._compaction_abort.set()
-        # Await any background send() tasks spawned by stream() so the DB is
-        # not closed while a turn is still being persisted.
-        if self._background_send_tasks:
-            await asyncio.gather(*self._background_send_tasks, return_exceptions=True)
-        # Drain: a finished run's handle is released by ``wait_for_pending``, but a
-        # run scheduled meanwhile replaces it and must be awaited too.
-        while True:
-            _ = await self._compaction_engine.wait_for_pending()
-            if not self._compaction_engine.has_pending:
-                break
-        self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
-        await self._store.close()
+        try:
+            # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
+            if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
+                self._retry_sleep_task.cancel()
+            if abort_compaction:
+                self._compaction_abort.set()
+            # Await any background send() tasks spawned by stream() so the DB is
+            # not closed while a turn is still being persisted.
+            if self._background_send_tasks:
+                await asyncio.gather(*self._background_send_tasks, return_exceptions=True)
+            # Drain: a finished run's handle is released by ``wait_for_pending``, but a
+            # run scheduled meanwhile replaces it and must be awaited too.
+            while True:
+                _ = await self._compaction_engine.wait_for_pending()
+                if not self._compaction_engine.has_pending:
+                    break
+            self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
+            await self._store.close()
+        finally:
+            # An interrupted close() (e.g. timed out while draining) leaves the session
+            # usable; the abort flag must not stay set and abort every later run.
+            self._compaction_abort.clear()
         self._logger.info("session_closed", session_id=self._session_id)
 
     async def __aenter__(self) -> MnesisSession:
