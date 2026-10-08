@@ -1221,7 +1221,10 @@ class MnesisSession:
         so the history is simply left for the next session to compact. An LLM
         request already on the wire is not interrupted: the run stops when it
         returns. A boolean is used rather than a timeout because an interrupted
-        ``close()`` could not release the database connection.
+        ``close()`` could not release the database connection. If ``close()`` is
+        interrupted anyway (e.g. wrapped in ``asyncio.timeout``), the abort stays in
+        force until the in-flight run ends and is cleared then, so later runs on the
+        still-open session are not aborted.
 
         Args:
             abort_compaction: Abort the in-flight compaction instead of waiting

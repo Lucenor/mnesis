@@ -311,8 +311,7 @@ class ContextBuilder:
         """``True`` for an assistant message that would render to empty/whitespace content."""
         if msg.role != "assistant":
             return False
-        content = self._convert_message(msg).content
-        return not (content if isinstance(content, str) else str(content)).strip()
+        return not str(self._convert_message(msg).content).strip()
 
     def _convert_message(self, msg_with_parts: MessageWithParts) -> LLMMessage:
         """Convert a MessageWithParts to an LLMMessage for the provider API."""

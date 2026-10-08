@@ -971,7 +971,9 @@ def level3_deterministic(
 # ── Condensation ───────────────────────────────────────────────────────────────
 
 
-_SUMMARIES_WRAPPER = "<summaries>\n\n</summaries>"
+# What surrounds the summaries in the request, after the prompt: the blank line, the
+# tags and their newlines (see the ``f"{prompt}\n\n<summaries>\n...\n</summaries>"`` below).
+_SUMMARIES_WRAPPER = "\n\n<summaries>\n\n</summaries>"
 _CONDENSE_L1_SEPARATOR = "\n\n---\n\n"
 _CONDENSE_L2_SEPARATOR = "\n\n"
 
@@ -1008,11 +1010,13 @@ def _fit_condensation_nodes(
         model_context_limit - reserved_tokens,
     )
     # The joiners between summaries and the ``<summaries>`` wrapper are sent too.
+    # Each piece is counted separately, so +1 per piece covers estimator rounding
+    # (the sum must never undercount the assembled request).
     joiner = cap_estimator.estimate(separator)
-    used = cap_estimator.estimate(_SUMMARIES_WRAPPER)
+    used = cap_estimator.estimate(_SUMMARIES_WRAPPER) + 1
     count = 0
     for text in texts:
-        tokens = cap_estimator.estimate(text) + (joiner if count else 0)
+        tokens = cap_estimator.estimate(text) + 1 + (joiner if count else 0)
         if used + tokens > max_input:
             break
         used += tokens

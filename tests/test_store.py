@@ -1937,3 +1937,55 @@ class TestAtomicNodeCommit:
                 dup, id_generator=gen, remove_item_ids=["node_b"], supersede_node_ids=["node_b"]
             )
         await self._assert_untouched(session_id, store, dag_store)
+
+    async def test_duplicate_part_id_names_the_part_not_the_node(
+        self, session_id, store, dag_store
+    ):
+        from mnesis.store.immutable import DuplicateIDError
+
+        await self._setup(session_id, store, dag_store)
+        await store.append_message(make_message(session_id, role="user", msg_id="msg_host"))
+        await store.append_part(make_raw_part("msg_host", session_id, part_id="part_taken"))
+        node = self._node(session_id, "node_new")
+        with pytest.raises(DuplicateIDError) as info:
+            _ = await dag_store.commit_summary_node(node, id_generator=lambda: "part_taken")
+        assert info.value.record_id == "part_taken"
+        assert "node_new" not in str(info.value)
+
+    async def test_unknown_session_raises_session_not_found(self, store, dag_store):
+        from mnesis.store.immutable import SessionNotFoundError
+
+        node = self._node("sess_missing", "node_x")
+        with pytest.raises(SessionNotFoundError):
+            _ = await dag_store.commit_summary_node(node, id_generator=lambda: "part_x")
+
+    async def test_existing_part_id_falls_back_to_the_first_part(self, store, dag_store):
+        a = make_raw_part("m", "s", part_id="part_a")
+        b = make_raw_part("m", "s", part_id="part_b")
+        assert await dag_store._existing_part_id(a, b) == "part_a"
+
+
+class TestMarkSupersededRollback:
+    async def test_failed_transaction_leaves_nodes_visible(self, session_id, store, dag_store):
+        await _insert_leaf_node(dag_store, session_id, "node_a")
+        await _insert_leaf_node(dag_store, session_id, "node_b")
+        conn = store._conn
+        orig = conn.execute
+
+        def boom(sql, *args, **kwargs):
+            if "SET superseded=1" in sql:
+
+                async def fail():
+                    raise RuntimeError("injected")
+
+                return fail()
+            return orig(sql, *args, **kwargs)
+
+        conn.execute = boom
+        try:
+            with pytest.raises(RuntimeError, match="injected"):
+                await dag_store.mark_superseded(["node_a"])
+        finally:
+            conn.execute = orig
+        assert dag_store._superseded_ids == set()
+        assert {n.id for n in await dag_store.get_active_nodes(session_id)} == {"node_a", "node_b"}

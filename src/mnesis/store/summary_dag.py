@@ -11,7 +11,7 @@ import structlog
 
 from mnesis.models.message import Message
 from mnesis.models.summary import MessageSpan, SummaryNode
-from mnesis.store.immutable import ImmutableStore, RawMessagePart
+from mnesis.store.immutable import DuplicateIDError, ImmutableStore, RawMessagePart
 
 
 class SummaryDAGStore:
@@ -46,13 +46,15 @@ class SummaryDAGStore:
         Args:
             node_ids: IDs of the summary nodes consumed by a condensation.
         """
-        self._superseded_ids.update(node_ids)
         async with self._store._transaction() as conn:
             for node_id in node_ids:
                 await conn.execute(
                     "UPDATE summary_nodes SET superseded=1 WHERE id=?",
                     (node_id,),
                 )
+        # Mirrored in memory only once the transaction has committed: after a
+        # rollback the nodes are still active and must stay visible.
+        self._superseded_ids.update(node_ids)
         self._logger.debug(
             "nodes_marked_superseded",
             node_ids=node_ids,
@@ -205,6 +207,18 @@ class SummaryDAGStore:
         """
         return await self.commit_summary_node(node, id_generator=id_generator)
 
+    async def _existing_part_id(self, *parts: RawMessagePart) -> str:
+        """The first of *parts* whose id is already stored (after a failed commit)."""
+        conn = self._store._conn_or_raise()
+        async with self._store._lock:
+            for part in parts:
+                async with conn.execute(
+                    "SELECT 1 FROM message_parts WHERE id=?", (part.id,)
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        return part.id
+        return parts[0].id
+
     async def commit_summary_node(
         self,
         node: SummaryNode,
@@ -282,7 +296,13 @@ class SummaryDAGStore:
                         "UPDATE summary_nodes SET superseded=1 WHERE id=?", (superseded_id,)
                     )
         except aiosqlite.IntegrityError as exc:
-            raise store._map_message_integrity_error(exc, summary_message) from exc
+            if "FOREIGN KEY" in str(exc):
+                raise store._map_message_integrity_error(exc, summary_message) from exc
+            # A UNIQUE conflict: name the row that actually collided (SQLite says
+            # ``UNIQUE constraint failed: <table>.<column>``).
+            if "message_parts" in str(exc):
+                raise DuplicateIDError(await self._existing_part_id(text_raw, marker_raw)) from exc
+            raise DuplicateIDError(node.id) from exc
         # In-memory mirror, updated only once the transaction has committed.
         self._superseded_ids.update(supersede_node_ids or ())
 

@@ -509,3 +509,51 @@ class TestCondenseLevel1Skip:
         cand = await self._run(engine, nodes, budget, info, probe)
         assert cand.compaction_level == 1
         assert probe.l1_calls == 1
+
+
+class TestRequestAlwaysFitsWindow:
+    """The assembled request (prompt + max_tokens) never exceeds the compaction window."""
+
+    async def test_seeded_sweep_over_window_sizes(self, est, budget):
+        import random
+
+        rnd = random.Random(3)
+        words = "alpha beta gamma delta src/a.py file_0123456789abcdef 42 the of and".split()
+        for _ in range(120):
+            window = rnd.choice([2048, 4096, 8192])
+            max_out = rnd.choice([256, 512, 1000, 1800])
+            nodes = []
+            for i in range(rnd.randint(2, 9)):
+                content = f"## Goal\\nn{i} " + " ".join(
+                    rnd.choice(words) for _ in range(rnd.randint(20, 900))
+                )
+                nodes.append(
+                    SummaryNode(
+                        id=f"n{i}",
+                        session_id="s",
+                        kind="leaf",
+                        span_start_message_id="a",
+                        span_end_message_id="b",
+                        content=content,
+                        token_count=len(content) // 4,
+                    )
+                )
+            for fn in (condense_level1, condense_level2):
+                seen: list[tuple[str, int]] = []
+
+                async def rec(seen=seen, **kw: Any) -> str:
+                    seen.append((kw["messages"][0]["content"], kw["max_tokens"]))
+                    return "## Goal\\nmerged"
+
+                _ = await fn(
+                    nodes,
+                    "m",
+                    budget,
+                    est,
+                    rec,
+                    model_max_output_tokens=max_out,
+                    model_context_limit=window,
+                    compaction_estimator=est,
+                )
+                for prompt, max_tokens in seen:
+                    assert est.estimate(prompt) + max_tokens <= window
