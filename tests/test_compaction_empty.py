@@ -8,7 +8,6 @@ import types
 import pytest
 
 import mnesis.compaction.engine as engine_mod
-from mnesis.compaction.engine import CompactionEngine, CompactionTruncatedError
 from mnesis.compaction.levels import condense_level1, condense_level2
 from mnesis.models.config import MnesisConfig
 from mnesis.models.message import ContextBudget
@@ -19,14 +18,16 @@ _GOOD = "## Goal\nreal summary\n\n## Completed Work\n- done\n"
 _MODEL = "anthropic/claude-opus-4-6"
 
 
-async def _engine(session_id, store, dag_store, estimator, event_bus, config) -> CompactionEngine:
+async def _engine(
+    session_id, store, dag_store, estimator, event_bus, config
+) -> engine_mod.CompactionEngine:
     for i in range(8):
         msg = make_message(
             session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_empty_{i}"
         )
         await store.append_message(msg)
         await store.append_part(make_raw_part(msg.id, session_id, part_id=f"part_empty_{i}"))
-    return CompactionEngine(
+    return engine_mod.CompactionEngine(
         store, dag_store, estimator, event_bus, config, session_model="anthropic/claude-haiku-4-5"
     )
 
@@ -100,7 +101,7 @@ class TestEmptyCompletion:
     async def test_engine_condensation_escalates_to_nonempty_level3(
         self, store, dag_store, event_bus, estimator
     ):
-        engine = CompactionEngine(
+        engine = engine_mod.CompactionEngine(
             store, dag_store, estimator, event_bus, MnesisConfig(), session_model=_MODEL
         )
         budget = ContextBudget(
@@ -131,7 +132,7 @@ class TestTruncatedCompletion:
 
     async def test_length_finish_reason_raises(self, monkeypatch):
         self._fake_litellm(monkeypatch, "length")
-        with pytest.raises(CompactionTruncatedError):
+        with pytest.raises(engine_mod.CompactionTruncatedError):
             await engine_mod._make_llm_call("m")(
                 messages=[{"role": "user", "content": "x"}], max_tokens=10
             )
@@ -149,7 +150,7 @@ class TestTruncatedCompletion:
         from mnesis.retry import is_retryable
         from tests.test_compaction import _make_messages_with_parts
 
-        assert not is_retryable(CompactionTruncatedError("x"))
+        assert not is_retryable(engine_mod.CompactionTruncatedError("x"))
 
         self._fake_litellm(monkeypatch, "length")
         llm = engine_mod._make_llm_call("m")

@@ -9,7 +9,6 @@ import pytest
 from litellm.exceptions import AuthenticationError, RateLimitError
 
 import mnesis.compaction.engine as engine_mod
-from mnesis.compaction.engine import CompactionEngine
 from mnesis.events.bus import MnesisEvent
 from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig, StoreConfig
 from mnesis.retry import call_with_retry
@@ -30,14 +29,16 @@ def retry_config(tmp_path) -> MnesisConfig:
     )
 
 
-async def _engine(session_id, store, dag_store, estimator, event_bus, config) -> CompactionEngine:
+async def _engine(
+    session_id, store, dag_store, estimator, event_bus, config
+) -> engine_mod.CompactionEngine:
     for i in range(8):
         msg = make_message(
             session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_retry_{i}"
         )
         await store.append_message(msg)
         await store.append_part(make_raw_part(msg.id, session_id, part_id=f"part_retry_{i}"))
-    return CompactionEngine(
+    return engine_mod.CompactionEngine(
         store,
         dag_store,
         estimator,
@@ -154,7 +155,9 @@ class TestCompactionRetry:
     async def test_failure_payload_not_aborted_on_error(
         self, session_id, store, dag_store, estimator, event_bus, config
     ):
-        engine = CompactionEngine(store, dag_store, estimator, event_bus, config, session_model="m")
+        engine = engine_mod.CompactionEngine(
+            store, dag_store, estimator, event_bus, config, session_model="m"
+        )
         failed: list[dict] = []
         event_bus.subscribe(MnesisEvent.COMPACTION_FAILED, lambda e, p: failed.append(p))
         result = engine._failure_result(session_id, RuntimeError("boom"), time.time() * 1000)
