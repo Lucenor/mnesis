@@ -296,3 +296,9 @@ class TestPathsRankBelowProse:
         without = level3_deterministic(msgs, budget, estimator)
         assert strip_file_ids_footer(with_paths.text) == strip_file_ids_footer(without.text)
         assert with_paths.token_count <= budget.usable
+
+
+def test_paths_that_fit_ignores_ids_without_a_path(estimator):
+    from mnesis.compaction.levels import _paths_that_fit
+
+    assert _paths_that_fit([RATES], {MIGRATE: MIGRATE_PATH}, 0, 10_000, estimator) == {}

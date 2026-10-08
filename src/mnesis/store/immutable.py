@@ -1192,9 +1192,10 @@ class ImmutableStore:
         remove_item_ids: list[str],
         summary_id: str,
     ) -> None:
-        """The swap of :meth:`swap_context_items` on *conn*; the caller owns the transaction."""
-        if not remove_item_ids:
-            return
+        """The swap of :meth:`swap_context_items` on *conn*; the caller owns the transaction.
+
+        *remove_item_ids* must be non-empty (both callers check).
+        """
         now_str = str(int(time.time() * 1000))
         placeholders = ",".join("?" * len(remove_item_ids))
         async with conn.execute(

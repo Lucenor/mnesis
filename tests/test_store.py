@@ -1926,3 +1926,14 @@ class TestAtomicNodeCommit:
         task = await self._interrupted(session_id, store, dag_store, cancel=True)
         assert task.cancelled()
         await self._assert_untouched(session_id, store, dag_store)
+
+    async def test_duplicate_node_id_raises_and_commits_nothing(self, session_id, store, dag_store):
+        from mnesis.store.immutable import DuplicateIDError
+
+        gen = await self._setup(session_id, store, dag_store)
+        dup = self._node(session_id, "node_a")  # id already taken by a leaf
+        with pytest.raises(DuplicateIDError):
+            _ = await dag_store.commit_summary_node(
+                dup, id_generator=gen, remove_item_ids=["node_b"], supersede_node_ids=["node_b"]
+            )
+        await self._assert_untouched(session_id, store, dag_store)
