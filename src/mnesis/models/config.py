@@ -191,7 +191,8 @@ class OperatorConfig(BaseModel):
 
 class RetryConfig(BaseModel):
     """
-    Configuration for automatic retry of transient LLM errors in ``send()``.
+    Configuration for automatic retry of transient LLM errors in ``send()`` and
+    in compaction (summarisation and condensation) calls.
 
     Retry is opt-in: the default ``max_retries=0`` means ``send()`` fails
     immediately on any LLM error, preserving the pre-0.3.0 behaviour.
@@ -212,7 +213,9 @@ class RetryConfig(BaseModel):
     **litellm num_retries interaction**
 
     Mnesis explicitly passes ``num_retries=0`` to ``litellm.acompletion()`` to
-    disable litellm's built-in retry mechanism and prevent double-retrying.
+    disable litellm's built-in retry mechanism and prevent double-retrying;
+    ``RetryConfig`` governs both ``send()`` and compaction calls. A hard-limit
+    ``send()`` waits for compaction, so it can wait through compaction retries.
     If you set ``max_retries > 0`` here, all retry logic is owned by Mnesis:
     backoff, jitter, event publication, and cancellation via ``close()``.
     """

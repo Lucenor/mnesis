@@ -785,7 +785,8 @@ class TestCompactionEngine:
         assert engine._more_to_compact is False
 
     async def test_make_llm_call_disables_litellm_retries(self, monkeypatch):
-        """Compaction/condensation calls pass num_retries=0 (Mnesis owns retries)."""
+        """Compaction calls pass num_retries=0: RetryConfig (see test_compaction_retry.py)
+        owns retries, so LiteLLM must not retry as well."""
         import sys
         import types
 

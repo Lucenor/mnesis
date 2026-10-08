@@ -58,9 +58,14 @@ from mnesis.events.bus import EventBus, MnesisEvent
 from mnesis.models.config import MnesisConfig, ModelInfo
 from mnesis.models.message import CompactionResult, ContextBudget, TokenUsage
 from mnesis.models.summary import SummaryNode
+from mnesis.retry import call_with_retry
 from mnesis.store.immutable import ImmutableStore
 from mnesis.store.summary_dag import SummaryDAGStore
 from mnesis.tokens.estimator import TokenEstimator
+
+
+class CompactionTruncatedError(Exception):
+    """The compaction model stopped at its output limit (``finish_reason="length"``)."""
 
 
 def _make_llm_call(model: str) -> Any:
@@ -92,10 +97,20 @@ def _make_llm_call(model: str) -> Any:
             messages=messages,
             max_tokens=max_tokens,
             temperature=0.2,
-            # Mnesis owns retry policy (RetryConfig); avoid double-retrying.
+            # RetryConfig governs both send() and compaction calls (see
+            # ``call_with_retry``); litellm's own retries are disabled to avoid
+            # double-retrying.
             num_retries=0,
         )
-        return response.choices[0].message.content or ""
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            # A summary cut off at max_tokens is incomplete, and retrying with the
+            # same limit would truncate again: fail this level so the run
+            # escalates to a more aggressive one. Not a retryable (transient) error.
+            raise CompactionTruncatedError(
+                f"compaction completion hit the {max_tokens}-token output limit"
+            )
+        return choice.message.content or ""
 
     return _call
 
@@ -450,9 +465,19 @@ class CompactionEngine:
         Run the full compaction protocol. Never raises on failure.
 
         Setting ``abort`` ends the run with the stub failure result
-        (``level_used == 0``) and a ``COMPACTION_FAILED`` event. External task
-        cancellation (``Task.cancel()``) is different: it is not swallowed and
-        ``asyncio.CancelledError`` propagates to the caller.
+        (``level_used == 0``) and a ``COMPACTION_FAILED`` event whose payload
+        has ``aborted=True``. External task cancellation (``Task.cancel()``) is
+        different: it is not swallowed and ``asyncio.CancelledError`` propagates
+        to the caller.
+
+        Note:
+            The two cases are told apart with ``Task.cancelling()``. If the
+            calling task earlier swallowed a cancellation without calling
+            ``uncancel()``, its stale count makes an ``abort`` propagate as a
+            cancellation instead of returning the stub. Mnesis always runs
+            compaction in a fresh task, so it cannot hit this; callers awaiting
+            ``run_compaction(abort=...)`` directly from a long-lived task should
+            ``uncancel()`` after swallowing a cancel.
 
         Steps (per round, up to ``max_compaction_rounds``):
         1. Run tool output pruner (reduce input size first).
@@ -489,25 +514,42 @@ class CompactionEngine:
                 raise
             # Raised by this engine's own ``abort`` event, not by the task being
             # cancelled: report it as a failed run like any other.
-            return self._failure_result(session_id, exc, start_ms)
+            return self._failure_result(
+                session_id,
+                exc,
+                start_ms,
+                aborted=abort is not None and abort.is_set(),
+            )
         except Exception as exc:
             return self._failure_result(session_id, exc, start_ms)
 
     def _failure_result(
-        self, session_id: str, exc: BaseException, start_ms: float
+        self,
+        session_id: str,
+        exc: BaseException,
+        start_ms: float,
+        aborted: bool = False,
     ) -> CompactionResult:
         """Log and publish a failed run; return the documented stub result."""
         elapsed = time.time() * 1000 - start_ms
         self._more_to_compact = False  # no longer reflects a completed run
-        self._logger.error(
-            "compaction_unexpected_error",
-            session_id=session_id,
-            error=str(exc),
-            elapsed_ms=elapsed,
-        )
+        if aborted:
+            self._logger.info(
+                "compaction_aborted",
+                session_id=session_id,
+                reason=str(exc),
+                elapsed_ms=elapsed,
+            )
+        else:
+            self._logger.error(
+                "compaction_unexpected_error",
+                session_id=session_id,
+                error=str(exc),
+                elapsed_ms=elapsed,
+            )
         self._event_bus.publish(
             MnesisEvent.COMPACTION_FAILED,
-            {"session_id": session_id, "error": str(exc)},
+            {"session_id": session_id, "error": str(exc), "aborted": aborted},
         )
         # Return a stub result indicating failure without crashing
         return CompactionResult(
@@ -614,7 +656,19 @@ class CompactionEngine:
         # falls back to a generic 200K window.
         budget = self._summary_budget()
 
-        llm_call = _make_llm_call(compaction_model)
+        # Mnesis owns retries (litellm's are disabled): RetryConfig governs
+        # compaction calls exactly as it does ``send()``, with backoff that
+        # ``abort`` can interrupt.
+        raw_llm_call = _make_llm_call(compaction_model)
+        retry_cfg = self._config.session.retry
+
+        async def llm_call(**kwargs: Any) -> str:
+            return await call_with_retry(
+                lambda: raw_llm_call(**kwargs),
+                retry_cfg,
+                abort=abort,
+                logger=self._logger,
+            )
 
         # Condensation (and the summarisation drain below) stop once the context is
         # under ``fit_limit``: a fraction of the soft threshold that triggers

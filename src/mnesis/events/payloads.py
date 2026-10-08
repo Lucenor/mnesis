@@ -107,6 +107,9 @@ class CompactionFailedPayload(TypedDict):
     session_id: str
     error: str
     """Human-readable error description."""
+    aborted: bool
+    """``True`` when the run was ended deliberately via its ``abort`` event
+    (e.g. session close) rather than by an error."""
 
 
 # ── Pruning ───────────────────────────────────────────────────────────────────

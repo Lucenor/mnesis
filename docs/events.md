@@ -71,7 +71,7 @@ session.event_bus.subscribe_all(log_all)
 | `MESSAGE_CREATED` | `message.created` | A user or assistant message is persisted | `MessageCreatedPayload` |
 | `COMPACTION_TRIGGERED` | `compaction.triggered` | Token usage crosses the soft or hard threshold | `CompactionTriggeredPayload` |
 | `COMPACTION_COMPLETED` | `compaction.completed` | A compaction pass finishes (success or partial) | `CompactionCompletedPayload` |
-| `COMPACTION_FAILED` | `compaction.failed` | Compaction raises an unhandled exception | `CompactionFailedPayload` |
+| `COMPACTION_FAILED` | `compaction.failed` | Compaction raises an unhandled exception, or is aborted (`aborted=True`) | `CompactionFailedPayload` |
 | `PRUNE_COMPLETED` | `prune.completed` | A compaction run's pruning step tombstoned at least one tool output (not published when nothing was pruned) | `PruneCompletedPayload` |
 | `DOOM_LOOP_DETECTED` | `doom_loop.detected` | The same tool call repeats past the threshold | `DoomLoopDetectedPayload` |
 | `LLM_RETRY` | `llm.retry` | `send()` is about to retry after a transient LLM error | `LlmRetryPayload` |
@@ -155,6 +155,7 @@ Fired by: `MnesisEvent.COMPACTION_FAILED`
 |---|---|---|
 | `session_id` | `str` | The session whose compaction failed |
 | `error` | `str` | Human-readable error description |
+| `aborted` | `bool` | `True` when the run was ended deliberately via its abort event (e.g. session close) rather than by an error |
 
 ### `PruneCompletedPayload`
 

@@ -58,7 +58,7 @@ class MnesisEvent(StrEnum):
 
     ``COMPACTION_FAILED``
         :class:`~mnesis.events.payloads.CompactionFailedPayload` —
-        ``session_id: str``, ``error: str``
+        ``session_id: str``, ``error: str``, ``aborted: bool``
 
     ``PRUNE_COMPLETED``
         :class:`~mnesis.events.payloads.PruneCompletedPayload` —

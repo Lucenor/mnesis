@@ -462,6 +462,30 @@ stub `CompactionResult` (no summary committed) is returned. Level 3 is not
 forced by this handler — Level 3 is only the final fallback inside
 `_run_summarisation()` when Level 1/2 return `None`.
 
+Cancellation contract: setting the `abort` event (e.g. `session.close()`) ends
+the run with the same stub result and a `COMPACTION_FAILED` event carrying
+`aborted=True`; it is logged at info as `compaction_aborted`, not as an error.
+External task cancellation (`Task.cancel()`, `TaskGroup`, shutdown) is not
+swallowed: `asyncio.CancelledError` propagates to the caller. Abort also
+interrupts a retry backoff wait immediately.
+
+LLM retries: every compaction LLM call (Level 1/2 summarisation and
+condensation) goes through the same retry policy as `send()`, driven by
+`SessionConfig.retry` (`RetryConfig`: attempts, backoff, transient-error
+classification). LiteLLM's own retries are disabled (`num_retries=0`) so calls
+are never retried twice. Non-retryable errors, and retryable ones once attempts
+are exhausted, escalate to the next level as before.
+
+Unusable completions: an empty or whitespace-only completion, or one that
+stopped at the output limit (`finish_reason == "length"`), fails that level and
+the run escalates (L1 → L2 → L3, for summarisation and condensation alike), so
+an empty or cut-off summary never replaces history. Neither case is retried
+under `RetryConfig`: they are not transient transport errors, and re-asking
+with the same limits is expected to give the same result, whereas the next
+level asks for a shorter summary. Truncation is surfaced by the real LLM call
+as `CompactionTruncatedError`; injected `llm_call` callables keep returning a
+plain string.
+
 The inner sequence for each round:
 
 1. **Tool output pruning** — `ToolOutputPrunerAsync.prune()` tombstones stale

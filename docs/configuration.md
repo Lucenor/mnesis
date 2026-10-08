@@ -174,7 +174,9 @@ All other exceptions (including `AuthenticationError`, `ContextWindowExceededErr
 
 ### litellm num_retries interaction
 
-Mnesis explicitly passes `num_retries=0` to `litellm.acompletion()` to disable litellm's own built-in retry mechanism. All retry logic is owned by Mnesis via `RetryConfig`, so there is no double-retrying. Do not set `num_retries` in `call_kwargs` passed to litellm alongside Mnesis.
+Mnesis explicitly passes `num_retries=0` to `litellm.acompletion()` to disable litellm's own built-in retry mechanism. `RetryConfig` governs both `send()` and compaction calls; LiteLLM retries are disabled to avoid double-retrying. Do not set `num_retries` in `call_kwargs` passed to litellm alongside Mnesis.
+
+Compaction calls (summarisation and condensation, Levels 1 and 2) use the same attempts, backoff and error classification as `send()`. With `max_retries > 0`, a transient 429/5xx is retried at the same level before escalating, instead of dropping straight to a lossier level. Because a hard-limit `send()` waits for compaction, it can also wait through those retries (up to `max_delay` per backoff, per LLM call). Closing the session interrupts a pending backoff.
 
 ### Difference from OperatorConfig.max_retries
 

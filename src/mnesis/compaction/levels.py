@@ -383,6 +383,11 @@ async def level1_summarise(
         logger.warning("level1_llm_failed", error=str(exc))
         return None
 
+    if not summary_text.strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("level1_empty_completion")
+        return None
+
     # Propagate file IDs into the summary.
     summary_text = _append_bounded_footer(
         summary_text, file_ids, most_recent_file_ids(to_summarise), budget, estimator
@@ -493,6 +498,11 @@ async def level2_summarise(
         )
     except Exception as exc:
         logger.warning("level2_llm_failed", error=str(exc))
+        return None
+
+    if not summary_text.strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("level2_empty_completion")
         return None
 
     # Propagate file IDs.
@@ -819,6 +829,11 @@ async def condense_level1(
         logger.warning("condense_level1_llm_failed", error=str(exc))
         return None
 
+    if not condensed_text.strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("condense_level1_empty_completion")
+        return None
+
     condensed_text = _append_bounded_footer(
         condensed_text, file_ids, most_recent_file_ids_from_nodes(nodes), budget, estimator
     )
@@ -887,6 +902,11 @@ async def condense_level2(
         )
     except Exception as exc:
         logger.warning("condense_level2_llm_failed", error=str(exc))
+        return None
+
+    if not condensed_text.strip():
+        # An empty completion must never become the summary that replaces history.
+        logger.warning("condense_level2_empty_completion")
         return None
 
     condensed_text = _append_bounded_footer(
