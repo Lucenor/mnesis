@@ -50,13 +50,12 @@ class SummaryDAGStore:
             node_ids: IDs of the summary nodes consumed by a condensation.
         """
         self._superseded_ids.update(node_ids)
-        conn = self._store._conn_or_raise()
-        for node_id in node_ids:
-            await conn.execute(
-                "UPDATE summary_nodes SET superseded=1 WHERE id=?",
-                (node_id,),
-            )
-        await conn.commit()
+        async with self._store._transaction() as conn:
+            for node_id in node_ids:
+                await conn.execute(
+                    "UPDATE summary_nodes SET superseded=1 WHERE id=?",
+                    (node_id,),
+                )
         self._logger.debug(
             "nodes_marked_superseded",
             node_ids=node_ids,
@@ -256,7 +255,7 @@ class SummaryDAGStore:
             session_id=node.session_id,
             node_id=node.id,
             kind=node.kind,
-            level=node.compaction_level,
+            compaction_level=node.compaction_level,
             token_count=node.token_count,
             parent_count=len(node.parent_node_ids),
         )
@@ -280,11 +279,13 @@ class SummaryDAGStore:
             return None
 
         row = await self._get_summary_node_row(node_id)
-        all_messages = await self._store.get_messages(msg.session_id)
         if row is not None:
-            return await self._build_node_from_row(row, all_messages)
+            # The row path only needs this node's own message (model/provider/
+            # created_at), so avoid loading the whole session per node.
+            return await self._build_node_from_row(row, [msg])
 
         # Fallback: reconstruct from message history (pre-Phase-3 nodes)
+        all_messages = await self._store.get_messages(msg.session_id)
         summary_messages = [m for m in all_messages if m.is_summary]
         summary_index = next((i for i, m in enumerate(summary_messages) if m.id == node_id), 0)
         return await self._build_node_from_message(msg, all_messages, summary_index)
@@ -293,67 +294,73 @@ class SummaryDAGStore:
 
     async def _upsert_summary_node_row(self, node: SummaryNode) -> None:
         """Insert or replace a row in ``summary_nodes`` for DAG persistence."""
-        conn = self._store._conn_or_raise()
-        span_start = node.span_start_message_id
-        span_end = node.span_end_message_id
-        await conn.execute(
-            """
-            INSERT OR REPLACE INTO summary_nodes (
-                id, session_id, level, span_start_message_id, span_end_message_id,
-                content, token_count, created_at,
-                parent_node_id, model_id, provider_id, compaction_level, is_active,
-                kind, parent_node_ids, superseded
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0)
-            """,
-            (
-                node.id,
-                node.session_id,
-                node.level,
-                span_start,
-                span_end,
-                node.content,
-                node.token_count,
-                node.created_at,
-                node.parent_node_id,
-                node.model_id,
-                node.provider_id,
-                node.compaction_level,
-                node.kind,
-                json.dumps(node.parent_node_ids),
-            ),
-        )
-        await conn.commit()
+        async with self._store._transaction() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO summary_nodes (
+                    id, session_id, level, span_start_message_id, span_end_message_id,
+                    content, token_count, created_at,
+                    parent_node_id, model_id, provider_id, compaction_level, is_active,
+                    kind, parent_node_ids, superseded
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0)
+                """,
+                (
+                    node.id,
+                    node.session_id,
+                    node.level,
+                    node.span_start_message_id,
+                    node.span_end_message_id,
+                    node.content,
+                    node.token_count,
+                    node.created_at,
+                    node.parent_node_id,
+                    node.model_id,
+                    node.provider_id,
+                    node.compaction_level,
+                    node.kind,
+                    json.dumps(node.parent_node_ids),
+                ),
+            )
 
     async def _query_summary_nodes(
         self, session_id: str, *, superseded: bool
     ) -> list[aiosqlite.Row]:
         """Query summary_nodes rows for a session, filtered by superseded flag."""
         conn = self._store._conn_or_raise()
-        async with conn.execute(
-            """
+        # Under the connection lock so a multi-row ``mark_superseded`` on a shared
+        # connection is seen whole or not at all.
+        async with (
+            self._store._lock,
+            conn.execute(
+                """
             SELECT * FROM summary_nodes
             WHERE session_id=? AND superseded=?
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, rowid ASC
             """,
-            (session_id, int(superseded)),
-        ) as cursor:
+                (session_id, int(superseded)),
+            ) as cursor,
+        ):
             return list(await cursor.fetchall())
 
     async def _query_latest_summary_node(self, session_id: str) -> aiosqlite.Row | None:
         """Return the single most-recently-created active summary_nodes row, or None.
 
-        O(1) query — fetches exactly one row via ORDER BY created_at DESC LIMIT 1.
+        O(1) query — fetches exactly one row via ORDER BY created_at DESC, rowid DESC LIMIT 1
+        (``rowid`` breaks same-millisecond ties in insertion order).
         """
         conn = self._store._conn_or_raise()
-        async with conn.execute(
-            """
+        async with (
+            self._store._lock,
+            conn.execute(
+                """
             SELECT * FROM summary_nodes
             WHERE session_id=? AND superseded=0
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, rowid DESC
             LIMIT 1
             """,
-            (session_id,),
-        ) as cursor:
+                (session_id,),
+            ) as cursor,
+        ):
             return await cursor.fetchone()
 
     async def _session_has_any_summary_nodes(self, session_id: str) -> bool:

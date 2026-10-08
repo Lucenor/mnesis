@@ -12,6 +12,7 @@ from mnesis.models.message import TokenUsage
 from mnesis.models.summary import FileReference
 from mnesis.store.immutable import (
     DuplicateIDError,
+    ImmutableStore,
     PartNotFoundError,
     SessionNotFoundError,
 )
@@ -1552,3 +1553,266 @@ class TestStoreRaceAndBoundary:
     async def test_since_message_id_last_message_returns_empty(self, session_id, store):
         await store.append_message(make_message(session_id, msg_id="msg_last_001"))
         assert await store.get_messages(session_id, since_message_id="msg_last_001") == []
+
+
+class TestSameMillisecondOrdering:
+    """C1: rows sharing a created_at millisecond come back in insertion order."""
+
+    async def test_get_last_summary_message_breaks_ties_by_insertion(self, session_id, store):
+        ts = 1_700_000_000_000
+        # Ids sort opposite to insertion order, so an id-ordered tie-break would fail.
+        for msg_id in ("msg_z_first", "msg_m_second", "msg_a_third"):
+            msg = make_message(session_id, role="assistant", msg_id=msg_id, is_summary=True)
+            msg.created_at = ts
+            await store.append_message(msg)
+
+        latest = await store.get_last_summary_message(session_id)
+        assert latest is not None
+        assert latest.id == "msg_a_third"
+
+    async def test_dag_nodes_ordered_by_insertion_within_a_millisecond(
+        self, session_id, store, dag_store
+    ):
+        from mnesis.models.summary import SummaryNode
+        from mnesis.session import make_id
+
+        ts = 1_700_000_000_000
+        ids = ["node_z", "node_m", "node_a"]
+        for node_id in ids:
+            node = SummaryNode(
+                id=node_id,
+                session_id=session_id,
+                kind="leaf",
+                span_start_message_id="s",
+                span_end_message_id="e",
+                content=f"content {node_id}",
+                token_count=10,
+                created_at=ts,
+            )
+            await dag_store.insert_node(node, id_generator=lambda: make_id("part"))
+
+        active = await dag_store.get_active_nodes(session_id)
+        assert [n.id for n in active] == ids
+        latest = await dag_store.get_latest_node(session_id)
+        assert latest is not None and latest.id == "node_a"
+
+
+class TestInitializeFailureReleasesConnection:
+    """C2: a schema failure on a private connection must not leak it."""
+
+    async def test_private_connection_closed_when_schema_step_fails(self, tmp_path, monkeypatch):
+        import aiosqlite
+
+        from mnesis.models.config import StoreConfig
+        from mnesis.store.immutable import ImmutableStore
+
+        opened: list[aiosqlite.Connection] = []
+        real_connect = aiosqlite.connect
+
+        def tracking_connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            opened.append(conn)
+            return conn
+
+        async def failing_executescript(self, sql):
+            raise aiosqlite.OperationalError("schema boom")
+
+        monkeypatch.setattr(aiosqlite, "connect", tracking_connect)
+        monkeypatch.setattr(aiosqlite.Connection, "executescript", failing_executescript)
+
+        store = ImmutableStore(StoreConfig(db_path=str(tmp_path / "leak.db")))
+        with pytest.raises(aiosqlite.OperationalError, match="schema boom"):
+            await store.initialize()
+
+        assert len(opened) == 1
+        with pytest.raises(ValueError, match="no active connection"):
+            _ = await opened[0].execute("SELECT 1")  # closed, not leaked
+        await store.close()  # still a harmless no-op
+
+    async def test_pooled_connection_is_left_to_the_pool(self, tmp_path, monkeypatch):
+        import aiosqlite
+
+        from mnesis.models.config import StoreConfig
+        from mnesis.store.immutable import ImmutableStore
+        from mnesis.store.pool import StorePool
+
+        async def failing_executescript(self, sql):
+            raise aiosqlite.OperationalError("schema boom")
+
+        monkeypatch.setattr(aiosqlite.Connection, "executescript", failing_executescript)
+        pool = StorePool()
+        try:
+            store = ImmutableStore(StoreConfig(db_path=str(tmp_path / "pooled.db")), pool=pool)
+            with pytest.raises(aiosqlite.OperationalError):
+                await store.initialize()
+        finally:
+            await pool.close_all()
+
+
+class TestGetNodeByIdIsSingleNode:
+    """C3: resolving one summary node must not load the whole session."""
+
+    async def test_row_path_does_not_load_all_messages(self, session_id, store, dag_store):
+        node = await _insert_leaf_node(dag_store, session_id, "node_single", content="alpha")
+        for i in range(5):
+            await store.append_message(make_message(session_id, msg_id=f"msg_extra_{i}"))
+
+        calls: list[str] = []
+        real = store.get_messages
+
+        async def spy(sid, *a, **kw):
+            calls.append(sid)
+            return await real(sid, *a, **kw)
+
+        store.get_messages = spy  # type: ignore[method-assign]
+        loaded = await dag_store.get_node_by_id("node_single")
+
+        assert calls == []
+        assert loaded is not None
+        assert loaded.id == node.id
+        assert loaded.content == "alpha"
+        assert loaded.kind == "leaf"
+        assert loaded.model_id == node.model_id
+        assert loaded.created_at == (await store.get_message("node_single")).created_at
+
+    async def test_non_summary_and_missing_return_none(self, session_id, store, dag_store):
+        msg = make_message(session_id, role="user", msg_id="msg_plain")
+        await store.append_message(msg)
+        assert await dag_store.get_node_by_id("msg_plain") is None
+        assert await dag_store.get_node_by_id("does_not_exist") is None
+
+
+class TestConnectionSerialization:
+    """F2: multi-statement transactions on a shared pooled connection never interleave."""
+
+    @staticmethod
+    async def _seed(session_id, store, n=4):
+        ids = []
+        for i in range(n):
+            msg = make_message(session_id, role="user", msg_id=f"msg_ser_{i}")
+            await store.append_message(msg)
+            ids.append(msg.id)
+        return ids
+
+    @staticmethod
+    def _gate_insert(store, *, fail: bool = False):
+        """Pause the swap between its DELETE and INSERT; optionally fail the INSERT."""
+        conn = store._conn
+        orig = conn.execute
+        at_insert = asyncio.Event()
+        release = asyncio.Event()
+
+        def gated(sql, *args, **kwargs):
+            if "INSERT INTO context_items" in sql and "'summary'" in sql:
+
+                async def run():
+                    at_insert.set()
+                    await release.wait()
+                    if fail:
+                        raise RuntimeError("insert failed")
+                    return await orig(sql, *args, **kwargs)
+
+                return run()
+            return orig(sql, *args, **kwargs)
+
+        conn.execute = gated
+        return at_insert, release, lambda: setattr(conn, "execute", orig)
+
+    async def test_reader_never_sees_span_missing_during_swap(self, session_id, store):
+        ids = await self._seed(session_id, store)
+        at_insert, release, restore = self._gate_insert(store)
+        try:
+            swap = asyncio.create_task(store.swap_context_items(session_id, ids[:3], "sum_ser"))
+            await asyncio.wait_for(at_insert.wait(), 5)  # DELETE done, INSERT pending
+            reader = asyncio.create_task(store.get_context_items(session_id))
+            await asyncio.sleep(0.05)
+            assert not reader.done()  # blocked, not served the half-swapped state
+            release.set()
+            await swap
+            items = await reader
+        finally:
+            restore()
+        assert items == [("summary", "sum_ser"), ("message", ids[3])]
+
+    async def test_failed_swap_rolls_back_and_unrelated_write_is_unaffected(
+        self, session_id, store, config, pool
+    ):
+        ids = await self._seed(session_id, store)
+        other = ImmutableStore(config.store, pool=pool)
+        await other.initialize()
+        at_insert, release, restore = self._gate_insert(store, fail=True)
+        try:
+            swap = asyncio.create_task(store.swap_context_items(session_id, ids[:3], "sum_ser"))
+            await asyncio.wait_for(at_insert.wait(), 5)
+            unrelated = asyncio.create_task(
+                other.append_message(make_message(session_id, role="user", msg_id="msg_other"))
+            )
+            await asyncio.sleep(0.05)
+            assert not unrelated.done()  # queued behind the open swap transaction
+            release.set()
+            with pytest.raises(RuntimeError, match="insert failed"):
+                await swap
+            await unrelated  # commits only its own work
+        finally:
+            restore()
+        items = await store.get_context_items(session_id)
+        # The DELETE was rolled back (span intact) and the unrelated message landed.
+        assert items == [("message", i) for i in [*ids, "msg_other"]]
+
+    async def test_cancelled_swap_rolls_back(self, session_id, store):
+        ids = await self._seed(session_id, store)
+        at_insert, _release, restore = self._gate_insert(store)
+        try:
+            swap = asyncio.create_task(store.swap_context_items(session_id, ids[:3], "sum_ser"))
+            await asyncio.wait_for(at_insert.wait(), 5)
+            _ = swap.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await swap
+        finally:
+            restore()
+        # Nothing half-applied, and the lock was released for later writers.
+        assert await store.get_context_items(session_id) == [("message", i) for i in ids]
+        await store.append_message(make_message(session_id, role="user", msg_id="msg_after"))
+        assert (await store.get_context_items(session_id))[-1] == ("message", "msg_after")
+
+    async def test_stores_sharing_a_pool_share_one_lock(self, config, pool, store):
+        other = ImmutableStore(config.store, pool=pool)
+        await other.initialize()
+        assert other._lock is store._lock
+        assert store._lock is pool.write_lock(config.store.db_path)
+
+    async def test_private_store_has_its_own_lock(self, tmp_path):
+        from mnesis.models.config import StoreConfig
+
+        a = ImmutableStore(StoreConfig(db_path=str(tmp_path / "a.db")))
+        b = ImmutableStore(StoreConfig(db_path=str(tmp_path / "b.db")))
+        assert a._lock is not b._lock
+
+    async def test_concurrent_appends_across_stores_keep_positions_unique(
+        self, session_id, store, config, pool
+    ):
+        other = ImmutableStore(config.store, pool=pool)
+        await other.initialize()
+
+        async def burst(s, tag):
+            for i in range(15):
+                await s.append_message(
+                    make_message(session_id, role="user", msg_id=f"msg_{tag}_{i}")
+                )
+
+        await asyncio.gather(burst(store, "a"), burst(other, "b"))
+        items = await store.get_context_items(session_id)
+        assert len(items) == 30 and len({i for _, i in items}) == 30
+
+    async def test_dag_writes_use_the_same_lock(self, session_id, store, dag_store):
+        await _insert_leaf_node(dag_store, session_id, "node_a")
+        await _insert_leaf_node(dag_store, session_id, "node_b")
+        # Hold the lock: mark_superseded and node reads must wait for it.
+        async with store._lock:
+            marking = asyncio.create_task(dag_store.mark_superseded(["node_a"]))
+            reading = asyncio.create_task(dag_store.get_active_nodes(session_id))
+            await asyncio.sleep(0.05)
+            assert not marking.done() and not reading.done()
+        await marking
+        assert [n.id for n in await reading] in (["node_a", "node_b"], ["node_b"])
+        assert [n.id for n in await dag_store.get_active_nodes(session_id)] == ["node_b"]

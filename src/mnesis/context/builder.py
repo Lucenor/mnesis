@@ -187,8 +187,8 @@ class ContextBuilder:
         # Step 3: Separate summaries from messages and compute summary tokens
         # to reserve budget space.
         # Load each summary node once and cache it to avoid repeated round-trips
-        # (get_node_by_id internally calls get_messages for the full session,
-        # so deduplication matters for sessions with multiple summaries).
+        # (each lookup is a few queries, so deduplication still matters for
+        # sessions with multiple summaries).
         has_summary = any(item_type == "summary" for item_type, _ in context_items)
         summary_cache: dict[str, Any] = {}
         summary_token_count = 0

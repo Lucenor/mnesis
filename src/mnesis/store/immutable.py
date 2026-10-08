@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -208,6 +211,10 @@ class ImmutableStore:
         self._db_path = str(Path(config.db_path).expanduser())
         self._pool = pool
         self._conn: aiosqlite.Connection | None = None
+        # Serialises transactions on the connection (see ``_transaction``). With a
+        # pool it is replaced in ``initialize`` by the pool's per-connection lock,
+        # so every store sharing a connection shares one lock.
+        self._lock = asyncio.Lock()
         self._logger = structlog.get_logger("mnesis.store")
 
     async def initialize(self) -> None:
@@ -228,6 +235,7 @@ class ImmutableStore:
                 wal_mode=self._config.wal_mode,
                 connection_timeout=self._config.connection_timeout,
             )
+            self._lock = self._pool.write_lock(self._db_path)
         else:
             Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
             conn = await aiosqlite.connect(self._db_path, timeout=self._config.connection_timeout)
@@ -241,6 +249,38 @@ class ImmutableStore:
                 await conn.close()
                 raise
 
+        try:
+            async with self._lock:
+                await self._apply_schema(conn)
+        except BaseException:
+            # ``_conn`` is not set yet, so ``close()`` could not release this
+            # connection later: a private one is closed here (a pooled one is
+            # owned by the pool).
+            if self._pool is None:
+                await conn.close()
+            raise
+
+        self._conn = conn
+        self._logger.info("store_initialized", db_path=self._db_path)
+
+    async def close(self) -> None:
+        """
+        Release the database connection.
+
+        If the connection is owned by a pool this is a no-op — the pool
+        manages the connection lifetime.  If the connection is private
+        (no pool was supplied) it is closed and set to ``None``.
+        """
+        if self._conn is None:
+            return
+        if self._pool is None:
+            # Private connection — we own it, so close it
+            await self._conn.close()
+        # Pool-managed connection — the pool owns it; do nothing
+        self._conn = None
+
+    async def _apply_schema(self, conn: aiosqlite.Connection) -> None:
+        """Create the schema and run the idempotent column/index migrations."""
         schema_path = Path(__file__).parent / "schema.sql"
         schema = schema_path.read_text()
         # executescript() handles multiple statements, comments, and semicolons correctly
@@ -276,24 +316,34 @@ class ImmutableStore:
         )
         await conn.commit()
 
-        self._conn = conn
-        self._logger.info("store_initialized", db_path=self._db_path)
+    @contextlib.asynccontextmanager
+    async def _transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Run a statement sequence as one transaction, alone on its connection.
 
-    async def close(self) -> None:
-        """
-        Release the database connection.
+        A pooled ``aiosqlite`` connection is shared by every coroutine (and every
+        ``ImmutableStore``) on that database, and each ``await`` yields to the
+        others. Python's sqlite3 opens an implicit transaction at the first DML
+        statement and any ``commit()`` on the connection ends it, so without
+        serialisation another coroutine's statements are swept into this
+        transaction, its ``commit()`` can publish this one half-done (e.g. the
+        ``DELETE`` of a compaction swap without its ``INSERT``), and a reader on
+        the same connection sees the uncommitted state. The connection's lock is
+        held for the whole sequence; the block's work is committed on success and
+        rolled back on any exception (including cancellation), so a failed or
+        cancelled sequence never leaves partial writes for a later, unrelated
+        ``commit()`` to publish.
 
-        If the connection is owned by a pool this is a no-op — the pool
-        manages the connection lifetime.  If the connection is private
-        (no pool was supplied) it is closed and set to ``None``.
+        The lock is not reentrant: never enter a transaction, or call a store
+        method that does, from inside one.
         """
-        if self._conn is None:
-            return
-        if self._pool is None:
-            # Private connection — we own it, so close it
-            await self._conn.close()
-        # Pool-managed connection — the pool owns it; do nothing
-        self._conn = None
+        conn = self._conn_or_raise()
+        async with self._lock:
+            try:
+                yield conn
+            except BaseException:
+                await conn.rollback()
+                raise
+            await conn.commit()
 
     def _conn_or_raise(self) -> aiosqlite.Connection:
         if self._conn is None:
@@ -334,31 +384,30 @@ class ImmutableStore:
         Raises:
             DuplicateIDError: If a session with this ID already exists.
         """
-        conn = self._conn_or_raise()
         now = int(time.time() * 1000)
         meta_json = json.dumps(metadata) if metadata else None
         try:
-            await conn.execute(
-                """
-                INSERT INTO sessions
-                    (id, parent_id, created_at, updated_at,
-                     model_id, provider_id, agent, title, is_active, metadata, system_prompt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    id,
-                    parent_id,
-                    now,
-                    now,
-                    model_id,
-                    provider_id,
-                    agent,
-                    title,
-                    meta_json,
-                    system_prompt,
-                ),
-            )
-            await conn.commit()
+            async with self._transaction() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO sessions
+                        (id, parent_id, created_at, updated_at,
+                         model_id, provider_id, agent, title, is_active, metadata, system_prompt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        id,
+                        parent_id,
+                        now,
+                        now,
+                        model_id,
+                        provider_id,
+                        agent,
+                        title,
+                        meta_json,
+                        system_prompt,
+                    ),
+                )
         except aiosqlite.IntegrityError as exc:
             raise DuplicateIDError(id) from exc
 
@@ -433,13 +482,12 @@ class ImmutableStore:
 
     async def soft_delete_session(self, session_id: str) -> None:
         """Mark a session as inactive (is_active=0). Messages and parts are retained."""
-        conn = self._conn_or_raise()
         now = int(time.time() * 1000)
-        await conn.execute(
-            "UPDATE sessions SET is_active=0, updated_at=? WHERE id=?",
-            (now, session_id),
-        )
-        await conn.commit()
+        async with self._transaction() as conn:
+            await conn.execute(
+                "UPDATE sessions SET is_active=0, updated_at=? WHERE id=?",
+                (now, session_id),
+            )
 
     # ── Message Methods ────────────────────────────────────────────────────────
 
@@ -463,60 +511,60 @@ class ImmutableStore:
             SessionNotFoundError: If session_id does not exist.
             DuplicateIDError: If a message with this ID already exists.
         """
-        conn = self._conn_or_raise()
         tokens = message.tokens or TokenUsage()
         error = message.error
         now_str = str(int(time.time() * 1000))
         try:
-            await conn.execute(
-                """
-                INSERT INTO messages (
-                    id, session_id, parent_id, role, created_at, agent, model_id, provider_id,
-                    is_summary, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write,
-                    tokens_total, cost, finish_reason,
-                    error_code, error_message_text, error_retriable, mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message.id,
-                    message.session_id,
-                    message.parent_id,
-                    message.role,
-                    message.created_at,
-                    message.agent,
-                    message.model_id,
-                    message.provider_id,
-                    int(message.is_summary),
-                    tokens.input,
-                    tokens.output,
-                    tokens.cache_read,
-                    tokens.cache_write,
-                    tokens.effective_total(),
-                    message.cost,
-                    message.finish_reason,
-                    error.code if error else None,
-                    error.message if error else None,
-                    int(error.retriable) if error else 0,
-                    message.mode,
-                ),
-            )
-            # Track non-summary messages in the context_items view.
-            # Summary items are inserted by the compaction engine atomically
-            # alongside the DELETE of the compacted messages.
-            # The position is computed atomically inside the INSERT via a
-            # correlated subquery so concurrent appends within the same
-            # transaction cannot race on the same MAX(position) value.
-            if not message.is_summary:
+            async with self._transaction() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO context_items (session_id, item_type, item_id, position, created_at)
-                    SELECT ?, 'message', ?, COALESCE(MAX(position), 0) + 1, ?
-                    FROM context_items
-                    WHERE session_id = ?
+                    INSERT INTO messages (
+                        id, session_id, parent_id, role, created_at, agent, model_id,
+                        provider_id, is_summary, tokens_input, tokens_output,
+                        tokens_cache_read, tokens_cache_write, tokens_total, cost,
+                        finish_reason, error_code, error_message_text, error_retriable, mode
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (message.session_id, message.id, now_str, message.session_id),
+                    (
+                        message.id,
+                        message.session_id,
+                        message.parent_id,
+                        message.role,
+                        message.created_at,
+                        message.agent,
+                        message.model_id,
+                        message.provider_id,
+                        int(message.is_summary),
+                        tokens.input,
+                        tokens.output,
+                        tokens.cache_read,
+                        tokens.cache_write,
+                        tokens.effective_total(),
+                        message.cost,
+                        message.finish_reason,
+                        error.code if error else None,
+                        error.message if error else None,
+                        int(error.retriable) if error else 0,
+                        message.mode,
+                    ),
                 )
-            await conn.commit()
+                # Track non-summary messages in the context_items view.
+                # Summary items are inserted by the compaction engine atomically
+                # alongside the DELETE of the compacted messages.
+                # The position is computed atomically inside the INSERT via a
+                # correlated subquery so concurrent appends within the same
+                # transaction cannot race on the same MAX(position) value.
+                if not message.is_summary:
+                    await conn.execute(
+                        """
+                        INSERT INTO context_items
+                            (session_id, item_type, item_id, position, created_at)
+                        SELECT ?, 'message', ?, COALESCE(MAX(position), 0) + 1, ?
+                        FROM context_items
+                        WHERE session_id = ?
+                        """,
+                        (message.session_id, message.id, now_str, message.session_id),
+                    )
         except aiosqlite.IntegrityError as exc:
             if "FOREIGN KEY" in str(exc):
                 raise SessionNotFoundError(message.session_id) from exc
@@ -542,38 +590,38 @@ class ImmutableStore:
         Raises:
             MessageNotFoundError: If message_id does not exist.
         """
-        conn = self._conn_or_raise()
         try:
-            await conn.execute(
-                """
-                INSERT INTO message_parts
-                    (id, message_id, session_id, part_type, part_index, content,
-                     tool_name, tool_call_id, tool_state, compacted_at,
-                     started_at, completed_at, token_estimate)
-                SELECT ?, ?, ?, ?, COALESCE(MAX(part_index), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?
-                FROM message_parts WHERE message_id = ?
-                """,
-                (
-                    part.id,
-                    part.message_id,
-                    part.session_id,
-                    part.part_type,
-                    part.content,
-                    part.tool_name,
-                    part.tool_call_id,
-                    part.tool_state,
-                    part.compacted_at,
-                    part.started_at,
-                    part.completed_at,
-                    part.token_estimate,
-                    part.message_id,
-                ),
-            )
-            await conn.commit()
+            async with self._transaction() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO message_parts
+                        (id, message_id, session_id, part_type, part_index, content,
+                         tool_name, tool_call_id, tool_state, compacted_at,
+                         started_at, completed_at, token_estimate)
+                    SELECT ?, ?, ?, ?, COALESCE(MAX(part_index), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?
+                    FROM message_parts WHERE message_id = ?
+                    """,
+                    (
+                        part.id,
+                        part.message_id,
+                        part.session_id,
+                        part.part_type,
+                        part.content,
+                        part.tool_name,
+                        part.tool_call_id,
+                        part.tool_state,
+                        part.compacted_at,
+                        part.started_at,
+                        part.completed_at,
+                        part.token_estimate,
+                        part.message_id,
+                    ),
+                )
         except aiosqlite.IntegrityError as exc:
             if "FOREIGN KEY" in str(exc):
                 raise MessageNotFoundError(part.message_id) from exc
             raise
+        conn = self._conn_or_raise()
         # Read back the allocated index; the part id is unique, so this cannot
         # race with other appends (indexes are never rewritten).
         async with conn.execute(
@@ -622,7 +670,6 @@ class ImmutableStore:
             TypeError: If ``output``/``error_message`` is given and the part's
                 content is not a JSON object (nothing is updated).
         """
-        conn = self._conn_or_raise()
 
         # Build dynamic SET clause
         set_clauses: list[str] = []
@@ -663,11 +710,11 @@ class ImmutableStore:
         # json_set on non-object content would silently no-op; only match object
         # content so that case can be told apart from a missing part below.
         object_only = " AND json_type(content) = 'object'" if json_updates else ""
-        result = await conn.execute(
-            f"UPDATE message_parts SET {', '.join(set_clauses)} WHERE id = ?{object_only}",
-            params,
-        )
-        await conn.commit()
+        async with self._transaction() as conn:
+            result = await conn.execute(
+                f"UPDATE message_parts SET {', '.join(set_clauses)} WHERE id = ?{object_only}",
+                params,
+            )
         if result.rowcount == 0:
             if json_updates:
                 async with conn.execute(
@@ -688,16 +735,14 @@ class ImmutableStore:
         """
         if not part_ids:
             return
-        conn = self._conn_or_raise()
         placeholders = ",".join("?" * len(part_ids))
-        result = await conn.execute(
-            f"UPDATE message_parts SET compacted_at = ? WHERE id IN ({placeholders})",
-            [compacted_at, *part_ids],
-        )
+        async with self._transaction() as conn:
+            result = await conn.execute(
+                f"UPDATE message_parts SET compacted_at = ? WHERE id IN ({placeholders})",
+                [compacted_at, *part_ids],
+            )
         if result.rowcount == 0:
-            await conn.commit()
             raise PartNotFoundError(part_ids[0])
-        await conn.commit()
 
     async def update_message_tokens(
         self,
@@ -715,26 +760,25 @@ class ImmutableStore:
             cost: Dollar cost of the response.
             finish_reason: Provider finish reason (e.g. ``"stop"``, ``"max_tokens"``).
         """
-        conn = self._conn_or_raise()
-        await conn.execute(
-            """
-            UPDATE messages SET
-                tokens_input=?, tokens_output=?, tokens_cache_read=?,
-                tokens_cache_write=?, tokens_total=?, cost=?, finish_reason=?
-            WHERE id=?
-            """,
-            (
-                tokens.input,
-                tokens.output,
-                tokens.cache_read,
-                tokens.cache_write,
-                tokens.effective_total(),
-                cost,
-                finish_reason,
-                message_id,
-            ),
-        )
-        await conn.commit()
+        async with self._transaction() as conn:
+            await conn.execute(
+                """
+                UPDATE messages SET
+                    tokens_input=?, tokens_output=?, tokens_cache_read=?,
+                    tokens_cache_write=?, tokens_total=?, cost=?, finish_reason=?
+                WHERE id=?
+                """,
+                (
+                    tokens.input,
+                    tokens.output,
+                    tokens.cache_read,
+                    tokens.cache_write,
+                    tokens.effective_total(),
+                    cost,
+                    finish_reason,
+                    message_id,
+                ),
+            )
 
     # ── Query Methods ──────────────────────────────────────────────────────────
 
@@ -992,7 +1036,7 @@ class ImmutableStore:
             """
             SELECT * FROM messages
             WHERE session_id=? AND is_summary=1
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, rowid DESC
             LIMIT 1
             """,
             (session_id,),
@@ -1014,23 +1058,22 @@ class ImmutableStore:
         Returns:
             The stored reference.
         """
-        conn = self._conn_or_raise()
-        await conn.execute(
-            """
-            INSERT OR REPLACE INTO file_references
-                (content_id, path, file_type, token_count, exploration_summary, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                ref.content_id,
-                ref.path,
-                ref.file_type,
-                ref.token_count,
-                ref.exploration_summary,
-                ref.created_at,
-            ),
-        )
-        await conn.commit()
+        async with self._transaction() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO file_references
+                    (content_id, path, file_type, token_count, exploration_summary, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ref.content_id,
+                    ref.path,
+                    ref.file_type,
+                    ref.token_count,
+                    ref.exploration_summary,
+                    ref.created_at,
+                ),
+            )
         return ref
 
     async def get_file_reference(self, content_id: str) -> FileReference | None:
@@ -1073,11 +1116,16 @@ class ImmutableStore:
             List of ``(item_type, item_id)`` tuples ordered by position ASC.
         """
         conn = self._conn_or_raise()
-        async with conn.execute(
-            "SELECT item_type, item_id FROM context_items"
-            " WHERE session_id = ? ORDER BY position ASC",
-            (session_id,),
-        ) as cursor:
+        # Under the connection lock: a swap in progress on this shared connection
+        # has deleted rows that are not yet replaced, and a read must not see that.
+        async with (
+            self._lock,
+            conn.execute(
+                "SELECT item_type, item_id FROM context_items"
+                " WHERE session_id = ? ORDER BY position ASC",
+                (session_id,),
+            ) as cursor,
+        ):
             rows = await cursor.fetchall()
         return [(row["item_type"], row["item_id"]) for row in rows]
 
@@ -1112,7 +1160,6 @@ class ImmutableStore:
         if not remove_item_ids:
             return
 
-        conn = self._conn_or_raise()
         now_str = str(int(time.time() * 1000))
 
         placeholders = ",".join("?" * len(remove_item_ids))
@@ -1120,31 +1167,31 @@ class ImmutableStore:
         # Items after the compacted span retain their original positions —
         # no shifting required because positions are monotonically increasing
         # but need not be contiguous.
-        async with conn.execute(
-            f"SELECT MIN(position) FROM context_items"
-            f" WHERE session_id = ? AND item_id IN ({placeholders})",
-            (session_id, *remove_item_ids),
-        ) as cursor:
-            row = await cursor.fetchone()
-        # MIN(position) is NULL when none of the remove_item_ids exist in
-        # context_items (e.g. called with stale IDs after a crash-recovery).
-        # In that case the swap is a no-op — we have nothing to remove and
-        # nowhere deterministic to place the summary row.
-        summary_pos: int | None = row[0] if row else None
-        if summary_pos is None:
-            # No matching rows — nothing to remove, skip the insert too.
-            return
+        async with self._transaction() as conn:
+            async with conn.execute(
+                f"SELECT MIN(position) FROM context_items"
+                f" WHERE session_id = ? AND item_id IN ({placeholders})",
+                (session_id, *remove_item_ids),
+            ) as cursor:
+                row = await cursor.fetchone()
+            # MIN(position) is NULL when none of the remove_item_ids exist in
+            # context_items (e.g. called with stale IDs after a crash-recovery).
+            # In that case the swap is a no-op — we have nothing to remove and
+            # nowhere deterministic to place the summary row.
+            summary_pos: int | None = row[0] if row else None
+            if summary_pos is None:
+                # No matching rows — nothing to remove, skip the insert too.
+                return
 
-        await conn.execute(
-            f"DELETE FROM context_items WHERE session_id = ? AND item_id IN ({placeholders})",
-            (session_id, *remove_item_ids),
-        )
-        await conn.execute(
-            "INSERT INTO context_items (session_id, item_type, item_id, position, created_at)"
-            " VALUES (?, 'summary', ?, ?, ?)",
-            (session_id, summary_id, summary_pos, now_str),
-        )
-        await conn.commit()
+            await conn.execute(
+                f"DELETE FROM context_items WHERE session_id = ? AND item_id IN ({placeholders})",
+                (session_id, *remove_item_ids),
+            )
+            await conn.execute(
+                "INSERT INTO context_items (session_id, item_type, item_id, position, created_at)"
+                " VALUES (?, 'summary', ?, ?, ?)",
+                (session_id, summary_id, summary_pos, now_str),
+            )
 
     # ── Private Helpers ────────────────────────────────────────────────────────
 
