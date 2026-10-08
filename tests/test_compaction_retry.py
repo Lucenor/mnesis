@@ -629,6 +629,40 @@ class TestCloseAbortCompaction:
         monkeypatch.setattr(engine, "wait_for_pending", real_wait)
         await session.close()
 
+    async def test_interrupted_close_still_aborts_the_inflight_run(self, tmp_path, monkeypatch):
+        """The flag is cleared only once the in-flight run has ended, not at interruption."""
+        from mnesis import MnesisSession
+
+        calls: list[float] = []
+
+        async def slow_empty(**kwargs: object) -> str:
+            calls.append(time.monotonic())
+            await asyncio.sleep(0.4)  # request on the wire
+            return ""  # empty -> the level fails and the engine would escalate
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: slow_empty)
+        cfg = MnesisConfig(store=StoreConfig(db_path=str(tmp_path / "ic.db")))
+        session = await MnesisSession.create(model="anthropic/claude-haiku-4-5", config=cfg)
+        for i in range(4):
+            _ = await session.record(f"question {i} " * 20, f"answer {i} " * 20)
+        failed: list[dict] = []
+        session.subscribe(MnesisEvent.COMPACTION_FAILED, lambda e, p: failed.append(p))
+        compaction = asyncio.create_task(session.compact())
+        while not calls:
+            await asyncio.sleep(0.01)
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await session.close(abort_compaction=True)
+        assert session._compaction_abort.is_set()  # the in-flight run still sees it
+        result = await asyncio.wait_for(compaction, timeout=5)
+        assert len(calls) == 1  # no further LLM call after close()
+        assert result.level_used == 0 and failed and failed[0]["aborted"] is True
+        await asyncio.sleep(0)  # done-callback runs
+        assert not session._compaction_abort.is_set()  # a later run starts clear
+        _ = await asyncio.wait_for(session.compact(), timeout=5)
+        assert len(calls) >= 2  # the later run was not aborted: it reached the model
+        await session.close()
+
     async def test_default_close_waits_for_the_run(self, tmp_path, monkeypatch):
         """Without the option the run finishes (L3 after the outage) before close returns."""
         session, entered = await self._session(tmp_path, monkeypatch, base_delay=0.05)

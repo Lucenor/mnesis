@@ -616,24 +616,20 @@ class MnesisSession:
                 sleep_task = asyncio.create_task(asyncio.sleep(delay))
                 self._retry_sleep_task = sleep_task
                 try:
-                    # ``asyncio.wait`` does not raise when the sleep task is
-                    # cancelled (by ``close()``), so that is checked explicitly.
-                    _ = await asyncio.wait({sleep_task})
-                    if sleep_task.cancelled():
-                        raise asyncio.CancelledError
-                except asyncio.CancelledError:
-                    sleep_task.cancel()  # send() itself cancelled: stop the sleep too
-                    current = asyncio.current_task()
-                    if current is not None and current.cancelling() > 0:
-                        # send() itself is being cancelled (task.cancel(), or an
-                        # ``asyncio.timeout`` around it): propagate, so the caller's
-                        # cancellation/timeout is honoured instead of swallowed.
+                    try:
+                        # ``asyncio.wait`` does not raise when the *sleep task* is
+                        # cancelled (by ``close()``); it raises CancelledError only
+                        # when send() itself is cancelled (task.cancel(), a timeout).
+                        _ = await asyncio.wait({sleep_task})
+                    except asyncio.CancelledError:
+                        sleep_task.cancel()  # stop the sleep too, and honour the caller
                         raise
-                    # Otherwise close() cancelled the sleep: end the turn as an error.
-                    self._logger.info("llm_retry_cancelled")
-                    finish_reason = "error"
-                    text_accumulator = "[Error: retry cancelled]"
-                    break
+                    if sleep_task.cancelled():
+                        # close() cancelled the backoff: end the turn as an error.
+                        self._logger.info("llm_retry_cancelled")
+                        finish_reason = "error"
+                        text_accumulator = "[Error: retry cancelled]"
+                        break
                 finally:
                     self._retry_sleep_task = None
 
@@ -1254,8 +1250,13 @@ class MnesisSession:
             await self._store.close()
         finally:
             # An interrupted close() (e.g. timed out while draining) leaves the session
-            # usable; the abort flag must not stay set and abort every later run.
-            self._compaction_abort.clear()
+            # usable, so the abort flag must not stay set and abort every later run. But
+            # a run still in flight must still see it: clear once that run has ended.
+            pending = self._compaction_engine._pending_task
+            if pending is not None and not pending.done():
+                pending.add_done_callback(lambda _t: self._compaction_abort.clear())
+            else:
+                self._compaction_abort.clear()
         self._logger.info("session_closed", session_id=self._session_id)
 
     async def __aenter__(self) -> MnesisSession:
