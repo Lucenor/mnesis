@@ -173,6 +173,58 @@ class TestModelInfoGptFoAdded:
         assert mini.max_output_tokens == full.max_output_tokens == 16_384
 
 
+class TestOSeriesMatching:
+    """o-series detection is an exact name match, not a substring match."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "o1",
+            "o1-mini",
+            "o1-preview",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "openai/o1",
+            "openai/o3-mini",
+            "azure/o1-preview",
+            "openrouter/openai/o4-mini",
+            "O3-Mini",
+        ],
+    )
+    def test_o_series_resolves_to_o_profile(self, name: str) -> None:
+        info = ModelInfo.from_model_string(name)
+        assert info.context_limit == 200_000
+        assert info.max_output_tokens == 100_000
+        assert info.encoding == "o200k_base"
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "ollama/olmo2",
+            "ollama/orca2",
+            "ollama/llama3",
+            "mistral/mistral-large-2",
+            "deepseek/deepseek-o3x",
+            "foo-o3bar",
+            "pro1",
+            "o",
+            "omni",
+        ],
+    )
+    def test_non_o_series_uses_generic_fallback(self, name: str) -> None:
+        info = ModelInfo.from_model_string(name)
+        assert info.context_limit == 128_000
+        assert info.max_output_tokens == 4_096
+        assert info.encoding == "cl100k_base"
+
+    @pytest.mark.parametrize("name", ["gpt-4o", "gpt-4o-mini", "openai/gpt-4o-mini"])
+    def test_gpt4o_keeps_its_own_profile(self, name: str) -> None:
+        info = ModelInfo.from_model_string(name)
+        assert info.context_limit == 128_000
+        assert info.max_output_tokens == 16_384
+
+
 class TestDualDbPathRaisesValueError:
     """M-6: supplying both db_path and config.store.db_path raises ValueError."""
 

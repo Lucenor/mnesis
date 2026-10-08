@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -331,6 +332,11 @@ class MnesisConfig(BaseModel):
     )
 
 
+# OpenAI o-series names (o1, o3-mini, o4-mini, ...): "o" + digits as the whole first
+# token of the bare model name (any provider/route prefix already stripped).
+_O_SERIES_RE = re.compile(r"o\d+(?:-|$)")
+
+
 class ModelInfo(BaseModel):
     """Resolved model metadata used for budget calculations."""
 
@@ -378,7 +384,9 @@ class ModelInfo(BaseModel):
                 max_output_tokens=8_192,
                 encoding="claude_heuristic",
             )
-        if any(f"o{n}" in model_name for n in (1, 2, 3, 4)):
+        # Match on the last path segment so routed names such as
+        # "openrouter/openai/o3-mini" work, while "ollama/olmo2" does not.
+        if _O_SERIES_RE.match(model_name.rsplit("/", 1)[-1]):
             return cls(
                 model_id=model,
                 provider_id=provider or "openai",
