@@ -39,13 +39,26 @@ _FILE_ID_RE = re.compile(r"\bfile_[0-9a-fA-F]{8,32}\b")
 # Footer template for the ``[LCM File IDs: ...]`` footer.
 _FILE_IDS_FOOTER_TEMPLATE = "\n\n[LCM File IDs: {ids}]"
 
-# A path-like token: ``dir/sub/file.ext`` (any number of separators) or a bare
-# ``name.ext`` with a 2+ character name and extension (so ``e.g`` is not one).
-# Characters that would break the footer grammar (``,`` ``(`` ``)`` ``]``) are
-# never part of a path.
-_PATH_RE = re.compile(
-    r"(?<![\w/.~-])(?:~?/?[\w.-]+(?:/[\w.-]+)+|[\w-]{2,}\.[A-Za-z][\w]+)(?![\w/-])"
+# A candidate path token: a run of path characters. Whether it is really a path
+# is decided by :func:`_is_path` (and ``,`` ``(`` ``)`` ``]`` never occur in one,
+# so a token can always be written into the footer grammar).
+_PATH_RE = re.compile(r"(?<![\w/.~@-])[\w.~/@-]+")
+
+# File extensions that make a bare name (no ``/``) a path. A bare ``config`` or
+# ``json.loads`` is code or prose, not a file.
+_PATH_EXTENSIONS = frozenset(
+    "py pyi ts tsx js jsx mjs cjs json jsonl yaml yml toml ini cfg conf env md rst txt csv tsv "
+    "sql sh bash zsh go rs java kt rb php c h cc cpp hpp cs swift scala html css scss xml lock "
+    "log ipynb parquet db sqlite proto tf".split()
 )
+
+# What may separate a file ID from the path it names: an opening parenthesis, a
+# colon or an equals sign, with at most two spaces around it, three characters in
+# all (quotes and backticks around the path do not count). Covers the forms the
+# prompts ask for -- ``path (file_x)`` -- and ``file_x: path``. Anything longer or
+# with other words or punctuation (``,`` ``->`` ``is``...) is not an adjacency.
+_PAIR_GAP_RE = re.compile(r" {0,2}[(:=] {0,2}")
+_PAIR_GAP_MAX = 3
 
 # The body of a ``[LCM File IDs: ...]`` footer.
 _FOOTER_BODY_RE = re.compile(r"\[LCM File IDs:([^\]]*)\]")
@@ -199,41 +212,70 @@ def _clean_path(raw: str) -> str:
     return raw.strip().strip("`'\"").rstrip(".")
 
 
-def _gap(a: re.Match[str], b: re.Match[str]) -> int:
-    """Characters between two matches on one line (0 if adjacent or overlapping)."""
-    return max(a.start() - b.end(), b.start() - a.end(), 0)
+def _is_path(token: str, line: str, end: int) -> bool:
+    """Whether the token ending at ``line[end]`` is a file path rather than code/prose.
+
+    A path has a ``/`` or a known file extension. Tokens touching ``@`` (e-mail),
+    URLs, calls (``name.ext(``) and bare file IDs are rejected. When unsure, no.
+    """
+    token = token.rstrip(".")
+    if not token or "@" in token or "://" in token or token.startswith("//"):
+        return False
+    if token.endswith("/") or _FILE_ID_RE.fullmatch(token):
+        return False
+    if line[end : end + 1] == "(":
+        return False
+    if "/" in token:
+        return True
+    name, dot, ext = token.rpartition(".")
+    return bool(dot and name and ext.lower() in _PATH_EXTENSIONS)
 
 
 def _heuristic_pairs(text: str) -> dict[str, str]:
-    """Pair each file ID with the nearest path-like token on the same line."""
+    """Pair file IDs with the path written directly next to them.
+
+    Only adjacent pairs count: the path, a gap of at most three separator
+    characters (see ``_PAIR_GAP_RE``) and the ID, in either order. Each path
+    names at most one ID. A wrong path is worse than none, so an ID with no
+    adjacent path, or on a line where adjacency is ambiguous, stays unpaired.
+    """
     pairs: dict[str, str] = {}
     for line in text.splitlines():
         id_matches = list(_FILE_ID_RE.finditer(line))
         if not id_matches:
             continue
-        path_matches = [
+        paths = [
             m
             for m in _PATH_RE.finditer(line)
-            if "file_" not in m.group() and _clean_path(m.group())
+            if _is_path(m.group(), line, m.end()) and not _FILE_ID_RE.fullmatch(m.group())
         ]
-        if not path_matches:
-            continue
-        # One-to-one, closest first: with more IDs than paths on a line, only the
-        # IDs nearest a path get it, rather than pairing every ID with the same file.
-        candidates = sorted(
-            (_gap(pm, im), i, j)
-            for i, im in enumerate(id_matches)
-            for j, pm in enumerate(path_matches)
-        )
-        used_ids: set[int] = set()
         used_paths: set[int] = set()
-        for _gap_size, i, j in candidates:
-            if i in used_ids or j in used_paths:
-                continue
-            used_ids.add(i)
-            used_paths.add(j)
-            pairs.setdefault(id_matches[i].group(), _clean_path(path_matches[j].group()))
+        for im in id_matches:
+            chosen: int | None = None
+            # Prefer the path before the ID (``path (file_x)``), then after it.
+            for j, pm in enumerate(paths):
+                if j in used_paths:
+                    continue
+                if pm.end() <= im.start() and _adjacent(line[pm.end() : im.start()]):
+                    chosen = j
+                    break
+            if chosen is None:
+                for j, pm in enumerate(paths):
+                    if j in used_paths:
+                        continue
+                    if pm.start() >= im.end() and _adjacent(line[im.end() : pm.start()]):
+                        chosen = j
+                        break
+            if chosen is not None:
+                used_paths.add(chosen)
+                pairs.setdefault(im.group(), _clean_path(paths[chosen].group()))
     return pairs
+
+
+def _adjacent(gap: str) -> bool:
+    """Whether *gap* is a short run of pairing separators (quotes/backticks ignored)."""
+    gap = gap.replace("`", "").replace("'", "").replace('"', "")
+    return len(gap) <= _PAIR_GAP_MAX and _PAIR_GAP_RE.fullmatch(gap) is not None
 
 
 def footer_file_id_paths(text: str) -> dict[str, str]:

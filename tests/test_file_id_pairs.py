@@ -49,9 +49,9 @@ def budget() -> ContextBudget:
 
 def _msgs() -> list[MessageWithParts]:
     texts = [
-        f"The rates config lives at {RATES_PATH} (content id {RATES}).",
+        f"The rates config lives at {RATES_PATH} ({RATES}).",
         "Acknowledged.",
-        f"Migration is scripts/migrate_ledger.py -- file id: {MIGRATE}. Also see {LONE}.",
+        f"Migration is {MIGRATE_PATH}: {MIGRATE}. Also see {LONE}.",
         "Noted.",
         "Third question " + "x" * 50,
         "Answer " + "y" * 50,
@@ -112,16 +112,63 @@ class TestFooterFormat:
 
 
 class TestPathExtraction:
-    def test_pairs_with_nearest_path_on_the_line(self):
+    @pytest.mark.parametrize(
+        ("line", "path"),
+        [
+            (f"{RATES_PATH} ({RATES})", RATES_PATH),
+            (f"`{RATES_PATH}` ({RATES})", RATES_PATH),
+            (f"{RATES_PATH}: {RATES}", RATES_PATH),
+            (f"{RATES}: {RATES_PATH}", RATES_PATH),
+            (f"{RATES} ({RATES_PATH})", RATES_PATH),
+            (f"{RATES}={RATES_PATH}", RATES_PATH),
+            (f"- {RATES_PATH}  ({RATES}) -- rates", RATES_PATH),
+            (f"rates.yaml ({RATES})", "rates.yaml"),
+        ],
+    )
+    def test_adjacent_forms_pair(self, line, path):
+        assert extract_file_id_paths(line) == {RATES: path}
+
+    def test_two_ids_two_paths_in_the_prompt_form(self):
+        line = f"{RATES_PATH} ({RATES}), {MIGRATE_PATH} ({MIGRATE})"
+        assert extract_file_id_paths(line) == {RATES: RATES_PATH, MIGRATE: MIGRATE_PATH}
+
+    def test_path_containing_file_underscore_pairs(self):
+        assert extract_file_id_paths(f"src/file_utils.py ({RATES})") == {RATES: "src/file_utils.py"}
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            f"Loaded {RATES} via json.loads then saved",
+            f"Result of {RATES} at self.config",
+            f"Priya sent {RATES} from priya.raman@corp.com",
+            f"{RATES} sent to priya.raman@corp.com",
+            f"see https://example.com/docs/page.html for {RATES}",
+            f"{RATES} -> src/a.py",
+            f"{RATES} belongs to README.md, e.g. the docs",
+            f"call load.py({RATES})",
+            f"the id {RATES} and v1.2.3 build",
+            f"e.g. {RATES} has no path",
+            '{"ids": ["' + RATES + '", "' + MIGRATE + '"], "paths": ["a/x.py", "b/y.py"]}',
+            f"{RATES} {MIGRATE} -> src/a.py src/b.py",
+            f"{RATES} is NOT config.yaml (that one is {MIGRATE})",
+            f"{RATES_PATH} (or other.yaml) -- file id: {RATES}",
+            f"{RATES_PATH} content id {RATES}",
+        ],
+    )
+    def test_no_confident_wrong_pairs(self, line):
+        assert extract_file_id_paths(line) == {}
+
+    def test_each_path_names_one_id(self):
+        pairs = extract_file_id_paths(f"{RATES} {MIGRATE}: scripts/m.py")
+        assert pairs == {MIGRATE: "scripts/m.py"}
+
+    def test_pairs_with_adjacent_path_only(self):
         text = (
             f"- {RATES_PATH} (or other.yaml) -- file id: {RATES}\n"
-            f"`{MIGRATE_PATH}` content id {MIGRATE}\n"
+            f"`{MIGRATE_PATH}` ({MIGRATE})\n"
             f"e.g. {LONE} has no path\n"
         )
-        pairs = extract_file_id_paths(text)
-        assert pairs[MIGRATE] == MIGRATE_PATH
-        assert RATES in pairs
-        assert LONE not in pairs  # "e.g" is not a path
+        assert extract_file_id_paths(text) == {MIGRATE: MIGRATE_PATH}
 
     def test_from_messages(self):
         assert extract_file_id_paths_from_messages(_msgs()) == {
@@ -132,7 +179,7 @@ class TestPathExtraction:
     def test_footer_pairs_outrank_prose_for_nodes(self):
         node = _node(
             "n1",
-            f"- other_name.yaml file id: {RATES}\n\n[LCM File IDs: {RATES_PATH} ({RATES})]",
+            f"- other_name.yaml ({RATES})\n\n[LCM File IDs: {RATES_PATH} ({RATES})]",
         )
         assert collect_file_id_paths_from_nodes([node]) == {RATES: RATES_PATH}
 
@@ -198,7 +245,9 @@ class TestPairsAreSecondaryToIds:
         long_path = "d/" * 40 + "x.py"
         msgs = []
         for i in range(8):
-            text = " ".join(f"{long_path}{j} {fid}" for j, fid in enumerate(ids[i * 5 : i * 5 + 5]))
+            text = " ".join(
+                f"{long_path}{j} ({fid})" for j, fid in enumerate(ids[i * 5 : i * 5 + 5])
+            )
             msg = Message(id=f"m{i}", session_id="s", role="user" if i % 2 == 0 else "assistant")
             msgs.append(MessageWithParts(message=msg, parts=[TextPart(text=text)]))
         # Budget sized so bare ids fit but their paired form does not.
