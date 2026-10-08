@@ -14,9 +14,9 @@ import structlog
 Handler = Callable[["MnesisEvent", dict[str, Any]], Awaitable[None] | None]
 
 
-async def _drive_awaitable(awaitable: Awaitable[Any]) -> None:
+async def _drive_awaitable(awaitable: Awaitable[Any]) -> Any:
     """Await a non-coroutine awaitable so it can run as a task."""
-    await awaitable
+    return await awaitable
 
 
 class MnesisEvent(StrEnum):

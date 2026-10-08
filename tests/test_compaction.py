@@ -779,7 +779,7 @@ class TestCompactionEngine:
         await started.wait()
         _ = task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            _ = await task
         assert task.cancelled()
         assert failed == []
         assert engine._more_to_compact is False
