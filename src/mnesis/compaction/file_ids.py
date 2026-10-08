@@ -53,11 +53,12 @@ _PATH_EXTENSIONS = frozenset(
 )
 
 # What may separate a file ID from the path it names: an opening parenthesis, a
-# colon or an equals sign, with at most two spaces around it, three characters in
-# all (quotes and backticks around the path do not count). Covers the forms the
-# prompts ask for -- ``path (file_x)`` -- and ``file_x: path``. Anything longer or
+# colon or an equals sign, with at most two spaces around it, or a spaced hyphen
+# (``- README.md`` list items); three characters in all (quotes and backticks
+# around the path do not count). Covers the forms the prompts ask for --
+# ``path (file_x)`` -- and ``file_x: path``. Anything longer or
 # with other words or punctuation (``,`` ``->`` ``is``...) is not an adjacency.
-_PAIR_GAP_RE = re.compile(r" {0,2}[(:=] {0,2}")
+_PAIR_GAP_RE = re.compile(r"(?: {0,2}[(:=] {0,2}| - )")
 _PAIR_GAP_MAX = 3
 
 # The body of a ``[LCM File IDs: ...]`` footer.
@@ -225,7 +226,8 @@ _KNOWN_FILENAMES = frozenset(
     "CHANGELOG CODEOWNERS .env .gitignore .gitattributes .dockerignore .editorconfig .npmrc "
     ".nvmrc .bashrc .zshrc .prettierrc .eslintrc".split()
 )
-_DOTFILE_RE = re.compile(r"\.[A-Za-z][\w.-]*")
+# Lowercase only: ``.NET`` is a framework, ``.env`` a dotfile.
+_DOTFILE_RE = re.compile(r"\.[a-z][a-z0-9._-]*")
 
 
 def _has_known_extension(name: str) -> bool:
@@ -246,6 +248,7 @@ def _is_path(token: str, line: str, end: int) -> bool:
     Well-known extensionless names (``Dockerfile``, ``Makefile``, ``.env``...) and
     dotfiles inside a directory (``config/.env``) count. When unsure, no.
     """
+    raw = token
     token = token.rstrip(".")
     if not token or "@" in token or "://" in token or token.startswith("//"):
         return False
@@ -261,8 +264,20 @@ def _is_path(token: str, line: str, end: int) -> bool:
     if token.lower() in _NOT_FILES:
         return False
     last = segments[-1]
-    if _has_known_extension(last) or last in _KNOWN_FILENAMES:
+    if _has_known_extension(last):
         return True
+    if last in _KNOWN_FILENAMES:
+        # A bare ``README`` / ``Makefile`` is prose unless it is the whole value
+        # (``file_x (README first)`` is not a pairing). With a directory it is a path.
+        if "/" in token:
+            return True
+        rest = line[end - (len(raw) - len(token)) :]
+        return (
+            rest == ""
+            or rest[0] in ")],;`'\""
+            or re.fullmatch(r"[.!?]?\s*", rest) is not None
+            or re.match(r"\s*(?:[(:=]|-\s)\s*file_", rest) is not None  # ``README (file_x)``
+        )
     if "/" in token and _DOTFILE_RE.fullmatch(last):
         return True  # ``config/.env``, ``~/.zshrc``
     return token.startswith(_PATH_PREFIXES) and any(c.isalpha() for c in token)

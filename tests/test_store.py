@@ -1989,3 +1989,14 @@ class TestMarkSupersededRollback:
             conn.execute = orig
         assert dag_store._superseded_ids == set()
         assert {n.id for n in await dag_store.get_active_nodes(session_id)} == {"node_a", "node_b"}
+
+
+async def test_store_close_twice_and_concurrently_is_a_noop(tmp_path):
+    from mnesis.models.config import StoreConfig
+    from mnesis.store.immutable import ImmutableStore
+
+    store = ImmutableStore(StoreConfig(db_path=str(tmp_path / "twice.db")))
+    await store.initialize()
+    await asyncio.wait_for(asyncio.gather(store.close(), store.close()), timeout=5)
+    await store.close()
+    assert store._conn is None

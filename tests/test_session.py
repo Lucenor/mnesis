@@ -2290,3 +2290,90 @@ class TestCloseOwnership:
             _ = await asyncio.wait_for(first_send, timeout=5)
             await asyncio.wait_for(close1, timeout=5)
         assert session._closed
+
+
+class TestConcurrentClose:
+    async def test_two_concurrent_closes_on_an_idle_session(self, tmp_path):
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        await asyncio.wait_for(asyncio.gather(session.close(), session.close()), timeout=5)
+        assert session._closed
+
+    async def test_two_concurrent_closes_with_a_send_in_flight(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        from mnesis.models.message import TokenUsage
+
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def slow(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return "done", TokenUsage(input=1, output=1, total=2), "stop"
+
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        with patch.object(session, "_stream_response", new=AsyncMock(side_effect=slow)):
+            send = asyncio.create_task(session.send("hi"))
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            closes = asyncio.gather(session.close(), session.close())
+            await asyncio.sleep(0.05)
+            assert not closes.done()  # both wait for the stream on the wire
+            release.set()
+            await asyncio.wait_for(closes, timeout=5)
+            assert (await asyncio.wait_for(send, timeout=5)).text == "done"
+        assert session._closed
+
+    async def test_mutual_close_inside_two_sends_completes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "1")
+        monkeypatch.setattr("mnesis.session._CLOSE_INFLIGHT_TIMEOUT", 2.0)
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+
+        def handler():
+            fired = [False]
+
+            async def on_part(part):
+                if not fired[0]:
+                    fired[0] = True
+                    await session.close()
+
+            return on_part
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                session.send("a", on_part=handler()),
+                session.send("b", on_part=handler()),
+                return_exceptions=True,
+            ),
+            timeout=10,
+        )
+        assert len(results) == 2
+        assert session._closed
+
+    async def test_later_abort_request_still_aborts_a_nonabort_close(self, tmp_path, monkeypatch):
+        import mnesis.compaction.engine as engine_mod
+
+        calls: list[float] = []
+        started = asyncio.Event()
+
+        async def slow_empty(**kwargs: object) -> str:
+            calls.append(0.0)
+            started.set()
+            await asyncio.sleep(0.4)
+            return ""
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: slow_empty)
+        monkeypatch.setenv("MNESIS_MOCK_LLM", "0")
+        session = await TestRetrySleepSemantics._session(tmp_path, base_delay=0.01)
+        for i in range(4):
+            _ = await session.record(f"question {i} " * 20, f"answer {i} " * 20)
+        compaction = asyncio.create_task(session.compact())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        first = asyncio.create_task(session.close())  # waits for the compaction
+        await asyncio.sleep(0.02)
+        second = asyncio.create_task(session.close(abort_compaction=True))
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+        result = await asyncio.wait_for(compaction, timeout=5)
+        assert len(calls) == 1  # the run was aborted: no escalation to a further LLM call
+        assert result.level_used == 0
+        assert session._closed

@@ -223,9 +223,11 @@ class MnesisSession:
         self._inflight_waiters: list[asyncio.Future[None]] = []
         self._closing = False
         self._closed = False
-        # close() calls currently running: only when the last one ends without having
-        # closed the store is the session reopened (see ``close``).
-        self._active_closes = 0
+        # Concurrent close() calls share one close operation (see ``close``): the
+        # owner runs it, ``_close_done`` is resolved when the owner ends (closed or
+        # interrupted), ``_close_waiters`` counts callers waiting on it.
+        self._close_done: asyncio.Future[None] | None = None
+        self._close_waiters = 0
 
     @classmethod
     async def create(
@@ -1349,17 +1351,49 @@ class MnesisSession:
         ``close()`` from inside a ``send()``/``record()`` (e.g. in an event handler
         running in that call's task) waits for every *other* in-flight call but not
         for that call itself, to avoid a deadlock; the store is then closed under it,
-        so avoid doing that. ``close()`` is idempotent; if several ``close()`` calls
-        overlap and some are interrupted, the session stays closing until the last
-        one ends.
+        so avoid doing that. ``close()`` is idempotent. Concurrent ``close()`` calls
+        share one close operation: later callers wait for the first to finish (a
+        later ``abort_compaction=True`` still aborts the in-flight compaction), and
+        if the first is interrupted before the store is closed, a waiting caller
+        takes over. A ``close()`` made from inside a ``send()``/``record()`` while
+        another ``close()`` runs returns at once instead of waiting for it.
 
         Publishes :attr:`~mnesis.events.bus.MnesisEvent.SESSION_CLOSED` after
         cleanup.
         """
-        if self._closed:
-            return
+        if abort_compaction and not self._closed:
+            # Also from a caller that only waits for another close() in progress.
+            self._compaction_abort.set()
+        while not self._closed:
+            done = self._close_done
+            if done is None:
+                # No close in progress: this call owns the close operation.
+                done = self._close_done = asyncio.get_running_loop().create_future()
+                try:
+                    await self._close_impl(abort_compaction)
+                finally:
+                    self._close_done = None
+                    if not done.done():
+                        done.set_result(None)
+                    if not self._closed and self._close_waiters == 0:
+                        # Interrupted with nobody to take over: the session stays usable.
+                        self._closing = False
+                return
+            if asyncio.current_task() in self._inflight:
+                # Called from inside a send()/record() the owner is waiting for: waiting
+                # for it would deadlock both. The owner finishes the close.
+                return
+            # Another close() is running: wait for it instead of racing it. If it is
+            # interrupted before the store is closed, the loop makes this call the owner.
+            self._close_waiters += 1
+            try:
+                await asyncio.shield(done)
+            finally:
+                self._close_waiters -= 1
+
+    async def _close_impl(self, abort_compaction: bool) -> None:
+        """The close operation proper; at most one runs at a time (see :meth:`close`)."""
         self._closing = True
-        self._active_closes += 1
         try:
             # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
             if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
@@ -1383,11 +1417,6 @@ class MnesisSession:
             await self._store.close()
             self._closed = True
         finally:
-            self._active_closes -= 1
-            if not self._closed and self._active_closes == 0:
-                # Every close() was interrupted: the session stays usable. While another
-                # close() is still running, the session stays closing.
-                self._closing = False
             # An interrupted close() (e.g. timed out while draining) leaves the session
             # usable, so the abort flag must not stay set and abort every later run. But
             # a run still in flight must still see it: clear once that run has ended.

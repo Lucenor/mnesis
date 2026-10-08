@@ -271,13 +271,16 @@ class ImmutableStore:
         manages the connection lifetime.  If the connection is private
         (no pool was supplied) it is closed and set to ``None``.
         """
-        if self._conn is None:
+        # Detach first: a concurrent close() then sees ``None`` and returns, so a
+        # private connection is never closed twice (the second aiosqlite close()
+        # would wait forever).
+        conn, self._conn = self._conn, None
+        if conn is None:
             return
         if self._pool is None:
             # Private connection — we own it, so close it
-            await self._conn.close()
+            await conn.close()
         # Pool-managed connection — the pool owns it; do nothing
-        self._conn = None
 
     async def _apply_schema(self, conn: aiosqlite.Connection) -> None:
         """Create the schema and run the idempotent column/index migrations."""

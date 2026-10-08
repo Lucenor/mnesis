@@ -209,6 +209,39 @@ class TestPathExtraction:
         assert extract_file_id_paths(f"{RATES} ({token} done)") == {}
         assert extract_file_id_paths(f"{token} ({RATES})") == {}
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "%s (README first)",
+            "%s: LICENSE terms",
+            "%s: Makefile targets",
+            "%s (CHANGELOG entry)",
+            "%s (see README)",
+            "%s: foo/.NET",
+            "%s: .NET",
+            "%s .NET framework",
+            "%s: .env vars",
+            "%s: sub/.5",
+        ],
+    )
+    def test_known_filename_and_dotfile_false_positives(self, line):
+        assert extract_file_id_paths(line % RATES) == {}
+
+    @pytest.mark.parametrize(
+        ("line", "path"),
+        [
+            ("%s: README", "README"),
+            ("%s (Dockerfile)", "Dockerfile"),
+            ("%s: LICENSE.", "LICENSE"),
+            ("`Makefile` (%s)", "Makefile"),
+            ("%s - README.md", "README.md"),
+            ("- README.md - %s", "README.md"),
+            ("%s: dir/.hidden", "dir/.hidden"),
+        ],
+    )
+    def test_whole_value_known_filenames_pair(self, line, path):
+        assert extract_file_id_paths(line % RATES) == {RATES: path}
+
     def test_each_path_names_one_id(self):
         pairs = extract_file_id_paths(f"{RATES} {MIGRATE}: scripts/m.py")
         assert pairs == {MIGRATE: "scripts/m.py"}
