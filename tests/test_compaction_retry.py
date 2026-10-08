@@ -318,3 +318,124 @@ class TestCallWithRetryExhaustion:
         _ = await engine.run_compaction(session_id)
         assert len(calls) == 3
         assert time.monotonic() - t0 < 5
+
+
+class TestOutageAndAbortBetweenLevels:
+    async def test_later_llm_call_in_run_fails_fast_without_calling_provider(
+        self, session_id, store, dag_store, estimator, event_bus, retry_config, monkeypatch
+    ):
+        """After an outage, a further llm_call in the same run re-raises it, no request."""
+        calls: list[int] = []
+        second: list[BaseException] = []
+
+        async def always_429(**kwargs: object) -> str:
+            calls.append(1)
+            raise _rate_limit()
+
+        async def two_calls(messages, model, budget, estimator, llm_call, **kw):
+            with pytest.raises(RetriesExhaustedError):
+                _ = await llm_call(messages=[], max_tokens=1)
+            try:
+                _ = await llm_call(messages=[], max_tokens=1)
+            except RetriesExhaustedError as exc:
+                second.append(exc)
+            return None
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: always_429)
+        monkeypatch.setattr(engine_mod, "level1_summarise", two_calls)
+        engine = await _engine(session_id, store, dag_store, estimator, event_bus, retry_config)
+        result = await engine.run_compaction(session_id)
+
+        assert len(calls) == 3  # only the first call hit the provider
+        assert len(second) == 1
+        assert result.level_used == 3
+
+    async def test_abort_between_summarisation_levels(
+        self, session_id, store, dag_store, estimator, event_bus, config, monkeypatch
+    ):
+        abort = asyncio.Event()
+
+        async def empty_and_abort(**kwargs: object) -> str:
+            abort.set()
+            return ""
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: empty_and_abort)
+        engine = await _engine(session_id, store, dag_store, estimator, event_bus, config)
+        result = await engine.run_compaction(session_id, abort=abort)
+
+        assert result.level_used == 0  # stub: aborted before level 2
+        assert result.summary_message_id == ""
+
+    async def test_abort_between_condensation_levels(self, store, dag_store, estimator, event_bus):
+        abort = asyncio.Event()
+
+        async def empty_and_abort(**kwargs: object) -> str:
+            abort.set()
+            return ""
+
+        engine = engine_mod.CompactionEngine(
+            store, dag_store, estimator, event_bus, MnesisConfig(), session_model="m"
+        )
+        nodes = [_node("a", "alpha " * 20), _node("b", "beta " * 20)]
+        with pytest.raises(asyncio.CancelledError):
+            _ = await engine._run_condensation(nodes, "m", _BUDGET, empty_and_abort, abort)
+
+    async def test_level2_outage_propagates_from_level_functions(self):
+        from mnesis.compaction.levels import condense_level2, level2_summarise
+        from tests.test_compaction import _make_messages_with_parts
+
+        async def outage(**kwargs: object) -> str:
+            raise RetriesExhaustedError("429")
+
+        est = TokenEstimator()
+        msgs = _make_messages_with_parts("sess_l2_outage", 6)
+        with pytest.raises(RetriesExhaustedError):
+            _ = await level2_summarise(msgs, "m", _BUDGET, est, outage)
+        nodes = [_node("a", "alpha " * 20), _node("b", "beta " * 20)]
+        with pytest.raises(RetriesExhaustedError):
+            _ = await condense_level2(nodes, "m", _BUDGET, est, outage)
+
+
+class TestRunAfterOutage:
+    async def test_outage_state_does_not_leak_into_next_run(
+        self, session_id, store, dag_store, estimator, event_bus, tmp_path, monkeypatch
+    ):
+        """Run 1 exhausts retries (L3); run 2 on the same engine calls the LLM again."""
+        cfg = MnesisConfig(
+            store=StoreConfig(db_path=str(tmp_path / "after_outage.db")),
+            session=SessionConfig(retry=RetryConfig(max_retries=1, base_delay=0.0, jitter=False)),
+        )
+        calls: list[int] = []
+
+        async def down(**kwargs: object) -> str:
+            calls.append(1)
+            raise _rate_limit()
+
+        async def healthy(**kwargs: object) -> str:
+            calls.append(1)
+            return _SUMMARY
+
+        current = [down]
+
+        async def llm(**kwargs: object) -> str:
+            return await current[0](**kwargs)
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: llm)
+        engine = await _engine(session_id, store, dag_store, estimator, event_bus, cfg)
+
+        first = await engine.run_compaction(session_id)
+        assert first.level_used == 3
+        assert len(calls) == 2  # 1 + max_retries, then L2 skipped
+
+        current[0] = healthy
+        calls.clear()
+        for i in range(8):
+            msg = make_message(
+                session_id, role="user" if i % 2 == 0 else "assistant", msg_id=f"msg_after_{i}"
+            )
+            await store.append_message(msg)
+            await store.append_part(make_raw_part(msg.id, session_id, part_id=f"part_after_{i}"))
+
+        second = await engine.run_compaction(session_id)
+        assert calls  # the LLM was called again; the outage did not persist
+        assert second.level_used == 1
