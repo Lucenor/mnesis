@@ -1305,6 +1305,7 @@ class TestOperatorLifecycle:
             except asyncio.CancelledError:
                 cancelled.append(message)
                 raise
+            raise AssertionError("slow sub-agent should only exit by cancellation")
 
         monkeypatch.setattr(MnesisSession, "send", send)
         gen = AgenticMap(op_config).run(
