@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import pytest
+import structlog.testing
 
 from mnesis.compaction.engine import CompactionEngine
 from mnesis.compaction.file_ids import extract_file_ids
@@ -192,11 +193,13 @@ class TestLevelFunctions:
 
 
 async def _engine_with_nodes(
-    store, dag_store, est, event_bus, tmp_path, n_nodes, session_id, sizes=None
+    store, dag_store, est, event_bus, tmp_path, n_nodes, session_id, sizes=None, **compaction_kw
 ):
     cfg = MnesisConfig(
         store=StoreConfig(db_path=str(tmp_path / "cap.db")),
-        compaction=CompactionConfig(compaction_output_budget=1_000, max_compaction_rounds=5),
+        compaction=CompactionConfig(
+            compaction_output_budget=1_000, max_compaction_rounds=5, **compaction_kw
+        ),
     )
     info = ModelInfo(
         model_id="anthropic/claude-haiku-4-5",
@@ -369,3 +372,108 @@ class TestFitCountsFraming:
             nodes, texts, est, 400, reserved_tokens=0, level=1, separator="\n\n---\n\n"
         )
         assert [n.id for n in fitted] == ["node_0", "node_1"]
+
+
+class _L1Probe:
+    """llm_call stub: level 1 condensation prompts fail as configured; level 2 succeeds."""
+
+    def __init__(self, l1: str) -> None:
+        self.l1 = l1  # "truncate" | "error" | "empty" | "ok"
+        self.l1_calls = 0
+        self.l2_calls = 0
+
+    async def __call__(self, **kwargs: Any) -> str:
+        from mnesis.compaction.engine import CompactionTruncatedError
+
+        prompt = kwargs["messages"][0]["content"]
+        if "condensing multiple context summaries" in prompt:
+            self.l1_calls += 1
+            if self.l1 == "truncate":
+                raise CompactionTruncatedError("hit the output limit")
+            if self.l1 == "error":
+                raise RuntimeError("provider hiccup")
+            if self.l1 == "empty":
+                return "  "
+            return "## Goal\nmerged\n"
+        self.l2_calls += 1
+        return "GOAL: merged"
+
+
+class TestCondenseLevel1Skip:
+    async def _setup(self, *args, **compaction_kw):
+        session_id, store, dag_store, est, event_bus, tmp_path = args
+        engine, nodes = await _engine_with_nodes(
+            store,
+            dag_store,
+            est,
+            event_bus,
+            tmp_path,
+            3,
+            session_id,
+            sizes=[300] * 3,
+            **compaction_kw,
+        )
+        return engine, nodes, engine._summary_budget(), engine._model_info
+
+    async def _run(self, engine, nodes, budget, info, probe):
+        return await engine._run_condensation(
+            nodes, "anthropic/claude-haiku-4-5", budget, probe, None, info
+        )
+
+    async def test_truncation_escalates_then_later_runs_skip_level1(
+        self, session_id, store, dag_store, est, event_bus, tmp_path
+    ):
+        engine, nodes, budget, info = await self._setup(
+            session_id, store, dag_store, est, event_bus, tmp_path
+        )
+        probe = _L1Probe("truncate")
+        with structlog.testing.capture_logs() as logs:
+            first = await self._run(engine, nodes, budget, info, probe)
+            _ = await self._run(engine, nodes, budget, info, probe)
+        events = [e for e in logs if e["event"] == "condense_level1_disabled_after_truncation"]
+        assert len(events) == 1 and events[0]["model"] == "anthropic/claude-haiku-4-5"
+        assert first.compaction_level == 2  # this run escalated
+        assert engine._condense_l1_truncated
+        assert (probe.l1_calls, probe.l2_calls) == (1, 2)  # the second run made no level 1 request
+
+    async def test_config_flag_skips_level1_from_the_start(
+        self, session_id, store, dag_store, est, event_bus, tmp_path
+    ):
+        engine, nodes, budget, info = await self._setup(
+            session_id, store, dag_store, est, event_bus, tmp_path, condense_skip_level1=True
+        )
+        probe = _L1Probe("ok")
+        cand = await self._run(engine, nodes, budget, info, probe)
+        assert cand.compaction_level == 2
+        assert (probe.l1_calls, probe.l2_calls) == (0, 1)
+
+    @pytest.mark.parametrize("failure", ["error", "empty"])
+    async def test_other_failures_do_not_disable_level1(
+        self, failure, session_id, store, dag_store, est, event_bus, tmp_path
+    ):
+        engine, nodes, budget, info = await self._setup(
+            session_id, store, dag_store, est, event_bus, tmp_path
+        )
+        probe = _L1Probe(failure)
+        _ = await self._run(engine, nodes, budget, info, probe)
+        _ = await self._run(engine, nodes, budget, info, probe)
+        assert probe.l1_calls == 2
+        assert not engine._condense_l1_truncated
+
+    async def test_level1_kept_when_level2_is_disabled(
+        self, session_id, store, dag_store, est, event_bus, tmp_path
+    ):
+        engine, nodes, budget, info = await self._setup(
+            session_id,
+            store,
+            dag_store,
+            est,
+            event_bus,
+            tmp_path,
+            condense_skip_level1=True,
+            level2_enabled=False,
+        )
+        probe = _L1Probe("ok")
+        cand = await self._run(engine, nodes, budget, info, probe)
+        assert cand.compaction_level == 1
+        assert probe.l1_calls == 1

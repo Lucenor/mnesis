@@ -90,7 +90,8 @@ Be thorough — this summary will replace the original messages.
 Rules:
 - Faithfulness: under In Progress, Remaining Work and next steps, list only items
   the user or assistant explicitly stated. Never invent or infer them. If none were
-  explicitly stated, write exactly "None stated".
+  explicitly stated, write exactly "None stated". Suggestions or recommendations the
+  assistant made are not tasks unless the user accepted or requested them.
 - Files: write every file that has an id together with it, as `path (file_<hex>)`,
   exactly as the conversation gives it. Each distinct path keeps its own entry;
   never merge two files under one id or offer guessed alternative paths.
@@ -128,6 +129,8 @@ Create a COMPRESSED continuation summary. Be extremely concise.
 Drop intermediate reasoning, redundant details, and verbose explanations.
 Preserve only: current goal, active constraints, key file locations (with ids),
 named people and their roles, next step.
+Suggestions or recommendations the assistant made are not tasks unless the user
+accepted or requested them.
 
 Format:
 GOAL: <one sentence>
@@ -150,7 +153,8 @@ Rules:
   which say exactly "None stated" when nothing was explicitly stated.
 - Faithfulness: under In Progress, Remaining Work and next steps, list only items
   the user or assistant explicitly stated. Never invent or infer them. If none were
-  explicitly stated, write exactly "None stated".
+  explicitly stated, write exactly "None stated". Suggestions or recommendations the
+  assistant made are not tasks unless the user accepted or requested them.
 - Files: write every file that has an id together with it, as `path (file_<hex>)`,
   exactly as the conversation gives it. Each distinct path keeps its own entry;
   never merge two files under one id or offer guessed alternative paths.
@@ -187,6 +191,8 @@ CONDENSE_LEVEL2_PROMPT = """\
 Compress these summaries into one very short summary.
 Keep only: current goal, key constraints, critical files (with ids), named people
 and their roles, immediate next step.
+Suggestions or recommendations the assistant made are not tasks unless the user
+accepted or requested them.
 
 Format:
 GOAL: <one sentence>

@@ -562,10 +562,13 @@ The inner sequence for each round:
    run escalates (Level 2, then Level 3), and IDs are dropped (least recently
    referenced first, as in Level 3) only when the footer alone cannot fit.
 
-3. **Commit** — `SummaryDAGStore.insert_node()` writes the summary as a
-   `Message(is_summary=True)` row plus a `TextPart` and a `CompactionMarkerPart`.
-   Then `ImmutableStore.swap_context_items()` atomically replaces the compacted
-   message entries with one `'summary'` entry.
+3. **Commit** — `SummaryDAGStore.commit_summary_node()` writes the summary as a
+   `Message(is_summary=True)` row plus a `TextPart` and a `CompactionMarkerPart`,
+   its `summary_nodes` row, the replacement of the compacted message entries in
+   `context_items` by one `'summary'` entry and (for condensation) the
+   `superseded` flag on the parents, all in **one** locked transaction. A cancel
+   or failure at any point rolls the whole commit back, so a node is never left
+   half-committed (e.g. parents still active but already out of the context).
 
 4. **Condensation loop** (if `condensation_enabled=True`) — while the
    re-measured context is not below the condensation target (half the soft
@@ -573,9 +576,13 @@ The inner sequence for each round:
    calls `_run_condensation()` to merge live `SummaryNode` objects into a
    single condensed node. The LLM levels cap their input against the compaction
    model's window (see below), so when the live nodes do not all fit, the
-   **oldest** ones that do are condensed; only those are swapped out of the
-   context and marked superseded via `SummaryDAGStore.mark_superseded()`, and the
-   rest stay live for the next round. Loop runs up to `max_compaction_rounds`
+   **oldest** ones that do are condensed. "Oldest" is by position in the
+   context (`context_items`), not by creation time: a condensed node is created
+   late but sits where the oldest span was, so ordering by creation time would
+   merge the wrong nodes and invert the prompt order. Only the condensed nodes
+   are swapped out of the context and superseded (in the commit above), and the
+   rest stay live for the next round. If an LLM condensation does not shrink its
+   input, the deterministic level runs on that same subset only. Loop runs up to `max_compaction_rounds`
    times, breaking early if no progress is made.
 
 5. **Event** — `EventBus.publish(COMPACTION_COMPLETED, ...)` is fired with the
@@ -654,7 +661,11 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
   (all-or-nothing). The old bare-ID footer still parses everywhere (ID extraction
   only looks for `file_<hex>` tokens).
 
-- **Faithfulness and people**: every default prompt forbids inventing next
+- **Faithfulness and people** (compliance is model-dependent: observed only
+  partial on Nemotron 3 Super, which listed the assistant's own recommendations
+  under In Progress and invented a Remaining Work item; the prompts also say
+  suggestions the assistant made are not tasks unless the user accepted or
+  requested them): every default prompt forbids inventing next
   steps (In Progress, Remaining Work and next steps list only what the user or
   assistant explicitly stated, otherwise exactly "None stated") and keeps named people with their roles; the level 2 formats have a
   compact `PEOPLE:` line.
@@ -740,8 +751,18 @@ When multiple summary nodes accumulate and the context is still over budget,
 condensation merges them. Three levels mirror summarisation:
 
 - **Condense L1** — `CONDENSE_LEVEL1_PROMPT` merges the summaries via the
-  structured format, with an output target of about half the input (see "Length
-  target" above).
+  structured format, with per-section bullet caps derived from half the input
+  (see "Length target" above). **Adaptive skip:** a completion cut off at the
+  output limit (`CompactionTruncatedError`) is never accepted, and the engine
+  remembers it: for the rest of that engine's lifetime later condensations start
+  at L2, so a verbose model does not waste a request per condensation. Empty
+  completions and provider errors do not trigger this. The state is in memory
+  only (not persisted; a reloaded session probes L1 again once). Set
+  `CompactionConfig.condense_skip_level1=True` to skip L1 from the start. Both
+  need `level2_enabled` (otherwise L1 is kept: skipping would drop to L3).
+  Evidence: on Nemotron 3 Super (reasoning off) condense L1 overran the output
+  cap in 4 of 4 samples across two prompt variants despite bullet limits, while
+  condense L2 scored 9/9 on the recall probe. Summarisation L1 is unaffected.
 - **Condense L2** — `CONDENSE_LEVEL2_PROMPT` aggressive single-turn merge
   (each summary truncated to 800 chars).
 - **Input cap (L1 and L2)** — like summarisation, the request must fit the

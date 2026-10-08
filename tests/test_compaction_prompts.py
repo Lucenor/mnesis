@@ -87,6 +87,10 @@ class TestPromptWording:
         assert "never invent" in prompt.lower()
         assert "explicitly" in prompt
         assert 'exactly "None stated"' in prompt
+        assert (
+            "Suggestions or recommendations the assistant made are not tasks unless the "
+            "user accepted or requested them."
+        ) in " ".join(prompt.split())
 
     @pytest.mark.parametrize("prompt", [LEVEL1_PROMPT, CONDENSE_LEVEL1_PROMPT])
     def test_level1_lists_only_explicit_items(self, prompt):
