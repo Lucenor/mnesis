@@ -108,8 +108,9 @@ class CompactionFailedPayload(TypedDict):
     error: str
     """Human-readable error description."""
     aborted: bool
-    """``True`` when the run was ended deliberately via its ``abort`` event
-    (e.g. session close) rather than by an error."""
+    """``True`` only for an engine-level abort: the ``abort`` event passed to
+    ``run_compaction()`` / ``check_and_trigger()`` was set. A session never sets
+    it, so ``session.close()`` does not produce it."""
 
 
 # ── Pruning ───────────────────────────────────────────────────────────────────

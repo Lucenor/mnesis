@@ -15,6 +15,15 @@ import structlog
 from mnesis.models.config import RetryConfig
 
 
+class RetriesExhaustedError(Exception):
+    """A retryable LLM error persisted through every configured Mnesis retry.
+
+    ``__cause__`` is the last underlying error. Raised only when Mnesis owns
+    retries (``max_retries > 0``); it signals an outage, so callers should stop
+    sending further LLM calls rather than start another retry sequence.
+    """
+
+
 def is_retryable(exc: BaseException) -> bool:
     """Return True if ``exc`` is a transient LLM error worth retrying.
 
@@ -83,9 +92,9 @@ async def call_with_retry[T](
 ) -> T:
     """Await ``call()``, retrying transient errors per ``cfg``.
 
-    Non-retryable errors, and retryable ones once ``cfg.max_retries`` is
-    exhausted, propagate unchanged. If ``abort`` is set during backoff the wait
-    ends immediately with ``asyncio.CancelledError``; external task
+    Non-retryable errors propagate unchanged. A retryable error that outlasts
+    ``cfg.max_retries`` (> 0) raises :class:`RetriesExhaustedError`. If ``abort``
+    is set during backoff the wait ends immediately with ``asyncio.CancelledError``; external task
     cancellation also propagates.
     """
     log = logger or structlog.get_logger("mnesis.retry")
@@ -94,8 +103,12 @@ async def call_with_retry[T](
         try:
             return await call()
         except Exception as exc:
-            if not is_retryable(exc) or attempt >= cfg.max_retries:
+            if not is_retryable(exc):
                 raise
+            if attempt >= cfg.max_retries:
+                if cfg.max_retries == 0:
+                    raise  # Mnesis retries disabled: LiteLLM's own retries already ran
+                raise RetriesExhaustedError(str(exc)) from exc
             delay = backoff_delay(cfg, attempt)
             log.warning(
                 "llm_call_retrying",

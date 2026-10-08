@@ -10,9 +10,13 @@ import pytest
 from litellm.exceptions import AuthenticationError, RateLimitError
 
 import mnesis.compaction.engine as engine_mod
+from mnesis.compaction.levels import condense_level1
 from mnesis.events.bus import MnesisEvent
 from mnesis.models.config import MnesisConfig, RetryConfig, SessionConfig, StoreConfig
-from mnesis.retry import call_with_retry
+from mnesis.models.message import ContextBudget
+from mnesis.models.summary import SummaryNode
+from mnesis.retry import RetriesExhaustedError, call_with_retry
+from mnesis.tokens.estimator import TokenEstimator
 from tests.conftest import make_message, make_raw_part
 
 _SUMMARY = "## Goal\nretry summary\n\n## Completed Work\n- done\n"
@@ -87,7 +91,7 @@ class TestCompactionRetry:
         # One attempt each for L1 and L2: no retry of the non-retryable error.
         assert len(calls) == 2
 
-    async def test_retries_exhausted_escalates(
+    async def test_retries_exhausted_skips_remaining_llm_levels(
         self, session_id, store, dag_store, estimator, event_bus, retry_config, monkeypatch
     ):
         calls: list[int] = []
@@ -101,7 +105,8 @@ class TestCompactionRetry:
         result = await engine.run_compaction(session_id)
 
         assert result.level_used == 3
-        assert len(calls) == 6  # (1 + max_retries) attempts for each of L1 and L2
+        # One retry sequence (1 + max_retries) on the outage; L2 is skipped, not retried.
+        assert len(calls) == 3
 
     @staticmethod
     def _patch_litellm(monkeypatch) -> list[dict]:
@@ -223,3 +228,93 @@ class TestCallWithRetry:
         _ = task.cancel()
         with pytest.raises(asyncio.CancelledError):
             _ = await task
+
+
+def _node(node_id: str, content: str) -> SummaryNode:
+    return SummaryNode(
+        id=node_id,
+        session_id="s",
+        kind="leaf",
+        span_start_message_id="a",
+        span_end_message_id="b",
+        content=content,
+        token_count=max(1, len(content) // 4),
+    )
+
+
+_BUDGET = ContextBudget(model_context_limit=100_000, reserved_output_tokens=0, compaction_buffer=0)
+_FAST = RetryConfig(max_retries=2, base_delay=0.01, jitter=False)
+
+
+class TestCondensationRetry:
+    async def test_condensation_429_then_success(self):
+        """Condensation L1 retried after a 429 yields an L1 node (no escalation)."""
+        calls: list[int] = []
+
+        async def flaky(**kwargs: object) -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise _rate_limit()
+            return _SUMMARY
+
+        async def llm_call(**kwargs: object) -> str:
+            return await call_with_retry(lambda: flaky(**kwargs), _FAST)
+
+        nodes = [_node("a", "alpha " * 20), _node("b", "beta " * 20)]
+        cond = await condense_level1(nodes, "m", _BUDGET, TokenEstimator(), llm_call)
+
+        assert cond is not None
+        assert cond.compaction_level == 1
+        assert len(calls) == 2
+
+    async def test_condensation_outage_skips_to_level3(
+        self, store, dag_store, estimator, event_bus
+    ):
+        calls: list[int] = []
+
+        async def outage(**kwargs: object) -> str:
+            calls.append(1)
+            raise RetriesExhaustedError("429")
+
+        engine = engine_mod.CompactionEngine(
+            store, dag_store, estimator, event_bus, MnesisConfig(), session_model="m"
+        )
+        nodes = [_node("a", "alpha " * 20), _node("b", "beta " * 20)]
+        cond = await engine._run_condensation(nodes, "m", _BUDGET, outage, None)
+
+        assert len(calls) == 1  # L2 skipped
+        assert cond.compaction_level == 3
+
+
+class TestCallWithRetryExhaustion:
+    async def test_exhaustion_raises_distinct_error(self):
+        async def fail() -> str:
+            raise _rate_limit()
+
+        with pytest.raises(RetriesExhaustedError) as info:
+            _ = await call_with_retry(fail, _FAST)
+        assert isinstance(info.value.__cause__, RateLimitError)
+
+    async def test_no_retries_configured_propagates_original(self):
+        async def fail() -> str:
+            raise _rate_limit()
+
+        with pytest.raises(RateLimitError):
+            _ = await call_with_retry(fail, RetryConfig(max_retries=0))
+
+    async def test_outage_fails_fast_for_later_calls_in_the_run(
+        self, session_id, store, dag_store, estimator, event_bus, retry_config, monkeypatch
+    ):
+        """After one call exhausts its retries, no further LLM call is attempted."""
+        calls: list[int] = []
+
+        async def always_429(**kwargs: object) -> str:
+            calls.append(1)
+            raise _rate_limit()
+
+        monkeypatch.setattr(engine_mod, "_make_llm_call", lambda model, **kw: always_429)
+        engine = await _engine(session_id, store, dag_store, estimator, event_bus, retry_config)
+        t0 = time.monotonic()
+        _ = await engine.run_compaction(session_id)
+        assert len(calls) == 3
+        assert time.monotonic() - t0 < 5

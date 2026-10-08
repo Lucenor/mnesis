@@ -162,3 +162,25 @@ class TestTruncatedCompletion:
         msgs = _make_messages_with_parts("sess_trunc", 6)
         out = await level1_summarise(msgs, "m", budget, TokenEstimator(), llm)
         assert out is None
+
+
+class TestNoneCompletion:
+    async def test_none_from_injected_llm_call_escalates(self):
+        """An injected llm_call returning None fails the level instead of raising."""
+        from mnesis.compaction.levels import level1_summarise, level2_summarise
+        from mnesis.tokens.estimator import TokenEstimator
+        from tests.test_compaction import _make_messages_with_parts
+
+        async def none_llm(**kwargs: object) -> None:
+            return None
+
+        budget = ContextBudget(
+            model_context_limit=100_000, reserved_output_tokens=0, compaction_buffer=0
+        )
+        msgs = _make_messages_with_parts("sess_none", 6)
+        est = TokenEstimator()
+        assert await level1_summarise(msgs, "m", budget, est, none_llm) is None
+        assert await level2_summarise(msgs, "m", budget, est, none_llm) is None
+        nodes = [_node("a", "alpha " * 20), _node("b", "beta " * 20)]
+        assert await condense_level1(nodes, "m", budget, est, none_llm) is None
+        assert await condense_level2(nodes, "m", budget, est, none_llm) is None
