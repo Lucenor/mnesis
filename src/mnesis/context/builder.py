@@ -132,7 +132,9 @@ class ContextBuilder:
             # sessions whose messages were written before the migration.
             # Fall back to the full session scan so those sessions still work.
             all_msgs_fallback = await self._store.get_messages_with_parts(session_id)
-            non_summary_fallback = [m for m in all_msgs_fallback if not m.is_summary]
+            non_summary_fallback = [
+                m for m in all_msgs_fallback if not m.is_summary and not self._is_blank_assistant(m)
+            ]
             if not non_summary_fallback:
                 return BuiltContext(
                     messages=[],
@@ -187,8 +189,8 @@ class ContextBuilder:
         # Step 3: Separate summaries from messages and compute summary tokens
         # to reserve budget space.
         # Load each summary node once and cache it to avoid repeated round-trips
-        # (get_node_by_id internally calls get_messages for the full session,
-        # so deduplication matters for sessions with multiple summaries).
+        # (each lookup is a few queries, so deduplication still matters for
+        # sessions with multiple summaries).
         has_summary = any(item_type == "summary" for item_type, _ in context_items)
         summary_cache: dict[str, Any] = {}
         summary_token_count = 0
@@ -221,6 +223,11 @@ class ContextBuilder:
                     session_id=session_id,
                     missing_message_ids=missing,
                 )
+
+        # An assistant turn with no content (a send() cancelled or failed before
+        # anything was produced) is dropped here, before sizing, so token counts
+        # match what is sent: providers reject empty non-final assistant messages.
+        candidate_messages = [m for m in candidate_messages if not self._is_blank_assistant(m)]
 
         # Walk newest→oldest, include as many messages as fit.
         # Keep estimating past the cut-off so ``full_context_tokens`` reports
@@ -299,6 +306,12 @@ class ContextBuilder:
             tool_output_tokens=tool_output_tokens,
             full_context_tokens=system_tokens + summary_token_count + total_raw,
         )
+
+    def _is_blank_assistant(self, msg: MessageWithParts) -> bool:
+        """``True`` for an assistant message that would render to empty/whitespace content."""
+        if msg.role != "assistant":
+            return False
+        return not str(self._convert_message(msg).content).strip()
 
     def _convert_message(self, msg_with_parts: MessageWithParts) -> LLMMessage:
         """Convert a MessageWithParts to an LLMMessage for the provider API."""

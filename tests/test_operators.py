@@ -1199,3 +1199,59 @@ class TestAgenticMap:
         assert MnesisEvent.MAP_STARTED in events
         assert MnesisEvent.MAP_ITEM_COMPLETED in events
         assert MnesisEvent.MAP_COMPLETED in events
+
+
+class TestLiteLLMRetryInteraction:
+    """C4: LiteLLM's own retries are off exactly when LLMMap retries the item itself."""
+
+    @staticmethod
+    def _patch_litellm(monkeypatch) -> list[dict]:
+        import litellm
+
+        monkeypatch.delenv("MNESIS_MOCK_LLM", raising=False)
+        seen: list[dict] = []
+
+        class _Msg:
+            content = json.dumps({"summary": "ok", "keywords": ["a"]})
+
+        class _Choice:
+            message = _Msg()
+
+        class _Resp:
+            choices = (_Choice(),)
+
+        async def fake_acompletion(**kwargs):
+            seen.append(kwargs)
+            return _Resp()
+
+        monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+        return seen
+
+    @staticmethod
+    async def _run_one(max_retries: int) -> None:
+        llm_map = LLMMap(OperatorConfig(max_retries=max_retries))
+        _tmpl = _JinjaEnv().from_string("Process: {{ item }}")
+        result = await llm_map._process_item(
+            item="x",
+            compiled_template=_tmpl,
+            schema=OutputSchema.model_json_schema(),
+            pydantic_model=OutputSchema,
+            model="test-model",
+            semaphore=asyncio.Semaphore(1),
+            max_retries=max_retries,
+            system_prompt=None,
+            temperature=0.0,
+            timeout=30.0,
+            retry_guidance="retry",
+        )
+        assert result.success is True
+
+    async def test_litellm_retries_disabled_when_mnesis_retries(self, monkeypatch):
+        seen = self._patch_litellm(monkeypatch)
+        await self._run_one(max_retries=3)
+        assert seen[0]["num_retries"] == 0
+
+    async def test_litellm_defaults_kept_when_mnesis_retries_off(self, monkeypatch):
+        seen = self._patch_litellm(monkeypatch)
+        await self._run_one(max_retries=0)
+        assert "num_retries" not in seen[0]

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
-from typing import Any
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any, Concatenate
 
 import structlog
 from ulid import ULID
@@ -31,7 +32,7 @@ from mnesis.models.message import (
 )
 from mnesis.models.snapshot import ContextBreakdown, TurnSnapshot
 from mnesis.retry import backoff_delay, is_retryable
-from mnesis.store.immutable import ImmutableStore, RawMessagePart
+from mnesis.store.immutable import ImmutableStore, MnesisStoreError, RawMessagePart
 from mnesis.store.pool import StorePool
 from mnesis.store.summary_dag import SummaryDAGStore
 from mnesis.tokens.estimator import TokenEstimator
@@ -76,6 +77,48 @@ async def _forward_part(
     result: Any = on_part(part)
     if inspect.isawaitable(result):
         _ = await result
+
+
+class SessionClosedError(MnesisStoreError):
+    """Raised by session operations after ``close()`` (``send``/``record``/``stream`` also
+    while it is closing).
+
+    A :class:`~mnesis.store.immutable.MnesisStoreError`, so existing
+    ``except MnesisStoreError`` handlers around a closed session keep working.
+    """
+
+
+# How long ``close()`` waits for in-flight ``send()``/``record()`` calls to finish
+# persisting their turn (seconds). A call in a retry backoff ends at once when
+# ``close()`` cancels the sleep; one mid-LLM-stream is allowed to finish up to this.
+_CLOSE_INFLIGHT_TIMEOUT: float = 30.0
+
+
+def _tracked[**P, R](
+    fn: Callable[Concatenate[MnesisSession, P], Coroutine[Any, Any, R]],
+) -> Callable[Concatenate[MnesisSession, P], Coroutine[Any, Any, R]]:
+    """Register the call as in-flight so ``close()`` can wait for it (see ``_operation``)."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: MnesisSession, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        with self._operation():
+            return await fn(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _requires_open[**P, R](
+    fn: Callable[Concatenate[MnesisSession, P], Coroutine[Any, Any, R]],
+) -> Callable[Concatenate[MnesisSession, P], Coroutine[Any, Any, R]]:
+    """Raise :class:`SessionClosedError` if the session is already closed."""
+
+    @functools.wraps(fn)
+    async def wrapper(self: MnesisSession, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        if self._closed:
+            raise SessionClosedError("session is closed")
+        return await fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 class MnesisSession:
@@ -168,9 +211,23 @@ class MnesisSession:
         self._pending_compact_result: CompactionResult | None = None
         # Holds the current retry backoff sleep task so close() can cancel it.
         self._retry_sleep_task: asyncio.Task[None] | None = None
+        # Set by ``close(abort_compaction=True)``; every compaction run this session
+        # starts watches it, so a backoff wait ends promptly instead of being waited out.
+        self._compaction_abort = asyncio.Event()
         # Tracks background send() tasks spawned by stream() so close() can
         # await them, preventing DB-closed errors on abandoned iterators.
         self._background_send_tasks: set[asyncio.Task[None]] = set()
+        # In-flight send()/record() calls (their tasks) and the event set while none
+        # are, so close() can wait for them to finish persisting before closing the DB.
+        self._inflight: list[asyncio.Task[Any] | None] = []
+        self._inflight_waiters: list[asyncio.Future[None]] = []
+        self._closing = False
+        self._closed = False
+        # Concurrent close() calls share one close operation (see ``close``): the
+        # owner runs it, ``_close_done`` is resolved when the owner ends (closed or
+        # interrupted), ``_close_waiters`` counts callers waiting on it.
+        self._close_done: asyncio.Future[None] | None = None
+        self._close_waiters = 0
 
     @classmethod
     async def create(
@@ -434,6 +491,7 @@ class MnesisSession:
         session._cumulative_tokens = cumulative_tokens
         return session
 
+    @_tracked
     async def send(
         self,
         message: str | list[MessagePart],
@@ -461,6 +519,7 @@ class MnesisSession:
             TurnResult with the assistant's text, token usage, and status.
 
         Raises:
+            SessionClosedError: If the session is closed or closing.
             MnesisStoreError: If message persistence fails.
         """
         sys_prompt = system_prompt or self._system_prompt
@@ -606,17 +665,27 @@ class MnesisSession:
                         "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
                         "error_message": str(exc),
                         "delay_seconds": delay,
+                        "source": "send",
                     },
                 )
                 # Sleep in a cancellable task so close() can abort the wait.
-                self._retry_sleep_task = asyncio.create_task(asyncio.sleep(delay))
+                sleep_task = asyncio.create_task(asyncio.sleep(delay))
+                self._retry_sleep_task = sleep_task
                 try:
-                    await self._retry_sleep_task
-                except asyncio.CancelledError:
-                    self._logger.info("llm_retry_cancelled")
-                    finish_reason = "error"
-                    text_accumulator = "[Error: retry cancelled]"
-                    break
+                    try:
+                        # ``asyncio.wait`` does not raise when the *sleep task* is
+                        # cancelled (by ``close()``); it raises CancelledError only
+                        # when send() itself is cancelled (task.cancel(), a timeout).
+                        _ = await asyncio.wait({sleep_task})
+                    except asyncio.CancelledError:
+                        sleep_task.cancel()  # stop the sleep too, and honour the caller
+                        raise
+                    if sleep_task.cancelled():
+                        # close() cancelled the backoff: end the turn as an error.
+                        self._logger.info("llm_retry_cancelled")
+                        finish_reason = "error"
+                        text_accumulator = "[Error: retry cancelled]"
+                        break
                 finally:
                     self._retry_sleep_task = None
 
@@ -714,6 +783,9 @@ class MnesisSession:
             :class:`TextDelta` for each streamed text chunk, followed by a
             single :class:`TurnComplete` carrying the full :class:`TurnResult`.
 
+        Raises:
+            SessionClosedError: If the session is closed or closing.
+
         Note:
             **Abandonment safety** — If you ``break`` out of the ``async for``
             loop or an exception interrupts iteration, the underlying
@@ -733,6 +805,8 @@ class MnesisSession:
                         print()  # newline after streaming ends
                         print(f"Tokens: {event.result.tokens.effective_total()}")
         """
+        if self._closing or self._closed:
+            raise SessionClosedError("session is closed or closing")
         queue: asyncio.Queue[TextDelta | TurnComplete | None] = asyncio.Queue()
         abandoned = False
         send_exc: BaseException | None = None
@@ -891,6 +965,7 @@ class MnesisSession:
         # Only the last ``doom_loop_threshold`` entries are ever inspected.
         del self._recent_tool_calls[: -self._config.session.doom_loop_threshold]
 
+    @_tracked
     async def record(
         self,
         user_message: str | list[MessagePart],
@@ -915,6 +990,9 @@ class MnesisSession:
 
         Returns:
             RecordResult with the persisted message IDs and token usage.
+
+        Raises:
+            SessionClosedError: If the session is closed or closing.
 
         Example::
 
@@ -1087,6 +1165,7 @@ class MnesisSession:
             doom_loop_detected=doom_loop,
         )
 
+    @_requires_open
     async def messages(self) -> list[MessageWithParts]:
         """
         Return the full message history for this session.
@@ -1103,9 +1182,12 @@ class MnesisSession:
 
         Returns:
             List of MessageWithParts in chronological order.
+        Raises:
+            SessionClosedError: If the session is closed.
         """
         return await self._store.get_messages_with_parts(self._session_id)
 
+    @_requires_open
     async def conversation_messages(self) -> list[MessageWithParts]:
         """
         Return only the conversational turns, excluding compaction summaries.
@@ -1121,6 +1203,7 @@ class MnesisSession:
         all_msgs = await self._store.get_messages_with_parts(self._session_id)
         return [m for m in all_msgs if not m.is_summary]
 
+    @_requires_open
     async def context_for_next_turn(
         self,
         system_prompt: str | None = None,
@@ -1149,6 +1232,9 @@ class MnesisSession:
             Ordered list of ``{"role": str, "content": str | list}`` dicts
             ready to pass to any chat completion API.
 
+        Raises:
+            SessionClosedError: If the session is closed.
+
         Example::
 
             messages = await session.context_for_next_turn()
@@ -1167,6 +1253,7 @@ class MnesisSession:
         )
         return [{"role": m.role, "content": m.content} for m in context.messages]
 
+    @_requires_open
     async def compact(self) -> CompactionResult:
         """
         Manually trigger synchronous compaction.
@@ -1181,14 +1268,54 @@ class MnesisSession:
 
         Returns:
             CompactionResult describing the compaction outcome.
+        Raises:
+            SessionClosedError: If the session is closed.
         """
         self._logger.info("manual_compaction_triggered", session_id=self._session_id)
         # Runs as the engine's tracked task, after any background compaction.
-        result = await self._compaction_engine.compact_exclusive(self._session_id)
+        result = await self._compaction_engine.compact_exclusive(
+            self._session_id, abort=self._compaction_abort
+        )
         self._pending_compact_result = result
         return result
 
-    async def close(self) -> None:
+    @contextmanager
+    def _operation(self) -> Iterator[None]:
+        """Track a send()/record() call as in flight; reject it if the session is closing."""
+        if self._closing or self._closed:
+            raise SessionClosedError("session is closed or closing")
+        owner = asyncio.current_task()
+        self._inflight.append(owner)
+        try:
+            yield
+        finally:
+            self._inflight.remove(owner)
+            for waiter in self._inflight_waiters:
+                if not waiter.done():
+                    waiter.set_result(None)
+            self._inflight_waiters.clear()
+
+    async def _wait_for_other_operations(self, max_wait: float) -> None:
+        """Wait until no send()/record() other than the current task's own is in flight.
+
+        A task cannot wait for itself, so a ``close()`` called from inside a
+        ``send()``/``record()`` waits for every *other* in-flight call. Gives up
+        after *max_wait* seconds (logged).
+        """
+        me = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_wait
+        while any(task is not me for task in self._inflight):
+            waiter: asyncio.Future[None] = loop.create_future()
+            self._inflight_waiters.append(waiter)
+            remaining = deadline - loop.time()
+            try:
+                await asyncio.wait_for(waiter, timeout=max(remaining, 0.0))
+            except TimeoutError:
+                self._logger.warning("close_inflight_wait_timed_out")
+                return
+
+    async def close(self, *, abort_compaction: bool = False) -> None:
         """
         Clean up session resources.
 
@@ -1197,24 +1324,117 @@ class MnesisSession:
         no in-flight write is interrupted and that the compaction summary is
         fully persisted before the DB handle is closed.
 
+        With retries enabled (``SessionConfig.retry.max_retries > 0``) that wait
+        can include compaction retry backoffs. Pass ``abort_compaction=True`` to
+        bound it: the in-flight run is told to stop, its backoff wait ends
+        immediately and it returns the failed stub result
+        (``COMPACTION_FAILED`` with ``aborted=True``). Work the run had already
+        committed (earlier rounds) stays; the abandoned round is not summarised,
+        so the history is simply left for the next session to compact. An LLM
+        request already on the wire is not interrupted: the run stops when it
+        returns. A boolean is used rather than a timeout because an interrupted
+        ``close()`` could not release the database connection. If ``close()`` is
+        interrupted anyway (e.g. wrapped in ``asyncio.timeout``), the abort stays in
+        force until the in-flight run ends and is cleared then, so later runs on the
+        still-open session are not aborted.
+
+        Args:
+            abort_compaction: Abort the in-flight compaction instead of waiting
+                for it to finish. Default ``False`` (wait; summary fully persisted).
+
+        ``close()`` first marks the session closing (new ``send()``/``record()``
+        calls raise :class:`SessionClosedError`), cancels any retry backoff, then
+        waits for in-flight ``send()``/``record()`` calls to finish persisting their
+        turn (a send whose backoff was cancelled returns its error turn). A stream
+        already on the wire is allowed to complete, for up to 30 seconds; no new
+        work starts. Only then are compactions drained and the store closed. Calling
+        ``close()`` from inside a ``send()``/``record()`` (e.g. in an event handler
+        running in that call's task) waits for every *other* in-flight call but not
+        for that call itself, to avoid a deadlock; the store is then closed under it,
+        so avoid doing that. ``close()`` is idempotent. Concurrent ``close()`` calls
+        share one close operation: later callers wait for the first to finish (a
+        later ``abort_compaction=True`` still aborts the in-flight compaction), and
+        if the first is interrupted before the store is closed, a waiting caller
+        takes over. A ``close()`` made from inside a ``send()``/``record()`` while
+        another ``close()`` runs returns at once instead of waiting for it.
+
         Publishes :attr:`~mnesis.events.bus.MnesisEvent.SESSION_CLOSED` after
         cleanup.
         """
-        # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
-        if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
-            self._retry_sleep_task.cancel()
-        # Await any background send() tasks spawned by stream() so the DB is
-        # not closed while a turn is still being persisted.
-        if self._background_send_tasks:
-            await asyncio.gather(*self._background_send_tasks, return_exceptions=True)
-        # Drain: a finished run's handle is released by ``wait_for_pending``, but a
-        # run scheduled meanwhile replaces it and must be awaited too.
-        while True:
-            _ = await self._compaction_engine.wait_for_pending()
-            if not self._compaction_engine.has_pending:
-                break
-        self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
-        await self._store.close()
+        if abort_compaction and not self._closed:
+            # Also from a caller that only waits for another close() in progress.
+            self._compaction_abort.set()
+        while not self._closed:
+            done = self._close_done
+            if done is None:
+                # No close in progress: this call owns the close operation.
+                done = self._close_done = asyncio.get_running_loop().create_future()
+                try:
+                    await self._close_impl(abort_compaction)
+                finally:
+                    self._close_done = None
+                    if not done.done():
+                        done.set_result(None)
+                    if not self._closed and self._close_waiters == 0:
+                        # Interrupted with nobody to take over: the session stays usable.
+                        self._closing = False
+                return
+            if asyncio.current_task() in self._inflight:
+                # Called from inside a send()/record() the owner is waiting for: waiting
+                # for it would deadlock both. The owner finishes the close.
+                return
+            # Another close() is running: wait for it instead of racing it. If it is
+            # interrupted before the store is closed, the loop makes this call the owner.
+            self._close_waiters += 1
+            try:
+                await asyncio.shield(done)
+            except BaseException:
+                if self._close_done is None and not self._closed and self._close_waiters == 1:
+                    # The owner was interrupted (it left the session closing for a
+                    # waiter to take over) and this, the only waiter, is interrupted too
+                    # before it could: nobody is left, so the session stays usable.
+                    self._closing = False
+                raise
+            finally:
+                self._close_waiters -= 1
+
+    async def _close_impl(self, abort_compaction: bool) -> None:
+        """The close operation proper; at most one runs at a time (see :meth:`close`)."""
+        self._closing = True
+        try:
+            # Cancel any in-flight retry backoff sleep so send() unblocks promptly.
+            if self._retry_sleep_task is not None and not self._retry_sleep_task.done():
+                self._retry_sleep_task.cancel()
+            if abort_compaction:
+                self._compaction_abort.set()
+            # Let in-flight send()/record() calls finish persisting before the DB goes
+            # away (excluding the calling task itself, which cannot wait for itself).
+            await self._wait_for_other_operations(_CLOSE_INFLIGHT_TIMEOUT)
+            # Await any background send() tasks spawned by stream() so the DB is
+            # not closed while a turn is still being persisted.
+            if self._background_send_tasks:
+                await asyncio.gather(*self._background_send_tasks, return_exceptions=True)
+            # Drain: a finished run's handle is released by ``wait_for_pending``, but a
+            # run scheduled meanwhile replaces it and must be awaited too.
+            while True:
+                _ = await self._compaction_engine.wait_for_pending()
+                if not self._compaction_engine.has_pending:
+                    break
+            # Closed from here on: the store detaches its connection as soon as it is
+            # asked to close, so an interruption inside ``store.close()`` must not
+            # reopen the session on a dead store, nor publish SESSION_CLOSED twice.
+            self._closed = True
+            self._event_bus.publish(MnesisEvent.SESSION_CLOSED, {"session_id": self._session_id})
+            await self._store.close()
+        finally:
+            # An interrupted close() (e.g. timed out while draining) leaves the session
+            # usable, so the abort flag must not stay set and abort every later run. But
+            # a run still in flight must still see it: clear once that run has ended.
+            pending = self._compaction_engine._pending_task
+            if pending is not None and not pending.done():
+                pending.add_done_callback(lambda _t: self._compaction_abort.clear())
+            else:
+                self._compaction_abort.clear()
         self._logger.info("session_closed", session_id=self._session_id)
 
     async def __aenter__(self) -> MnesisSession:
@@ -1360,7 +1580,11 @@ class MnesisSession:
         # is in flight does not let an over-hard context through.
         if (
             engine.check_and_trigger(
-                self._session_id, self._threshold_tokens(context), self._model_info, force=True
+                self._session_id,
+                self._threshold_tokens(context),
+                self._model_info,
+                abort=self._compaction_abort,
+                force=True,
             )
             or engine.in_flight
         ):
@@ -1378,6 +1602,7 @@ class MnesisSession:
                     self._session_id,
                     self._threshold_tokens(context),
                     self._model_info,
+                    abort=self._compaction_abort,
                     force=True,
                     full_drain=True,
                 )
@@ -1417,7 +1642,10 @@ class MnesisSession:
             )
             return False, None
         triggered = self._compaction_engine.check_and_trigger(
-            self._session_id, self._threshold_tokens(context), self._model_info
+            self._session_id,
+            self._threshold_tokens(context),
+            self._model_info,
+            abort=self._compaction_abort,
         )
         return triggered, context
 

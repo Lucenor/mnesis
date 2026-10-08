@@ -120,6 +120,8 @@ await session.record(
 
 ## Compaction still works automatically
 
+After `session.close()` (or while it is closing), `record()` and `context_for_next_turn()` raise `SessionClosedError` (a `MnesisStoreError`). `close()` waits for a `record()` already in flight to finish persisting.
+
 `record()` checks for overflow after every turn, exactly as `send()` does. If the size of the *current context window* (system prompt + summaries + raw messages that `context_for_next_turn()` would return, un-truncated) reaches the soft threshold, compaction is triggered in the background — no extra configuration required. The `tokens` you pass are lifetime accounting (`session.token_usage`); they do not drive compaction, so a session whose context was already compacted does not compact again every turn.
 
 ## RecordResult

@@ -51,11 +51,12 @@ class StorePool:
     connection.  Callers may call ``acquire()`` concurrently; only the first
     caller opens the connection, subsequent callers receive the same object.
 
-    The pool also manages a per-path ``asyncio.Lock`` that
-    ``ImmutableStore`` uses to serialise write transactions.  SQLite in WAL
-    mode allows unlimited concurrent readers but only one writer; the lock
-    prevents competing writes from getting ``database is locked`` errors on
-    busy concurrent workloads.
+    The pool also owns one ``asyncio.Lock`` per connection (:meth:`write_lock`).
+    Every ``ImmutableStore`` on that connection takes it around each
+    transaction (and around the reads that must not observe a transaction in
+    progress), so statements from different coroutines or stores never
+    interleave inside one implicit sqlite3 transaction. The lock belongs to the
+    connection, not to a store: two stores sharing the connection share it.
     """
 
     def __init__(self) -> None:
@@ -118,7 +119,7 @@ class StorePool:
 
     def write_lock(self, db_path: str) -> asyncio.Lock:
         """
-        Return the write-serialisation lock for *db_path*.
+        Return the lock that serialises transactions on *db_path*'s connection.
 
         The lock must already exist (i.e. ``acquire()`` must have been called
         for this path).  Raises ``KeyError`` if called before ``acquire()``.

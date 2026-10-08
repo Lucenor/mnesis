@@ -20,6 +20,7 @@ window to prevent the compaction call itself from overflowing.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,7 +28,9 @@ import structlog
 
 from mnesis.compaction.file_ids import (
     append_file_ids_footer,
+    collect_file_id_paths_from_nodes,
     collect_file_ids_from_nodes,
+    extract_file_id_paths_from_messages,
     extract_file_ids_from_messages,
     most_recent_file_ids,
     most_recent_file_ids_from_nodes,
@@ -84,6 +87,16 @@ You are creating a detailed context summary to allow continuing this conversatio
 Preserve all goals, instructions, constraints, file context, and tool results.
 Be thorough — this summary will replace the original messages.
 
+Rules:
+- Faithfulness: under In Progress, Remaining Work and next steps, list only items
+  the user or assistant explicitly stated. Never invent or infer them. If none were
+  explicitly stated, write exactly "None stated". Suggestions or recommendations the
+  assistant made are not tasks unless the user accepted or requested them.
+- Files: write every file that has an id together with it, as `path (file_<hex>)`,
+  exactly as the conversation gives it. Each distinct path keeps its own entry;
+  never merge two files under one id or offer guessed alternative paths.
+- People: keep every named person with their role (owner, on-call, stakeholder).
+
 Format your response exactly as:
 
 ## Goal
@@ -114,13 +127,17 @@ Format your response exactly as:
 LEVEL2_PROMPT = """\
 Create a COMPRESSED continuation summary. Be extremely concise.
 Drop intermediate reasoning, redundant details, and verbose explanations.
-Preserve only: current goal, active constraints, key file locations, next step.
+Preserve only: current goal, active constraints, key file locations (with ids),
+named people and their roles, next step.
+Suggestions or recommendations the assistant made are not tasks unless the user
+accepted or requested them.
 
 Format:
 GOAL: <one sentence>
 CONSTRAINTS: <comma-separated list>
-FILES: <key paths>
-NEXT: <immediate next action>
+FILES: <key files, each as `path (file_<hex>)` when it has an id; never merge two files>
+PEOPLE: <named people and roles (owners, on-call, stakeholders), one compact line, or "none">
+NEXT: <next action ONLY if explicitly stated; never invent; else exactly "None stated">
 CONTEXT: <any other critical facts, max 3 sentences>
 """
 
@@ -128,6 +145,20 @@ CONDENSE_LEVEL1_PROMPT = """\
 You are condensing multiple context summaries into one unified summary.
 Each summary below represents a portion of the conversation history.
 Merge them into a single coherent summary that preserves all critical information.
+
+Rules:
+- Merge and deduplicate across the input summaries; do not copy them. State each
+  fact once, in your own condensed wording.
+- Omit any section that would be empty, except In Progress and Remaining Work,
+  which say exactly "None stated" when nothing was explicitly stated.
+- Faithfulness: under In Progress, Remaining Work and next steps, list only items
+  the user or assistant explicitly stated. Never invent or infer them. If none were
+  explicitly stated, write exactly "None stated". Suggestions or recommendations the
+  assistant made are not tasks unless the user accepted or requested them.
+- Files: write every file that has an id together with it, as `path (file_<hex>)`,
+  exactly as the conversation gives it. Each distinct path keeps its own entry;
+  never merge two files under one id or offer guessed alternative paths.
+- People: keep every named person with their role (owner, on-call, stakeholder).
 
 Format your response exactly as:
 
@@ -158,13 +189,17 @@ Format your response exactly as:
 
 CONDENSE_LEVEL2_PROMPT = """\
 Compress these summaries into one very short summary.
-Keep only: current goal, key constraints, critical file paths, immediate next step.
+Keep only: current goal, key constraints, critical files (with ids), named people
+and their roles, immediate next step.
+Suggestions or recommendations the assistant made are not tasks unless the user
+accepted or requested them.
 
 Format:
 GOAL: <one sentence>
 CONSTRAINTS: <comma-separated list>
-FILES: <key paths>
-NEXT: <immediate next action>
+FILES: <key files, each as `path (file_<hex>)` when it has an id; never merge two files>
+PEOPLE: <named people and roles (owners, on-call, stakeholders), one compact line, or "none">
+NEXT: <only an explicitly stated next action; never invent; else exactly "None stated">
 CONTEXT: <any other critical facts, max 2 sentences>
 """
 
@@ -212,6 +247,59 @@ def _level2_max_tokens(budget: ContextBudget, model_max_output_tokens: int = 0) 
     return max(1, limit)
 
 
+# A summary/condensation should come out at about this fraction of its input...
+_LENGTH_TARGET_INPUT_FRACTION: float = 0.5
+# ...and at most this fraction of the ``max_tokens`` the call may use, so a
+# verbose model still finishes before the output cap (``finish_reason="length"``
+# discards the whole completion and forces an escalation).
+_LENGTH_TARGET_CAP_FRACTION: float = 0.75
+
+
+def _length_target(input_tokens: int, max_tokens: int) -> int:
+    """Output size (tokens) to ask the model for: about half the input, under the cap."""
+    return max(
+        1,
+        min(
+            int(input_tokens * _LENGTH_TARGET_INPUT_FRACTION),
+            int(max_tokens * _LENGTH_TARGET_CAP_FRACTION),
+        ),
+    )
+
+
+def _with_length_target(prompt: str, target_tokens: int, max_tokens: int) -> str:
+    """Append an explicit output-length instruction to *prompt*."""
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"Length: aim for about {target_tokens} tokens in total (hard limit "
+        f"{max_tokens} tokens; a longer answer is discarded). Compress wording, "
+        f"not facts: keep every constraint, number, identifier and path."
+    )
+
+
+# Condensation sizing: a bullet is capped at about this many words (~35 tokens),
+# and the summary has this many sections, so the per-section bullet cap follows
+# from the token target.
+_CONDENSE_BULLET_WORDS: int = 25
+_CONDENSE_BULLET_TOKENS: int = 35
+_CONDENSE_SECTIONS: int = 8
+
+
+def _with_condense_limits(prompt: str, target_tokens: int, max_tokens: int) -> str:
+    """Append structural size limits to a condensation prompt.
+
+    Models follow "at most N bullets per section" far more reliably than a token
+    target, so the target is turned into a per-section bullet cap.
+    """
+    bullets = max(1, target_tokens // (_CONDENSE_SECTIONS * _CONDENSE_BULLET_TOKENS))
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"Limits: at most {bullets} bullets per section, each at most about "
+        f"{_CONDENSE_BULLET_WORDS} words (hard limit {max_tokens} tokens; a longer "
+        f"answer is discarded). Prefer merging bullets over dropping facts: keep "
+        f"every constraint, number, identifier and path."
+    )
+
+
 def _extract_text(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHARS) -> str:
     """Extract readable text from a message; the result is at most ``max_chars`` long."""
     parts: list[str] = []
@@ -231,15 +319,18 @@ def _extract_text(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHAR
     return "\n".join(parts)
 
 
+def _render_message(msg: MessageWithParts, max_chars: int = _MESSAGE_TEXT_MAX_CHARS) -> str:
+    """One message as it appears in the transcript ("" when it has no text)."""
+    text = _extract_text(msg, max_chars)
+    if not text:
+        return ""
+    role_label = "USER" if msg.role == "user" else "ASSISTANT"
+    return f"[{role_label}]:\n{text}"
+
+
 def _build_messages_text(messages: list[MessageWithParts]) -> str:
     """Format a list of messages as a readable transcript."""
-    lines: list[str] = []
-    for msg in messages:
-        role_label = "USER" if msg.role == "user" else "ASSISTANT"
-        text = _extract_text(msg)
-        if text:
-            lines.append(f"[{role_label}]:\n{text}")
-    return "\n\n".join(lines)
+    return "\n\n".join(r for r in (_render_message(m) for m in messages) if r)
 
 
 def _messages_to_summarise(messages: list[MessageWithParts]) -> list[MessageWithParts]:
@@ -257,9 +348,10 @@ def _apply_input_cap(
     estimator: TokenEstimator,
     model_context_limit: int,
     reserved_tokens: int = 0,
+    max_chars: int = _MESSAGE_TEXT_MAX_CHARS,
 ) -> list[MessageWithParts]:
     """
-    Trim *messages* so their total token count stays within the summarisation
+    Trim *messages* so their rendered transcript stays within the summarisation
     input cap: ``MAX_SUMMARISATION_INPUT_FRACTION`` of *model_context_limit*,
     and never more than the window left after *reserved_tokens* (the request's
     ``max_tokens`` plus its prompt).
@@ -276,6 +368,8 @@ def _apply_input_cap(
         estimator: Token estimator.
         model_context_limit: Full context limit of the compaction model.
         reserved_tokens: Tokens of the window the input must leave free.
+        max_chars: Per-message text cap of the transcript that will be sent;
+            each message is measured as rendered (after this truncation), not whole.
 
     Returns:
         A (possibly shorter) list of messages to pass to the LLM.
@@ -291,7 +385,9 @@ def _apply_input_cap(
     result: list[MessageWithParts] = []
 
     for msg in messages:
-        msg_tokens = estimator.estimate_message(msg)
+        # Rendered text plus its "\n\n" separator; +1 covers per-message rounding so the
+        # sum never undercounts the joined transcript.
+        msg_tokens = estimator.estimate(_render_message(msg, max_chars) + "\n\n") + 1
         if (
             tokens_so_far + msg_tokens > max_input_tokens
             and len(result) >= MIN_MESSAGES_TO_SUMMARISE
@@ -355,18 +451,36 @@ async def level1_summarise(
     prompt = compaction_prompt if compaction_prompt is not None else LEVEL1_PROMPT
     max_tokens = _level1_max_tokens(budget, model_max_output_tokens)
     cap_estimator = compaction_estimator or estimator
+    # The length-target line added below counts against the window too; size it
+    # for the largest target (its digits never exceed those of ``max_tokens``).
+    sized_prompt = (
+        prompt
+        if compaction_prompt is not None
+        else _with_length_target(prompt, max_tokens, max_tokens)
+    )
     to_summarise = _apply_input_cap(
         to_summarise,
         cap_estimator,
         model_context_limit,
-        reserved_tokens=max_tokens + cap_estimator.estimate(prompt),
+        reserved_tokens=max_tokens + cap_estimator.estimate(sized_prompt),
     )
 
     # Collect file IDs from the capped input.
     file_ids = extract_file_ids_from_messages(to_summarise)
 
+    file_paths = extract_file_id_paths_from_messages(to_summarise)
+
     transcript = _build_messages_text(to_summarise)
     input_token_count = estimator.estimate(transcript)
+    if compaction_prompt is None:
+        # An explicit length target lets a verbose model finish under the output
+        # cap instead of being cut off (and discarded). A custom prompt is left as is.
+        prompt = _with_length_target(
+            # Target and ``max_tokens`` are both the compaction model's units.
+            prompt,
+            _length_target(cap_estimator.estimate(transcript), max_tokens),
+            max_tokens,
+        )
     prompt_messages = [
         {
             "role": "user",
@@ -393,7 +507,12 @@ async def level1_summarise(
 
     # Propagate file IDs into the summary.
     summary_text = _append_bounded_footer(
-        summary_text, file_ids, most_recent_file_ids(to_summarise), budget, estimator
+        summary_text,
+        file_ids,
+        most_recent_file_ids(to_summarise),
+        budget,
+        estimator,
+        paths=file_paths,
     )
 
     token_count = estimator.estimate(summary_text)
@@ -471,6 +590,7 @@ async def level2_summarise(
         cap_estimator,
         model_context_limit,
         reserved_tokens=max_tokens + cap_estimator.estimate(prompt),
+        max_chars=_LEVEL2_MESSAGE_MAX_CHARS,
     )
 
     # Collect file IDs from input messages.
@@ -485,6 +605,7 @@ async def level2_summarise(
             transcript_parts.append(f"[{role}]: {text}")
     transcript = "\n".join(transcript_parts)
     input_token_count = estimator.estimate(transcript)
+    file_paths = extract_file_id_paths_from_messages(to_summarise)
 
     prompt_messages = [
         {
@@ -512,7 +633,12 @@ async def level2_summarise(
 
     # Propagate file IDs.
     summary_text = _append_bounded_footer(
-        summary_text, file_ids, most_recent_file_ids(to_summarise), budget, estimator
+        summary_text,
+        file_ids,
+        most_recent_file_ids(to_summarise),
+        budget,
+        estimator,
+        paths=file_paths,
     )
 
     token_count = estimator.estimate(summary_text)
@@ -583,12 +709,55 @@ def _fit_file_ids(
     return file_ids[:lo]
 
 
+def _paths_that_fit(
+    file_ids: list[str],
+    paths: Mapping[str, str],
+    reserved_tokens: int,
+    cap: int,
+    estimator: TokenEstimator,
+) -> dict[str, str]:
+    """Return the ``{id: path}`` pairs of *file_ids* if the paired footer fits *cap*.
+
+    All-or-nothing: IDs outrank paths, so when the footer with its paths would
+    not fit (``reserved_tokens`` already used), the bare IDs are written instead.
+    """
+    chosen = {fid: paths[fid] for fid in file_ids if fid in paths}
+    if not chosen:
+        return {}
+    footer = append_file_ids_footer("", file_ids, chosen)
+    return chosen if reserved_tokens + estimator.estimate(footer) <= cap else {}
+
+
+def _with_paths_if_fit(
+    text: str,
+    file_ids: list[str],
+    paths: Mapping[str, str],
+    budget: ContextBudget,
+    estimator: TokenEstimator,
+) -> tuple[str, int]:
+    """Upgrade *text*'s bare-ID footer to ``path (file_<hex>)`` pairs if they still fit.
+
+    Priority is ids > prose > paths: the prose is already fixed, so paths only
+    take what remains of ``budget.usable``. Returns the text and its token count.
+    """
+    chosen = _paths_that_fit(
+        file_ids, paths, estimator.estimate(strip_file_ids_footer(text)), budget.usable, estimator
+    )
+    if chosen:
+        paired = append_file_ids_footer(strip_file_ids_footer(text), file_ids, chosen)
+        tokens = estimator.estimate(paired)
+        if tokens <= budget.usable:
+            return paired, tokens
+    return text, estimator.estimate(text)
+
+
 def _append_bounded_footer(
     text: str,
     file_ids: list[str],
     recent_first: list[str],
     budget: ContextBudget,
     estimator: TokenEstimator,
+    paths: Mapping[str, str] | None = None,
 ) -> str:
     """Append the file-ID footer to an LLM summary.
 
@@ -599,6 +768,9 @@ def _append_bounded_footer(
     first-occurrence order, as in level 3. When the footer fits alone but
     text + footer does not, the full footer is appended and the caller's budget
     check rejects the candidate, so the run escalates to the next level.
+
+    ``paths`` pairs IDs with their files (``path (file_<hex>)``); they are
+    written only when the paired footer still fits the budget with the prose.
     """
     if file_ids and estimator.estimate(append_file_ids_footer("", file_ids)) > budget.usable:
         # Fit the IDs against the budget alone, not what the prose leaves: the
@@ -613,6 +785,16 @@ def _append_bounded_footer(
             budget_usable=budget.usable,
         )
         file_ids = [fid for fid in file_ids if fid in keep]
+        paths = None
+    if paths:
+        chosen = _paths_that_fit(
+            file_ids,
+            paths,
+            estimator.estimate(strip_file_ids_footer(text)),
+            budget.usable,
+            estimator,
+        )
+        return append_file_ids_footer(text, file_ids, chosen)
     return append_file_ids_footer(text, file_ids)
 
 
@@ -703,6 +885,7 @@ def level3_deterministic(
     # Collect file IDs from ALL messages before truncation — the whole point of
     # level 3 is that we never lose file pointers even when prose is discarded.
     all_file_ids = extract_file_ids_from_messages(messages)
+    all_paths = extract_file_id_paths_from_messages(messages) if all_file_ids else {}
 
     cap = int(budget.usable * _LEVEL3_BUDGET_FRACTION)
     header, header_tokens, file_ids = _plan_header_and_file_ids(
@@ -715,6 +898,7 @@ def level3_deterministic(
         estimator=estimator,
         log_event="level3_file_ids_truncated",
     )
+    # Sized with bare ids: ids > prose > paths, so paths never displace prose.
     footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
     target = cap - footer_tokens
 
@@ -754,6 +938,10 @@ def level3_deterministic(
         kept = kept[hi:]
         summary_text = render(hi)
         token_count = estimator.estimate(summary_text)
+    if all_paths and file_ids:
+        summary_text, token_count = _with_paths_if_fit(
+            summary_text, file_ids, all_paths, budget, estimator
+        )
 
     # All messages if nothing was kept
     if not messages:
@@ -783,6 +971,76 @@ def level3_deterministic(
 # ── Condensation ───────────────────────────────────────────────────────────────
 
 
+# What surrounds the summaries in the request, after the prompt: the blank line, the
+# tags and their newlines (see the ``f"{prompt}\n\n<summaries>\n...\n</summaries>"`` below).
+_SUMMARIES_WRAPPER = "\n\n<summaries>\n\n</summaries>"
+_CONDENSE_L1_SEPARATOR = "\n\n---\n\n"
+_CONDENSE_L2_SEPARATOR = "\n\n"
+
+
+def _fit_condensation_nodes(
+    nodes: list[SummaryNode],
+    texts: list[str],
+    cap_estimator: TokenEstimator,
+    model_context_limit: int,
+    reserved_tokens: int,
+    level: int,
+    separator: str,
+) -> list[SummaryNode]:
+    """Oldest-first prefix of *nodes* whose rendered *texts* fit the compaction model.
+
+    The input cap mirrors summarisation's (:func:`_apply_input_cap`):
+    ``MAX_SUMMARISATION_INPUT_FRACTION`` of the model's window, and never more than
+    what is left after *reserved_tokens* (the prompt plus the requested output).
+    Tokens are counted with *cap_estimator* (the compaction model's units).
+
+    Condensing the oldest nodes first matches the oldest-first drain and keeps the
+    condensed node contiguous with the nodes that stay live. At least two nodes
+    are needed for a merge to mean anything (one when only one exists); when even
+    that does not fit, an empty list is returned so the level escalates (level 2
+    sends bounded excerpts, level 3 needs no model).
+
+    Returns:
+        The nodes to condense, oldest first, or ``[]`` if too few fit.
+    """
+    if model_context_limit <= 0:
+        return list(nodes)
+    max_input = min(
+        int(model_context_limit * MAX_SUMMARISATION_INPUT_FRACTION),
+        model_context_limit - reserved_tokens,
+    )
+    # The joiners between summaries and the ``<summaries>`` wrapper are sent too.
+    # Each piece is counted separately, so +1 per piece covers estimator rounding
+    # (the sum must never undercount the assembled request).
+    joiner = cap_estimator.estimate(separator)
+    used = cap_estimator.estimate(_SUMMARIES_WRAPPER) + 1
+    count = 0
+    for text in texts:
+        tokens = cap_estimator.estimate(text) + 1 + (joiner if count else 0)
+        if used + tokens > max_input:
+            break
+        used += tokens
+        count += 1
+    if count < min(2, len(nodes)):
+        logger.warning(
+            "condensation_input_exceeds_window",
+            condense_level=level,
+            fitting=count,
+            total=len(nodes),
+            cap_tokens=max_input,
+        )
+        return []
+    if count < len(nodes):
+        logger.info(
+            "condensation_input_cap_applied",
+            condense_level=level,
+            included=count,
+            total=len(nodes),
+            cap_tokens=max_input,
+        )
+    return nodes[:count]
+
+
 async def condense_level1(
     nodes: list[SummaryNode],
     model: str,
@@ -790,12 +1048,18 @@ async def condense_level1(
     estimator: TokenEstimator,
     llm_call: Any,
     model_max_output_tokens: int = 0,
+    model_context_limit: int = 200_000,
+    compaction_estimator: TokenEstimator | None = None,
 ) -> CondensationCandidate | None:
     """
     Attempt Level 1 condensation: merge summary nodes via structured LLM prompt.
 
-    File IDs from all parent nodes are collected and appended to the condensed
-    output via a ``[LCM File IDs: ...]`` footer.
+    The input is capped against the compaction model's window (see
+    :func:`_fit_condensation_nodes`): when the nodes do not all fit, the oldest
+    ones that do are condensed and the candidate's ``parent_node_ids`` name
+    exactly those; the rest stay live for a later round. File IDs from the
+    condensed nodes are collected and appended to the output via a
+    ``[LCM File IDs: ...]`` footer.
 
     Args:
         nodes: Summary nodes to condense (must be non-empty).
@@ -804,6 +1068,9 @@ async def condense_level1(
         estimator: Token estimator.
         llm_call: Async callable ``(model, messages, max_tokens) -> str``.
         model_max_output_tokens: Output limit of the compaction model (0 = unknown).
+        model_context_limit: Context window of the compaction model.
+        compaction_estimator: Estimator in the compaction model's units, used to size
+            the input against its window (defaults to *estimator*).
 
     Returns:
         CondensationCandidate if successful and fits budget, or None to escalate.
@@ -811,16 +1078,41 @@ async def condense_level1(
     if not nodes:
         return None
 
-    # Gather all file IDs from parent nodes (already embedded in their content).
+    max_tokens = _level1_max_tokens(budget, model_max_output_tokens)
+    cap_estimator = compaction_estimator or estimator
+    # The length-target line counts against the window too (sized for its largest form).
+    sized_prompt = _with_condense_limits(CONDENSE_LEVEL1_PROMPT, max_tokens, max_tokens)
+    nodes = _fit_condensation_nodes(
+        nodes,
+        [f"[Summary {i + 1}]:\n{node.content}" for i, node in enumerate(nodes)],
+        cap_estimator,
+        model_context_limit,
+        reserved_tokens=max_tokens + cap_estimator.estimate(sized_prompt),
+        level=1,
+        separator=_CONDENSE_L1_SEPARATOR,
+    )
+    if not nodes:
+        return None
+
+    # Gather file IDs from the nodes being condensed (already embedded in their content).
     file_ids = collect_file_ids_from_nodes(nodes)
 
-    summaries_text = "\n\n---\n\n".join(
+    file_paths = collect_file_id_paths_from_nodes(nodes)
+
+    summaries_text = _CONDENSE_L1_SEPARATOR.join(
         f"[Summary {i + 1}]:\n{node.content}" for i, node in enumerate(nodes)
+    )
+    # Condensation must shrink its input: derive per-section bullet caps from about
+    # half of it (within the output cap) so the first level can succeed.
+    # In the compaction model's units, like ``max_tokens`` (not the session's).
+    input_tokens = cap_estimator.estimate(summaries_text)
+    prompt = _with_condense_limits(
+        CONDENSE_LEVEL1_PROMPT, _length_target(input_tokens, max_tokens), max_tokens
     )
     prompt_messages = [
         {
             "role": "user",
-            "content": (f"{CONDENSE_LEVEL1_PROMPT}\n\n<summaries>\n{summaries_text}\n</summaries>"),
+            "content": f"{prompt}\n\n<summaries>\n{summaries_text}\n</summaries>",
         }
     ]
 
@@ -828,7 +1120,7 @@ async def condense_level1(
         condensed_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=_level1_max_tokens(budget, model_max_output_tokens),
+            max_tokens=max_tokens,
         )
     except RetriesExhaustedError:
         raise  # outage: the engine skips the remaining LLM levels
@@ -842,7 +1134,12 @@ async def condense_level1(
         return None
 
     condensed_text = _append_bounded_footer(
-        condensed_text, file_ids, most_recent_file_ids_from_nodes(nodes), budget, estimator
+        condensed_text,
+        file_ids,
+        most_recent_file_ids_from_nodes(nodes),
+        budget,
+        estimator,
+        paths=file_paths,
     )
 
     token_count = estimator.estimate(condensed_text)
@@ -869,9 +1166,16 @@ async def condense_level2(
     estimator: TokenEstimator,
     llm_call: Any,
     model_max_output_tokens: int = 0,
+    model_context_limit: int = 200_000,
+    compaction_estimator: TokenEstimator | None = None,
 ) -> CondensationCandidate | None:
     """
     Attempt Level 2 condensation: aggressive merge via compressed prompt.
+
+    Each node contributes a bounded excerpt. The input is still capped against
+    the compaction model's window (as in :func:`condense_level1`): when the
+    excerpts do not all fit, the oldest nodes that do are condensed and the
+    candidate's ``parent_node_ids`` name exactly those.
 
     Args:
         nodes: Summary nodes to condense.
@@ -880,6 +1184,9 @@ async def condense_level2(
         estimator: Token estimator.
         llm_call: Async callable.
         model_max_output_tokens: Output limit of the compaction model (0 = unknown).
+        model_context_limit: Context window of the compaction model.
+        compaction_estimator: Estimator in the compaction model's units, used to size
+            the input against its window (defaults to *estimator*).
 
     Returns:
         CondensationCandidate if successful and fits budget, or None to escalate.
@@ -887,13 +1194,29 @@ async def condense_level2(
     if not nodes:
         return None
 
-    file_ids = collect_file_ids_from_nodes(nodes)
-
+    max_tokens = _level2_max_tokens(budget, model_max_output_tokens)
+    cap_estimator = compaction_estimator or estimator
     # Use a truncated excerpt from each summary for the aggressive prompt.
-    summaries_text = "\n\n".join(
+    excerpts = [
         f"[S{i + 1}]: {node.content[:_CONDENSE_LEVEL2_NODE_MAX_CHARS]}"
         for i, node in enumerate(nodes)
+    ]
+    nodes = _fit_condensation_nodes(
+        nodes,
+        excerpts,
+        cap_estimator,
+        model_context_limit,
+        reserved_tokens=max_tokens + cap_estimator.estimate(CONDENSE_LEVEL2_PROMPT),
+        level=2,
+        separator=_CONDENSE_L2_SEPARATOR,
     )
+    if not nodes:
+        return None
+
+    file_ids = collect_file_ids_from_nodes(nodes)
+    file_paths = collect_file_id_paths_from_nodes(nodes)
+
+    summaries_text = _CONDENSE_L2_SEPARATOR.join(excerpts[: len(nodes)])
     prompt_messages = [
         {
             "role": "user",
@@ -905,7 +1228,7 @@ async def condense_level2(
         condensed_text = await llm_call(
             model=model,
             messages=prompt_messages,
-            max_tokens=_level2_max_tokens(budget, model_max_output_tokens),
+            max_tokens=max_tokens,
         )
     except RetriesExhaustedError:
         raise  # outage: the engine skips the remaining LLM levels
@@ -919,7 +1242,12 @@ async def condense_level2(
         return None
 
     condensed_text = _append_bounded_footer(
-        condensed_text, file_ids, most_recent_file_ids_from_nodes(nodes), budget, estimator
+        condensed_text,
+        file_ids,
+        most_recent_file_ids_from_nodes(nodes),
+        budget,
+        estimator,
+        paths=file_paths,
     )
 
     token_count = estimator.estimate(condensed_text)
@@ -989,6 +1317,7 @@ def condense_level3_deterministic(
         (barring a budget too small for even the minimal header).
     """
     all_file_ids = collect_file_ids_from_nodes(nodes)
+    all_paths = collect_file_id_paths_from_nodes(nodes) if all_file_ids else {}
 
     cap = int(budget.usable * _LEVEL3_BUDGET_FRACTION)
     prose_cap = min(_CONDENSE_LEVEL3_MAX_TOKENS, cap)
@@ -1007,6 +1336,7 @@ def condense_level3_deterministic(
         estimator=estimator,
         log_event="condense_level3_file_ids_truncated",
     )
+    # Sized with bare ids: ids > prose > paths, so paths never displace prose.
     footer_tokens = estimator.estimate(append_file_ids_footer("", file_ids)) if file_ids else 0
     available = prose_cap - header_tokens - footer_tokens
 
@@ -1047,6 +1377,8 @@ def condense_level3_deterministic(
                 hi = mid
         combined = render(lo)
         token_count = estimator.estimate(combined)
+    if all_paths and file_ids:
+        combined, token_count = _with_paths_if_fit(combined, file_ids, all_paths, budget, estimator)
 
     logger.info(
         "condense_level3_deterministic_produced",

@@ -71,6 +71,17 @@ class CompactionConfig(BaseModel):
     level2_enabled: bool = True
     """Whether to attempt Level 2 (aggressive) compaction before falling back to Level 3."""
 
+    condense_skip_level1: bool = Field(
+        default=False,
+        description=(
+            "Skip Level 1 when condensing summaries and start at Level 2. For models known "
+            "to overrun their output limit on the condensation prompt (their Level 1 output "
+            "is discarded, costing a request). Ignored when level2_enabled is False. "
+            "Independent of this flag, the engine skips Level 1 for the rest of its lifetime "
+            "after one condensation Level 1 completion is cut off at the output limit."
+        ),
+    )
+
     compaction_prompt: str | None = Field(
         default=None,
         description="Custom system prompt for Level 1/2 LLM summarisation. "
@@ -224,9 +235,10 @@ class RetryConfig(BaseModel):
 
     A hard-limit ``send()`` waits for compaction, so with retries enabled it can
     wait through compaction retries, and so can ``session.close()``, which waits
-    for an in-flight compaction including its backoffs (a session sets no
-    compaction ``abort``). Keep ``max_retries`` and ``max_delay`` small to bound
-    the wait. If a compaction call outlasts its retries (an outage), that run
+    for an in-flight compaction including its backoffs. Keep ``max_retries`` and
+    ``max_delay`` small to bound the wait, or call
+    ``session.close(abort_compaction=True)`` to end an in-flight compaction's
+    backoff immediately. If a compaction call outlasts its retries (an outage), that run
     skips its remaining LLM levels.
     """
 

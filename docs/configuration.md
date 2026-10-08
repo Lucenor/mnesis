@@ -30,10 +30,37 @@ Controls when and how context compaction fires.
 | `prune_minimum_tokens` | `20_000` | Minimum prunable volume required before pruning fires |
 | `compaction_model` | `None` | Model for summarisation. `None` = use session model |
 | `level2_enabled` | `True` | Attempt Level 2 compression before falling back to Level 3 |
+| `condense_skip_level1` | `False` | Skip Level 1 when condensing summaries and start at Level 2. Use it for a compaction model known to overrun its output limit on the condensation prompt (e.g. Nemotron 3 Super: its condense L1 hit the cap in 4 of 4 samples, while condense L2 scored 9/9 on the recall probe). Ignored when `level2_enabled` is `False`. Independent of this flag, an engine skips condense L1 for the rest of its lifetime after two consecutive condense L1 completions are cut off at the output limit (one truncation can be a one-off; an accepted L1 condensation resets the count); that state is in memory only and is not persisted across session reloads. |
 | `compaction_prompt` | `None` | Custom prompt string for Level 1/2 LLM summarisation. `None` = use the built-in agentic prompt |
 | `soft_threshold_fraction` | `0.6` | Fraction of usable context at which background compaction triggers (before hard threshold). Measured against the size of the current context window, not lifetime token usage. Also sets condensation's stop target: after summarising, summaries are condensed until the context is below half this threshold (`soft_threshold_fraction * 0.5` of usable; the 0.5 is not configurable). Advanced. |
 | `max_compaction_rounds` | `10` | Upper bound on condensation rounds per run, and on summarisation passes when the summariser's input cap (75% of the compaction model's window) forces several passes. Each condensation round merges all live summary nodes into one, so a run condenses at most once in practice. Advanced. |
 | `condensation_enabled` | `True` | Whether to attempt condensation of accumulated summary nodes. Advanced. |
+
+#### Sizing `soft_threshold_fraction` for a slow compaction model
+
+Background compaction starts when the context crosses the soft threshold, but the
+conversation keeps going while it runs, so the context keeps growing until the
+summary is swapped in. The room between the soft threshold and the hard limit
+(`1 - soft_threshold_fraction` of usable) must cover what a turn adds times the
+number of turns a compaction spans; otherwise the next `send()` blocks on the hard
+limit (a compaction retry backoff makes a run longer still).
+
+Measured in a real-model run (Nemotron 3 Super via OpenRouter, window 20,480,
+usable 16,432, soft 60% = 9,859, about 1,500 tokens or 9% of usable per turn of
+about 4 s): background runs took 8 to 37 s and spanned 2 to 5 turns, and the
+context peaked at 82% and 85% of the hard limit before the swap landed, with no
+blocking send. Rule of thumb:
+
+```
+soft_threshold_fraction <= 1 - (compaction_seconds / seconds_per_turn) * tokens_per_turn / usable
+```
+
+Lower the fraction (for example `0.5`) for a slow `compaction_model`, large turns,
+or `RetryConfig.max_retries > 0` with long backoffs; keep the default for fast
+models. Mnesis does not chain runs or re-trigger while one is in flight (a run
+already works from the live history, and starting a second would only duplicate
+it), so this setting is the lever. `CompactionConfig.compaction_model` can point at
+a faster model than the session model.
 
 ### Tuning for large models
 
@@ -176,11 +203,13 @@ All other exceptions (including `AuthenticationError`, `ContextWindowExceededErr
 
 `send()` always passes `num_retries=0` to `litellm.acompletion()`. For compaction calls: with `RetryConfig.max_retries > 0`, Mnesis retries compaction calls and disables LiteLLM retries (`num_retries=0`) to avoid double-retrying; with `max_retries == 0` (default), compaction uses LiteLLM/provider default retries. Do not set `num_retries` in `call_kwargs` passed to litellm alongside Mnesis.
 
-With `max_retries > 0`, compaction calls (summarisation and condensation, Levels 1 and 2) use the same attempts, backoff and error classification as `send()`: a transient 429/5xx is retried at the same level before escalating, instead of dropping straight to a lossier level. If a call outlasts its retries on a retryable error (an outage), the rest of that compaction run skips its remaining LLM levels and falls to the deterministic level (or skips condensation), so a run sleeps through at most `max_retries` backoffs of up to `max_delay` each, not one sequence per level. Non-retryable failures (auth errors, empty or truncated completions) still escalate level by level. Because a hard-limit `send()` waits for compaction, it can wait through that time, and so can `session.close()`, which waits for an in-flight compaction including its retry backoffs. To bound the wait, keep `max_retries` and `max_delay` small, or cancel the awaiting task (external cancellation propagates). The `abort` event is an engine-level parameter for callers driving `run_compaction()` or `check_and_trigger()` directly; a session does not set it.
+With `max_retries > 0`, compaction calls (summarisation and condensation, Levels 1 and 2) use the same attempts, backoff and error classification as `send()`: a transient 429/5xx is retried at the same level before escalating, instead of dropping straight to a lossier level. If a call outlasts its retries on a retryable error (an outage), the rest of that compaction run skips its remaining LLM levels and falls to the deterministic level (or skips condensation), so a run sleeps through at most `max_retries` backoffs of up to `max_delay` each, not one sequence per level. Non-retryable failures (auth errors, empty or truncated completions) still escalate level by level. Because a hard-limit `send()` waits for compaction, it can wait through that time, and so can `session.close()`, which waits for an in-flight compaction including its retry backoffs. To bound the wait, keep `max_retries` and `max_delay` small, or call `session.close(abort_compaction=True)`, which ends an in-flight compaction's retry backoff at once (the run returns the failed stub, `COMPACTION_FAILED` with `aborted=True`; summaries from earlier rounds stay, and the history it was working on is left for the next session). Cancelling a task that is *waiting* on compaction (for example `asyncio.timeout()` around `send()`) does not cancel the compaction: it keeps running in the background and `close()` still drains it. Each compaction retry publishes `LLM_RETRY` with `source="compaction"` plus the `stage` and `compaction_level` of the call.
 
 ### Difference from OperatorConfig.max_retries
 
 `OperatorConfig.max_retries` handles per-item validation errors inside `LLMMap` and `AgenticMap` operators — a different failure domain (schema validation, JSON parse failures). `RetryConfig` handles transient LLM *transport* errors in the `send()` call path. Both can be set independently.
+
+`LLMMap` also retries transport errors per item with `OperatorConfig.max_retries` (exponential backoff). When that is `> 0` it passes `num_retries=0` to LiteLLM so a failing call is not retried by both layers (up to `(max_retries + 1)` x LiteLLM's default attempts otherwise); with `max_retries=0` LiteLLM's default retries apply. `AgenticMap` sub-sessions go through `send()`, which already disables LiteLLM retries.
 
 ### AgenticMap sub-sessions
 
@@ -211,7 +240,7 @@ async with MnesisSession.open(model="openai/gpt-4o", config=config) as session:
 
 ### Monitoring retries via the event bus
 
-Each retry attempt publishes an `LLM_RETRY` event before the backoff sleep:
+Each retry attempt, of a `send()` turn or of a compaction call, publishes an `LLM_RETRY` event before the backoff sleep (`payload["source"]` is `"send"` or `"compaction"`; compaction events also carry `stage` and `compaction_level`):
 
 ```python
 from mnesis.events.bus import MnesisEvent

@@ -52,6 +52,18 @@ result = await session.send("Explain the GIL in Python.")
 await session.close()
 ```
 
+### Closing a session
+
+`close()` marks the session closing, so new `send()`, `record()` and `stream()` calls raise
+`SessionClosedError`. It then waits for calls already in flight to finish persisting their turn
+(a `send()` in a retry backoff ends at once with its error turn; a stream already on the wire may
+finish, for up to 30 seconds), drains compaction, and closes the store. After `close()`,
+`send`, `record`, `stream`, `messages`, `conversation_messages`, `context_for_next_turn` and
+`compact` all raise `SessionClosedError`, a subclass of `MnesisStoreError`. `close()` is
+idempotent. Do not call it from inside the `send()` or `record()` it would be waiting for (for
+example from an event handler running in that call): it does not wait for itself, so the store
+closes under that call.
+
 ## Try it without an API key
 
 Every example ships with a mock LLM mode:

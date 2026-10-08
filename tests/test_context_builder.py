@@ -434,3 +434,57 @@ class TestContextBudget:
             compaction_buffer=1_000,
         )
         assert budget.remaining(3_000) == budget.usable - 3_000
+
+
+class TestBlankAssistantMessages:
+    """A send() cancelled before any output leaves an empty assistant row; it is not sent."""
+
+    @staticmethod
+    async def _add(store, session_id, i, role, text):
+        msg_id = f"msg_blank_{i}"
+        await store.append_message(make_message(session_id, role=role, msg_id=msg_id))
+        if text is not None:
+            await store.append_part(
+                make_raw_part(
+                    msg_id,
+                    session_id,
+                    part_id=f"part_blank_{i}",
+                    content=json.dumps({"type": "text", "text": text}),
+                )
+            )
+
+    @pytest.mark.parametrize("blank", [None, "", "  \n "])
+    async def test_empty_assistant_message_is_skipped_and_not_counted(
+        self, blank, session_id, store, builder, model_info, small_config
+    ):
+        await self._add(store, session_id, 0, "user", "hi")
+        await self._add(store, session_id, 1, "assistant", blank)
+        await self._add(store, session_id, 2, "user", "again")
+        ctx = await builder.build(session_id, model_info, "S.", small_config)
+        assert [m.role for m in ctx.messages] == ["user", "user"]
+        assert all(m.content.strip() for m in ctx.messages)
+        # Token accounting matches what is sent: the same as a session without the row.
+        base = await builder.build(session_id, model_info, "S.", small_config)
+        assert ctx.raw_message_tokens == base.raw_message_tokens
+        assert ctx.full_context_tokens == ctx.token_estimate
+
+    async def test_normal_assistant_message_unaffected(
+        self, session_id, store, builder, model_info, small_config
+    ):
+        await self._add(store, session_id, 0, "user", "hi")
+        await self._add(store, session_id, 1, "assistant", "hello there")
+        ctx = await builder.build(session_id, model_info, "S.", small_config)
+        assert [(m.role, m.content) for m in ctx.messages] == [
+            ("user", "hi"),
+            ("assistant", "hello there"),
+        ]
+
+    async def test_blank_row_costs_nothing_in_the_budget(
+        self, session_id, store, builder, model_info, small_config
+    ):
+        await self._add(store, session_id, 0, "user", "hi")
+        without = await builder.build(session_id, model_info, "S.", small_config)
+        await self._add(store, session_id, 1, "assistant", "")
+        withrow = await builder.build(session_id, model_info, "S.", small_config)
+        assert withrow.raw_message_tokens == without.raw_message_tokens
+        assert withrow.token_estimate == without.token_estimate

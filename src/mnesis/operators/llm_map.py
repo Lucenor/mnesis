@@ -304,6 +304,7 @@ class LLMMap:
                             prompt=full_prompt,
                             system_prompt=system_prompt,
                             temperature=temperature,
+                            disable_litellm_retries=max_retries > 0,
                         ),
                         timeout=timeout,
                     )
@@ -357,8 +358,15 @@ class LLMMap:
         prompt: str,
         system_prompt: str | None,
         temperature: float,
+        disable_litellm_retries: bool = False,
     ) -> str:
-        """Make a single LLM call and return the text response."""
+        """Make a single LLM call and return the text response.
+
+        ``disable_litellm_retries`` passes ``num_retries=0`` to LiteLLM. It is set
+        when Mnesis retries the item itself (``max_retries > 0``) so a failing
+        call is not retried by both layers; with ``max_retries == 0`` LiteLLM's
+        default retries apply.
+        """
         import os
 
         if os.environ.get("MNESIS_MOCK_LLM") == "1":
@@ -371,10 +379,12 @@ class LLMMap:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        extra: dict[str, Any] = {"num_retries": 0} if disable_litellm_retries else {}
         response = await litellm.acompletion(
             model=model,
             messages=messages,
             temperature=temperature,
+            **extra,
         )
         return response.choices[0].message.content or ""
 

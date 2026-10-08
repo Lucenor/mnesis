@@ -269,6 +269,39 @@ When `close()` is called on an `ImmutableStore` that uses a pool, the method
 is a no-op — the pool owns the connection lifetime. Pool shutdown happens via
 `pool.close_all()` at application teardown.
 
+#### Concurrency model: one lock per connection
+
+Every `await` on a shared `aiosqlite` connection yields to other coroutines, and
+Python's `sqlite3` keeps one implicit transaction per connection: it opens at the
+first write and *any* `commit()` ends it. Unserialised, a multi-statement write
+such as `swap_context_items()` (read the span, `DELETE` it, `INSERT` the summary,
+commit) could be interleaved with other work: a `ContextBuilder` read on the same
+connection would see the span missing, an unrelated coroutine's `commit()` could
+publish the `DELETE` without its `INSERT`, and an unrelated write could be
+rolled into the swap's transaction.
+
+The pool therefore owns one `asyncio.Lock` per connection (`StorePool.write_lock()`),
+and every `ImmutableStore` on that connection (a private, pool-less store has its
+own) uses it:
+
+- `ImmutableStore._transaction()` takes the lock for the whole statement sequence,
+  commits on success and **rolls back on any exception, including cancellation**, so a
+  failed or cancelled sequence never leaves partial writes for a later `commit()`
+  to publish. All writes in `ImmutableStore` and `SummaryDAGStore` use it.
+- Reads that must not observe a transaction in progress take the same lock:
+  `get_context_items()` (the context snapshot) and the `summary_nodes` queries behind
+  `get_active_nodes()` / `get_latest_node()`. Other reads are of append-only
+  rows and need no lock.
+- The lock is not reentrant and the critical sections contain only SQL on the
+  connection, never another store call, so there is no nested acquisition. Holding
+  it across only the statements (not LLM calls or other awaits) keeps contention to
+  milliseconds.
+
+`BEGIN IMMEDIATE ... COMMIT` or a single statement cannot replace the lock: the
+sequence spans several `execute()` calls, and `aiosqlite` runs each as a separate
+job on its worker thread, so nothing prevents another coroutine's job from being
+queued between them.
+
 ---
 
 ## ContextBuilder Assembly
@@ -462,17 +495,24 @@ stub `CompactionResult` (no summary committed) is returned. Level 3 is not
 forced by this handler — Level 3 is only the final fallback inside
 `_run_summarisation()` when Level 1/2 return `None`.
 
-Cancellation contract: the `abort` event is an engine-level parameter for
-callers that drive `run_compaction()` / `check_and_trigger()` directly; a
-`MnesisSession` does not set it, and `session.close()` waits for an in-flight
-compaction, including its retry backoffs. Setting `abort` ends
-the run with the same stub result and a `COMPACTION_FAILED` event carrying
-`aborted=True`; it is logged at info as `compaction_aborted`, not as an error.
-External task cancellation (`Task.cancel()`, `TaskGroup`, shutdown) is not
-swallowed: `asyncio.CancelledError` propagates to the caller. Abort also
-interrupts a retry backoff wait immediately. To bound how long `close()` or a
-hard-limit `send()` can wait on compaction retries, keep `max_retries` and
-`max_delay` small, or cancel the task.
+Cancellation contract: setting the `abort` event ends the run with the same
+stub result and a `COMPACTION_FAILED` event carrying `aborted=True`; it is logged
+at info as `compaction_aborted`, not as an error. Abort also interrupts a retry
+backoff wait immediately (an LLM request already on the wire is not interrupted;
+the run stops when it returns), and work committed by earlier rounds stays.
+Callers driving `run_compaction()` / `check_and_trigger()` directly pass their own
+event. A `MnesisSession` owns one event for every run it starts and sets it only on
+`session.close(abort_compaction=True)`; the default `close()` still waits for the
+in-flight compaction, including its retry backoffs, so the summary is fully
+persisted. External task cancellation (`Task.cancel()`, `TaskGroup`, shutdown) of
+the compaction task is not swallowed: `asyncio.CancelledError` propagates.
+
+Cancelling a *waiter* is different: `wait_for_pending()` awaits the task through
+`asyncio.shield()`, so cancelling the caller (for example `asyncio.timeout()`
+around `send()`) does not cancel the background compaction. The task keeps
+running, stays tracked, and is collected by a later `wait_for_pending()` or by
+`close()`. To bound how long a hard-limit `send()` can wait on compaction retries,
+keep `max_retries` and `max_delay` small.
 
 LLM retries: every compaction LLM call (Level 1/2 summarisation and
 condensation) goes through the same retry policy as `send()`, driven by
@@ -522,17 +562,27 @@ The inner sequence for each round:
    run escalates (Level 2, then Level 3), and IDs are dropped (least recently
    referenced first, as in Level 3) only when the footer alone cannot fit.
 
-3. **Commit** — `SummaryDAGStore.insert_node()` writes the summary as a
-   `Message(is_summary=True)` row plus a `TextPart` and a `CompactionMarkerPart`.
-   Then `ImmutableStore.swap_context_items()` atomically replaces the compacted
-   message entries with one `'summary'` entry.
+3. **Commit** — `SummaryDAGStore.commit_summary_node()` writes the summary as a
+   `Message(is_summary=True)` row plus a `TextPart` and a `CompactionMarkerPart`,
+   its `summary_nodes` row, the replacement of the compacted message entries in
+   `context_items` by one `'summary'` entry and (for condensation) the
+   `superseded` flag on the parents, all in **one** locked transaction. A cancel
+   or failure at any point rolls the whole commit back, so a node is never left
+   half-committed (e.g. parents still active but already out of the context).
 
 4. **Condensation loop** (if `condensation_enabled=True`) — while the
    re-measured context is not below the condensation target (half the soft
    threshold) and `len(active_nodes) >= 2`, the engine
-   calls `_run_condensation()` to merge all live `SummaryNode` objects into a
-   single condensed node. The consumed nodes are marked superseded via
-   `SummaryDAGStore.mark_superseded()`. Loop runs up to `max_compaction_rounds`
+   calls `_run_condensation()` to merge live `SummaryNode` objects into a
+   single condensed node. The LLM levels cap their input against the compaction
+   model's window (see below), so when the live nodes do not all fit, the
+   **oldest** ones that do are condensed. "Oldest" is by position in the
+   context (`context_items`), not by creation time: a condensed node is created
+   late but sits where the oldest span was, so ordering by creation time would
+   merge the wrong nodes and invert the prompt order. Only the condensed nodes
+   are swapped out of the context and superseded (in the commit above), and the
+   rest stay live for the next round. If an LLM condensation does not shrink its
+   input, the deterministic level runs on that same subset only. Loop runs up to `max_compaction_rounds`
    times, breaking early if no progress is made.
 
 5. **Event** — `EventBus.publish(COMPACTION_COMPLETED, ...)` is fired with the
@@ -553,7 +603,9 @@ return self._compaction_engine.in_flight
 
 `close()` awaits this task, repeating until no handle remains (a run scheduled
 meanwhile is awaited too), before releasing the database connection, ensuring
-no in-flight write is interrupted.
+no in-flight write is interrupted. `close(abort_compaction=True)` first sets the
+session's abort event so a run waiting in a retry backoff ends at once with the
+stub result instead of being waited out.
 
 ---
 
@@ -568,7 +620,8 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
   are candidates for summarisation.
 
 - **Input cap**: `_apply_input_cap()` trims messages to at most 75% of the
-  compaction model's context window before passing them to the LLM, keeping the
+  compaction model's context window, measured on the transcript text actually
+  sent (after per-message truncation), before passing them to the LLM, keeping the
   oldest prefix. At least 3 messages are always included
   (`MIN_MESSAGES_TO_SUMMARISE = 3`). The recorded span is that prefix, never the
   uncapped input.
@@ -590,6 +643,41 @@ All three levels are implemented in `src/mnesis/compaction/levels.py`.
   `[LCM File IDs: ...]` footer to every summary. Level 3 collects IDs from
   *all* messages (including those truncated), ensuring file references are never
   lost even when prose is discarded.
+
+- **ID-to-path pairing**: where the path of a file is known, the footer records the
+  pair as `path (file_<hex>)` (`[LCM File IDs: services/a.yaml (file_3fa9…),
+  file_9b1e…]`; an ID with no known path stays bare). Paths are recovered from
+  the source text (only when a path and an ID are directly adjacent (at most three
+  separator characters between them: `path (file_x)`, `file_x: path`; a path has a
+  `/` or a known file extension; e-mails, URLs, calls and bare identifiers such as
+  `json.loads` never count; one path names one ID). When unsure, no pair is made:
+  a missing path is harmless, a wrong one is not),
+  and, for condensation, from the parent nodes' footers first (authoritative: they
+  were derived from the original messages) and their prose second. The LLM
+  prompts at every level also require `path (file_<hex>)` to be written together,
+  so prose keeps the association too. Pairs rank last at every level (IDs > prose > paths): they are added after the
+  prose is fixed, and only if they still fit, so they never displace prose or IDs. When the paired
+  footer would not fit the budget, the bare IDs are written instead
+  (all-or-nothing). The old bare-ID footer still parses everywhere (ID extraction
+  only looks for `file_<hex>` tokens).
+
+- **Faithfulness and people** (compliance is model-dependent: observed only
+  partial on Nemotron 3 Super, which listed the assistant's own recommendations
+  under In Progress and invented a Remaining Work item; the prompts also say
+  suggestions the assistant made are not tasks unless the user accepted or
+  requested them): every default prompt forbids inventing next
+  steps (In Progress, Remaining Work and next steps list only what the user or
+  assistant explicitly stated, otherwise exactly "None stated") and keeps named people with their roles; the level 2 formats have a
+  compact `PEOPLE:` line.
+
+- **Length target**: the default level 1 summarisation prompt ends with an
+  explicit output target of about half the input, capped at 75% of the call's
+  `max_tokens`, plus the hard limit. The condensation level 1 prompt instead gets
+  structural limits (at most N bullets per section of about 25 words, N derived
+  from that same target) and is told to merge and deduplicate rather than copy. A verbose model
+  therefore finishes under its output cap instead of hitting
+  `finish_reason="length"` (which discards the completion and escalates). A custom
+  `compaction_prompt` is sent unchanged.
 
 - **Convergence check** (L1 and L2 only): If the summary token count is >=
   the input token count, the LLM failed to compress. The level returns `None`
@@ -637,6 +725,16 @@ than the minimal header cannot be satisfied by any output, so all file IDs are
 kept in that case. "Fits" means as measured by the compaction estimator, which
 is not necessarily the session model's tokenizer.
 
+Trade-off when the footer alone exceeds the budget (at default settings, over
+about 1,400 distinct file IDs): the LLM levels are rejected (text plus footer
+exceeds the budget) and Level 3 runs, keeping 1,280 IDs in the measured case
+because it sizes the footer against 85% of `budget.usable`. The best an LLM
+candidate could keep is 1,435 IDs with no prose, or about 1,367 beside 412 tokens
+of prose: at most 7 to 12% more, for a summary that is almost only IDs. Level 3's
+margin is kept for that, since accepting a candidate at 100% of the budget would
+need its own validation path. The IDs dropped are still in the immutable store,
+and the case needs a pathological ID count.
+
 ### Escalation flow
 
 ```
@@ -652,10 +750,30 @@ _run_summarisation():
 When multiple summary nodes accumulate and the context is still over budget,
 condensation merges them. Three levels mirror summarisation:
 
-- **Condense L1** — `CONDENSE_LEVEL1_PROMPT` merged all summaries via
-  structured format.
+- **Condense L1** — `CONDENSE_LEVEL1_PROMPT` merges the summaries via the
+  structured format, with per-section bullet caps derived from half the input
+  (see "Length target" above). **Adaptive skip:** a completion cut off at the
+  output limit (`CompactionTruncatedError`) is never accepted. After two
+  *consecutive* truncations (an accepted L1 condensation resets the count; one
+  truncation can be a one-off) the engine skips L1 for the rest of its lifetime
+  and later condensations start at L2, so a verbose model does not waste a
+  request per condensation. Empty completions and provider errors neither count
+  nor reset. The state is in memory
+  only (not persisted; a reloaded session probes L1 again once). Set
+  `CompactionConfig.condense_skip_level1=True` to skip L1 from the start. Both
+  need `level2_enabled` (otherwise L1 is kept: skipping would drop to L3).
+  Evidence: on Nemotron 3 Super (reasoning off) condense L1 overran the output
+  cap in 4 of 4 samples across two prompt variants despite bullet limits, while
+  condense L2 scored 9/9 on the recall probe. Summarisation L1 is unaffected.
 - **Condense L2** — `CONDENSE_LEVEL2_PROMPT` aggressive single-turn merge
   (each summary truncated to 800 chars).
+- **Input cap (L1 and L2)** — like summarisation, the request must fit the
+  *compaction model's* window: the nodes' text is limited to 75% of it and to what
+  remains after the prompt and `max_tokens`, counted in the compaction model's
+  tokenizer units. The oldest nodes that fit are condensed (at least two);
+  if fewer fit, the level returns `None` and escalates (L2 sends bounded excerpts,
+  L3 sends nothing to a model). The candidate's `parent_node_ids` name exactly the
+  nodes condensed, and file IDs are carried from those nodes' footers.
 - **Condense L3** — deterministic: concatenates node prose (own footers
   stripped) up to `_CONDENSE_LEVEL3_MAX_TOKENS = 512` tokens, then appends one
   file-ID footer. Bounded like Level 3: the footer and header are sized against
@@ -931,4 +1049,5 @@ same `db_path` use one `aiosqlite.Connection`, preventing `database is locked`
 errors under concurrent writes.
 
 **Enforced by:** `StorePool.acquire()` with a per-path `asyncio.Lock` and
-double-checked locking pattern.
+double-checked locking pattern, and by the per-connection transaction lock
+described under "Concurrency model" in the `StorePool` section.
