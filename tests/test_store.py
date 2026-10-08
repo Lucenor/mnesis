@@ -1894,7 +1894,7 @@ class TestConnectionSerialization:
 
         reader_task = asyncio.create_task(readers())
         await inserter()
-        await reader_task
+        _ = await reader_task
         assert seen == {"by_id": None, "by_path": None}
 
 

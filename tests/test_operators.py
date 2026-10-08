@@ -1341,7 +1341,7 @@ class TestOperatorLifecycle:
         self, tmp_path, op_config, monkeypatch
     ):
         """A second cancel during the drain must not skip closing the owned pool."""
-        import mnesis.operators.agentic_map as am_mod
+        from mnesis.operators._tasks import cancel_and_drain as real_drain
         from mnesis.store.pool import StorePool
 
         pools: list[StorePool] = []
@@ -1354,7 +1354,7 @@ class TestOperatorLifecycle:
         async def stuck_drain(_tasks):
             await asyncio.sleep(30)
 
-        monkeypatch.setattr(am_mod, "StorePool", SpyPool)
+        monkeypatch.setattr("mnesis.operators.agentic_map.StorePool", SpyPool)
         state = self._patch_slow_send(monkeypatch)
         gen = self._agentic_gen(tmp_path, op_config, "double_cancel")
 
@@ -1365,8 +1365,7 @@ class TestOperatorLifecycle:
         task = asyncio.create_task(consume())
         await asyncio.wait_for(state["both_started"].wait(), timeout=5)
         assert len(pools) == 1 and len(pools[0]._connections) == 1
-        real_drain = am_mod.cancel_and_drain
-        monkeypatch.setattr(am_mod, "cancel_and_drain", stuck_drain)
+        monkeypatch.setattr("mnesis.operators.agentic_map.cancel_and_drain", stuck_drain)
         _ = task.cancel()  # first cancel: enters the (stuck) drain in the finally
         await asyncio.sleep(0.05)
         _ = task.cancel()  # second cancel: interrupts the drain
