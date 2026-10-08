@@ -59,7 +59,7 @@ def _nodes(tokens_each: int = 600) -> list[SummaryNode]:
             kind="leaf",
             span_start_message_id="a",
             span_end_message_id="b",
-            content=f"summary {i} " + "fact " * 50,
+            content=f"summary {i} " + "fact " * max(50, tokens_each * 4 // 5),
             token_count=tokens_each,
         )
         for i in range(3)
@@ -146,27 +146,63 @@ class TestLengthTarget:
         assert "tokens in total" not in text  # no token target to ignore
         assert "at most 1 bullets" in _with_condense_limits("BASE", 10, 2_048)
 
+    @staticmethod
+    def _expected_bullets(estimator, nodes, max_tokens):
+        text = "\n\n---\n\n".join(f"[Summary {i + 1}]:\n{n.content}" for i, n in enumerate(nodes))
+        return max(1, _length_target(estimator.estimate(text), max_tokens) // (8 * 35))
+
     async def test_condense_level1_asks_for_half_within_output_cap(self, estimator, budget):
-        """A1: the 3 real-run leaves (1005/624/695 tokens) under a 2,048-token cap."""
-        nodes = _nodes()
-        nodes[0].token_count, nodes[1].token_count, nodes[2].token_count = 1005, 624, 695
+        """A1: bullet caps derive from the text actually sent, in compaction units."""
+        nodes = _nodes(tokens_each=700)  # ~2,100 input tokens: half is under the cap
         spy = Spy()
         cand = await condense_level1(
             nodes, "m", budget, estimator, spy, model_max_output_tokens=2048
         )
         assert cand is not None
         assert spy.max_tokens == 2048
-        # Half of 2,324 is 1,162, under 75% of the cap (1,536): 1162 // (8 * 35) = 4.
-        assert "at most 4 bullets per section" in spy.prompt
-        assert "about 1162 tokens" not in spy.prompt
+        bullets = self._expected_bullets(estimator, nodes, 2048)
+        assert 2 <= bullets < 5  # derived from half the input, below the cap's 5
+        assert f"at most {bullets} bullets per section" in spy.prompt
+        assert "tokens in total" not in spy.prompt
         assert "hard limit 2048" in spy.prompt
         assert CONDENSE_LEVEL1_PROMPT.splitlines()[0] in spy.prompt
 
     async def test_condense_target_never_exceeds_cap(self, estimator, budget):
         nodes = _nodes(tokens_each=50_000)
         spy = Spy()
-        _ = await condense_level1(nodes, "m", budget, estimator, spy, model_max_output_tokens=2048)
+        _ = await condense_level1(
+            nodes,
+            "m",
+            budget,
+            estimator,
+            spy,
+            model_max_output_tokens=2048,
+            model_context_limit=1_000_000,
+        )
         assert "at most 5 bullets per section" in spy.prompt  # 1536 // 280
+
+    async def test_length_target_uses_compaction_estimator_units(self, estimator, budget):
+        """The input size behind the target is measured in the compaction model's units."""
+        dense = TokenEstimator()
+        dense._force_heuristic = True
+        dense.estimate = lambda text, model=None: len(text) // 2 or 1  # type: ignore[method-assign]
+        nodes = _nodes(tokens_each=300)
+        sparse_spy, dense_spy = Spy(), Spy()
+        _ = await condense_level1(
+            nodes, "m", budget, estimator, sparse_spy, model_max_output_tokens=4096
+        )
+        _ = await condense_level1(
+            nodes,
+            "m",
+            budget,
+            estimator,
+            dense_spy,
+            model_max_output_tokens=4096,
+            compaction_estimator=dense,
+        )
+        n_sparse = int(re.search(r"at most (\d+) bullets", sparse_spy.prompt).group(1))
+        n_dense = int(re.search(r"at most (\d+) bullets", dense_spy.prompt).group(1))
+        assert n_dense > n_sparse
 
     async def test_summarise_level1_default_prompt_gets_target(self, estimator, budget):
         spy = Spy()

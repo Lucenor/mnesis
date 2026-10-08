@@ -356,3 +356,16 @@ class TestContextOrder:
         items = [i for t, i in await store.get_context_items(session_id) if t == "summary"]
         final = [min(leaves(i)) for i in items]
         assert final == sorted(final), final
+
+
+class TestFitCountsFraming:
+    def test_joiners_and_wrapper_count_against_the_cap(self, est):
+        from mnesis.compaction.levels import _fit_condensation_nodes
+
+        nodes = [_big_node(i, est, 100) for i in range(3)]
+        texts = ["x" * 400] * 3  # 100 heuristic tokens each: 300 in all
+        # 75% of 400 is 300: the bare texts would just fit, the framing tips it over.
+        fitted = _fit_condensation_nodes(
+            nodes, texts, est, 400, reserved_tokens=0, level=1, separator="\n\n---\n\n"
+        )
+        assert [n.id for n in fitted] == ["node_0", "node_1"]

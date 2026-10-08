@@ -470,7 +470,10 @@ async def level1_summarise(
         # An explicit length target lets a verbose model finish under the output
         # cap instead of being cut off (and discarded). A custom prompt is left as is.
         prompt = _with_length_target(
-            prompt, _length_target(input_token_count, max_tokens), max_tokens
+            # Target and ``max_tokens`` are both the compaction model's units.
+            prompt,
+            _length_target(cap_estimator.estimate(transcript), max_tokens),
+            max_tokens,
         )
     prompt_messages = [
         {
@@ -937,6 +940,11 @@ def level3_deterministic(
 # ── Condensation ───────────────────────────────────────────────────────────────
 
 
+_SUMMARIES_WRAPPER = "<summaries>\n\n</summaries>"
+_CONDENSE_L1_SEPARATOR = "\n\n---\n\n"
+_CONDENSE_L2_SEPARATOR = "\n\n"
+
+
 def _fit_condensation_nodes(
     nodes: list[SummaryNode],
     texts: list[str],
@@ -944,6 +952,7 @@ def _fit_condensation_nodes(
     model_context_limit: int,
     reserved_tokens: int,
     level: int,
+    separator: str,
 ) -> list[SummaryNode]:
     """Oldest-first prefix of *nodes* whose rendered *texts* fit the compaction model.
 
@@ -967,10 +976,12 @@ def _fit_condensation_nodes(
         int(model_context_limit * MAX_SUMMARISATION_INPUT_FRACTION),
         model_context_limit - reserved_tokens,
     )
-    used = 0
+    # The joiners between summaries and the ``<summaries>`` wrapper are sent too.
+    joiner = cap_estimator.estimate(separator)
+    used = cap_estimator.estimate(_SUMMARIES_WRAPPER)
     count = 0
     for text in texts:
-        tokens = cap_estimator.estimate(text)
+        tokens = cap_estimator.estimate(text) + (joiner if count else 0)
         if used + tokens > max_input:
             break
         used += tokens
@@ -1043,6 +1054,7 @@ async def condense_level1(
         model_context_limit,
         reserved_tokens=max_tokens + cap_estimator.estimate(sized_prompt),
         level=1,
+        separator=_CONDENSE_L1_SEPARATOR,
     )
     if not nodes:
         return None
@@ -1052,12 +1064,13 @@ async def condense_level1(
 
     file_paths = collect_file_id_paths_from_nodes(nodes)
 
-    summaries_text = "\n\n---\n\n".join(
+    summaries_text = _CONDENSE_L1_SEPARATOR.join(
         f"[Summary {i + 1}]:\n{node.content}" for i, node in enumerate(nodes)
     )
     # Condensation must shrink its input: derive per-section bullet caps from about
     # half of it (within the output cap) so the first level can succeed.
-    input_tokens = sum(n.token_count for n in nodes)
+    # In the compaction model's units, like ``max_tokens`` (not the session's).
+    input_tokens = cap_estimator.estimate(summaries_text)
     prompt = _with_condense_limits(
         CONDENSE_LEVEL1_PROMPT, _length_target(input_tokens, max_tokens), max_tokens
     )
@@ -1160,6 +1173,7 @@ async def condense_level2(
         model_context_limit,
         reserved_tokens=max_tokens + cap_estimator.estimate(CONDENSE_LEVEL2_PROMPT),
         level=2,
+        separator=_CONDENSE_L2_SEPARATOR,
     )
     if not nodes:
         return None
@@ -1167,7 +1181,7 @@ async def condense_level2(
     file_ids = collect_file_ids_from_nodes(nodes)
     file_paths = collect_file_id_paths_from_nodes(nodes)
 
-    summaries_text = "\n\n".join(excerpts[: len(nodes)])
+    summaries_text = _CONDENSE_L2_SEPARATOR.join(excerpts[: len(nodes)])
     prompt_messages = [
         {
             "role": "user",
