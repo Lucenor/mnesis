@@ -54,7 +54,7 @@ dev = [
     "freezegun==1.5.5",
     "hypothesis==6.168.5",
     "matplotlib==3.11.2",
-    "numpy==2.5.3",
+    "numpy==2.5.4",
     "tqdm==4.70.1",
     "types-tqdm==4.70.0.20260906",
 ]
