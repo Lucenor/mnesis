@@ -52,7 +52,7 @@ dev = [
     "types-PyYAML==6.0.12.20260906",
     "respx==0.23.1",
     "freezegun==1.5.5",
-    "hypothesis==6.168.5",
+    "hypothesis==6.170.1",
     "matplotlib==3.11.2",
     "numpy==2.5.3",
     "tqdm==4.70.1",
