@@ -46,7 +46,7 @@ dev = [
     "pytest-asyncio==1.4.0",
     "pytest-cov==7.1.0",
     "pytest-mock==3.16.0",
-    "ruff==0.16.10",
+    "ruff==0.17.2",
     "mypy==2.4.0",
     "types-jsonschema==4.26.0.20261006",
     "types-PyYAML==6.0.12.20260906",
